@@ -586,17 +586,43 @@ select {
 }
 
 .note-editor ul[data-type="taskList"] {
-  padding-left: 20px;
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
 }
 
 .note-editor ul[data-type="taskList"] li {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
 }
 
-.note-editor ul[data-type="taskList"] li[data-checked="true"] {
+.note-editor ul[data-type="taskList"] li > label {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  margin-top: 2px;
+  user-select: none;
+}
+
+.note-editor ul[data-type="taskList"] li > div {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.note-editor ul[data-type="taskList"] li > div > p {
+  margin: 0 0 10px;
+}
+
+.note-editor ul[data-type="taskList"] li:last-child > div > p {
+  margin-bottom: 0;
+}
+
+.note-editor ul[data-type="taskList"] li[data-checked="true"] > div {
   opacity: 0.6;
+}
+
+.note-editor ul[data-type="taskList"] li[data-checked="true"] > div > p {
   text-decoration: line-through;
 }
 
