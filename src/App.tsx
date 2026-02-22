@@ -517,6 +517,15 @@ export default function App() {
             editor.chain().focus().toggleItalic().run();
             return;
 
+          case "toggleChecklist":
+            if (!editor) {
+              return;
+            }
+
+            event.preventDefault();
+            editor.chain().focus().toggleTaskList().run();
+            return;
+
           default:
             return;
         }

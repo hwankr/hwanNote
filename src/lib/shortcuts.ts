@@ -10,7 +10,8 @@ export type ShortcutAction =
   | "newNote"
   | "closeTab"
   | "toggleBold"
-  | "toggleItalic";
+  | "toggleItalic"
+  | "toggleChecklist";
 
 export interface ShortcutCombo {
   mod: boolean;
@@ -72,7 +73,8 @@ export const SHORTCUT_ACTIONS: ShortcutAction[] = [
   "newNote",
   "closeTab",
   "toggleBold",
-  "toggleItalic"
+  "toggleItalic",
+  "toggleChecklist"
 ];
 
 export const SHORTCUT_DEFINITIONS: Record<ShortcutAction, ShortcutDefinition> = {
@@ -115,6 +117,11 @@ export const SHORTCUT_DEFINITIONS: Record<ShortcutAction, ShortcutDefinition> = 
     labelKey: "shortcut.action.toggleItalic",
     context: "editor",
     defaultCombo: { mod: true, alt: false, shift: false, key: "i" }
+  },
+  toggleChecklist: {
+    labelKey: "shortcut.action.toggleChecklist",
+    context: "editor",
+    defaultCombo: { mod: true, alt: false, shift: true, key: "x" }
   }
 };
 
@@ -125,7 +132,7 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
   },
   {
     labelKey: "shortcut.group.editor",
-    actions: ["toggleBold", "toggleItalic"]
+    actions: ["toggleBold", "toggleItalic", "toggleChecklist"]
   }
 ];
 
