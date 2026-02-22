@@ -94,6 +94,12 @@ select {
   background: var(--bg-hover);
 }
 
+.titlebar-menu-btn {
+  width: auto;
+  min-width: 56px;
+  padding: 0 10px;
+}
+
 .tabs {
   display: flex;
   gap: 6px;

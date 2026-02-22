@@ -69,7 +69,7 @@ export default function TitleBar({
       <div className="titlebar-left">
         <button
           type="button"
-          className="titlebar-btn no-drag"
+          className="titlebar-btn titlebar-menu-btn no-drag"
           aria-label={t("titlebar.toggleSidebar")}
           onClick={onToggleSidebar}
         >
