@@ -502,13 +502,13 @@ select {
   display: flex;
   flex: 1;
   min-width: 0;
-  padding: 24px 28px;
   overflow: auto;
 }
 
 .note-editor {
   width: 100%;
   min-height: 100%;
+  padding: 24px 28px;
   outline: none;
   font-family: "맑은 고딕", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
   font-size: 14px;
