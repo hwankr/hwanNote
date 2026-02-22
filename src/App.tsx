@@ -48,8 +48,106 @@ function normalizeFolderPath(path: string) {
   return normalized || "inbox";
 }
 
-function toMarkdownDocument(title: string, plainText: string, fallbackTitle: string) {
-  const normalizedBody = plainText.replace(/\r?\n/g, "\n").trimEnd();
+function htmlToMarkdownWithTasks(contentHtml: string) {
+  const parser = new DOMParser();
+  const document = parser.parseFromString(contentHtml, "text/html");
+  const lines: string[] = [];
+
+  const extractText = (element: Element) =>
+    element.textContent?.replace(/\r?\n/g, " ").replace(/\s+/g, " ").trim() ?? "";
+  const normalizeText = (text: string) => text.replace(/\r?\n/g, " ").replace(/\s+/g, " ").trim();
+
+  const extractTaskItemText = (container: Element) => {
+    const segments: string[] = [];
+
+    container.childNodes.forEach((child) => {
+      if (child.nodeType === Node.TEXT_NODE) {
+        const text = normalizeText(child.textContent ?? "");
+        if (text) {
+          segments.push(text);
+        }
+        return;
+      }
+
+      if (!(child instanceof Element)) {
+        return;
+      }
+
+      if (child.matches('ul[data-type="taskList"]')) {
+        return;
+      }
+
+      const text = normalizeText(child.textContent ?? "");
+      if (text) {
+        segments.push(text);
+      }
+    });
+
+    return segments.join(" ").trim();
+  };
+
+  const pushTaskList = (list: Element, depth: number) => {
+    const taskItems = Array.from(list.children).filter((child) => child.matches('li[data-type="taskItem"]'));
+
+    taskItems.forEach((item) => {
+      const checked =
+        item.getAttribute("data-checked") === "true" ||
+        item.querySelector('label > input[type="checkbox"]')?.hasAttribute("checked");
+      const content = item.querySelector(":scope > div");
+      const itemText = content ? extractTaskItemText(content) : extractText(item);
+      const prefix = `${"  ".repeat(Math.max(0, depth))}- [${checked ? "x" : " "}]`;
+      lines.push(itemText ? `${prefix} ${itemText}` : prefix);
+
+      const nestedTaskLists = content
+        ? Array.from(content.children).filter((child) => child.matches('ul[data-type="taskList"]'))
+        : [];
+      nestedTaskLists.forEach((nested) => pushTaskList(nested, depth + 1));
+    });
+  };
+
+  Array.from(document.body.childNodes).forEach((node) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      const text = node.textContent?.replace(/\r?\n/g, "\n").trim();
+      if (text) {
+        lines.push(text);
+      }
+      return;
+    }
+
+    if (!(node instanceof Element)) {
+      return;
+    }
+
+    if (node.matches('ul[data-type="taskList"]')) {
+      pushTaskList(node, 0);
+      return;
+    }
+
+    if (node.matches("p")) {
+      const text = extractText(node);
+      lines.push(text);
+      return;
+    }
+
+    if (node.matches("h1, h2, h3, h4, h5, h6")) {
+      const text = extractText(node);
+      if (text) {
+        lines.push(text);
+      }
+      return;
+    }
+
+    const text = extractText(node);
+    lines.push(text);
+  });
+
+  return lines.join("\n").replace(/\n{3,}/g, "\n\n");
+}
+
+function toMarkdownDocument(title: string, plainText: string, contentHtml: string, fallbackTitle: string) {
+  const hasTaskList = /<ul[^>]*data-type=(['"])taskList\1/i.test(contentHtml);
+  const sourceText = hasTaskList ? htmlToMarkdownWithTasks(contentHtml) : plainText;
+  const normalizedBody = sourceText.replace(/\r?\n/g, "\n").trimEnd();
   if (normalizedBody) {
     return `${normalizedBody}\n`;
   }
@@ -372,7 +470,12 @@ export default function App() {
     }
 
     try {
-      const markdown = toMarkdownDocument(activeTab.title, activeTab.plainText, t("common.untitled"));
+      const markdown = toMarkdownDocument(
+        activeTab.title,
+        activeTab.plainText,
+        activeTab.content,
+        t("common.untitled")
+      );
       await noteApi.autoSave(
         activeTab.id,
         activeTab.title,

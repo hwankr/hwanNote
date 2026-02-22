@@ -73,12 +73,17 @@ function deriveTitle(markdownText: string) {
     return "제목 없음";
   }
 
-  const stripped = firstLine.replace(/^#{1,3}\s+/, "");
+  const stripped = firstLine.replace(/^#{1,3}\s+/, "").replace(/^- \[[ xX]\]\s*/, "");
   return stripped || "제목 없음";
 }
 
 function markdownToPlainText(markdownText: string) {
-  return markdownText.replace(/\r\n/g, "\n").trimEnd();
+  return markdownText
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/^(\s*)- \[[ xX]\]\s*/, "$1"))
+    .join("\n")
+    .trimEnd();
 }
 
 function escapeHtml(text: string) {
@@ -90,21 +95,116 @@ function escapeHtml(text: string) {
     .replace(/'/g, "&#39;");
 }
 
-function plainTextToHtml(plainText: string) {
-  const normalized = plainText.replace(/\r\n/g, "\n");
+function markdownToHtml(markdownText: string) {
+  const normalized = markdownText.replace(/\r\n/g, "\n");
   if (!normalized.trim()) {
     return "<p></p>";
   }
 
-  return normalized
-    .split("\n")
-    .map((line) => {
-      if (!line.trim()) {
-        return "<p><br></p>";
+  interface TaskNode {
+    checked: boolean;
+    text: string;
+    depth: number;
+    children: TaskNode[];
+  }
+
+  const lines = normalized.split("\n");
+  const html: string[] = [];
+  const checklistPattern = /^(\s*)-\s+\[([ xX])\]\s*(.*)$/;
+  let inCodeFence = false;
+  let lineIndex = 0;
+
+  const renderTaskNodes = (nodes: TaskNode[]): string => {
+    const renderNode = (node: TaskNode): string => {
+      const checkedAttr = node.checked ? ' checked="checked"' : "";
+      const text = escapeHtml(node.text);
+      const nestedHtml = node.children.length > 0 ? renderTaskNodes(node.children) : "";
+
+      return (
+        `<li data-type="taskItem" data-checked="${node.checked ? "true" : "false"}">` +
+          `<label><input type="checkbox"${checkedAttr}><span></span></label>` +
+          `<div><p>${text || "<br>"}</p>${nestedHtml}</div>` +
+        "</li>"
+      );
+    };
+
+    return `<ul data-type="taskList">${nodes.map(renderNode).join("")}</ul>`;
+  };
+
+  while (lineIndex < lines.length) {
+    const line = lines[lineIndex];
+    const trimmed = line.trim();
+
+    if (trimmed.startsWith("```")) {
+      inCodeFence = !inCodeFence;
+      html.push(`<p>${escapeHtml(line)}</p>`);
+      lineIndex += 1;
+      continue;
+    }
+
+    if (!inCodeFence && checklistPattern.test(line)) {
+      const taskLines: Array<{ indent: number; checked: boolean; text: string }> = [];
+
+      while (lineIndex < lines.length) {
+        const taskLine = lines[lineIndex];
+        if (!taskLine.trim() || !checklistPattern.test(taskLine)) {
+          break;
+        }
+
+        const match = taskLine.match(checklistPattern);
+        if (!match) {
+          break;
+        }
+
+        const indent = match[1].replace(/\t/g, "  ").length;
+        const depth = Math.max(0, Math.floor(indent / 2));
+        const checked = match[2].toLowerCase() === "x";
+        taskLines.push({
+          indent: depth,
+          checked,
+          text: match[3] ?? ""
+        });
+        lineIndex += 1;
       }
-      return `<p>${escapeHtml(line)}</p>`;
-    })
-    .join("");
+
+      const roots: TaskNode[] = [];
+      const stack: TaskNode[] = [];
+
+      taskLines.forEach((taskLine) => {
+        const node: TaskNode = {
+          checked: taskLine.checked,
+          text: taskLine.text,
+          depth: taskLine.indent,
+          children: []
+        };
+
+        const safeDepth = Math.min(node.depth, stack.length);
+        while (stack.length > safeDepth) {
+          stack.pop();
+        }
+
+        if (stack.length === 0) {
+          roots.push(node);
+        } else {
+          stack[stack.length - 1].children.push(node);
+        }
+
+        stack.push(node);
+      });
+
+      html.push(renderTaskNodes(roots));
+      continue;
+    }
+
+    if (!trimmed) {
+      html.push("<p><br></p>");
+    } else {
+      html.push(`<p>${escapeHtml(line)}</p>`);
+    }
+    lineIndex += 1;
+  }
+
+  return html.join("");
 }
 
 function getIndexPath(autoSaveDir: string) {
@@ -338,7 +438,7 @@ export async function loadMarkdownNotes(documentsDir: string): Promise<LoadedNot
       title,
       isTitleManual: Boolean(entry.manualTitle?.trim()),
       plainText,
-      content: plainTextToHtml(plainText),
+      content: markdownToHtml(markdown),
       folderPath,
       createdAt: entry.createdAt,
       updatedAt: fileStat.mtimeMs,
