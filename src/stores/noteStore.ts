@@ -1,4 +1,4 @@
-import { create } from "zustand";
+﻿import { create } from "zustand";
 
 export interface NoteTab {
   id: string;
@@ -6,6 +6,7 @@ export interface NoteTab {
   content: string;
   plainText: string;
   isDirty: boolean;
+  isPinned: boolean;
   updatedAt: number;
 }
 
@@ -16,6 +17,11 @@ interface NoteStore {
   createTab: () => void;
   setActiveTab: (id: string) => void;
   closeTab: (id: string) => void;
+  closeOtherTabs: (id: string) => void;
+  reorderTabs: (sourceId: string, targetId: string) => void;
+  togglePinTab: (id: string) => void;
+  activateNextTab: () => void;
+  activatePrevTab: () => void;
   updateActiveContent: (content: string, plainText: string) => void;
   markTabSaved: (id: string) => void;
   toggleSidebar: () => void;
@@ -32,20 +38,21 @@ function deriveTitle(plainText: string) {
     .find(Boolean);
 
   if (!firstLine) {
-    return "제목 없음";
+    return "\uC81C\uBAA9 \uC5C6\uC74C";
   }
 
   const stripped = firstLine.replace(/^#{1,3}\s+/, "");
-  return stripped.slice(0, 50) || "제목 없음";
+  return stripped.slice(0, 50) || "\uC81C\uBAA9 \uC5C6\uC74C";
 }
 
 function createEmptyTab(): NoteTab {
   return {
     id: createId(),
-    title: "제목 없음",
+    title: "\uC81C\uBAA9 \uC5C6\uC74C",
     content: "<p></p>",
     plainText: "",
     isDirty: false,
+    isPinned: false,
     updatedAt: Date.now()
   };
 }
@@ -97,6 +104,86 @@ export const useNoteStore = create<NoteStore>((set, get) => {
           activeTabId: nextActiveId
         };
       });
+    },
+    closeOtherTabs: (id) => {
+      set((state) => {
+        const target = state.tabs.find((tab) => tab.id === id);
+        if (!target) {
+          return state;
+        }
+
+        const keptTabs = state.tabs.filter((tab) => tab.id === id || tab.isPinned);
+        const dedupedTabs = keptTabs.filter(
+          (tab, index, array) => array.findIndex((candidate) => candidate.id === tab.id) === index
+        );
+
+        const nextTabs = dedupedTabs.length > 0 ? dedupedTabs : [createEmptyTab()];
+        const nextActiveId = nextTabs.some((tab) => tab.id === id) ? id : nextTabs[0].id;
+
+        return {
+          tabs: nextTabs,
+          activeTabId: nextActiveId
+        };
+      });
+    },
+    reorderTabs: (sourceId, targetId) => {
+      if (sourceId === targetId) {
+        return;
+      }
+
+      set((state) => {
+        const sourceIndex = state.tabs.findIndex((tab) => tab.id === sourceId);
+        const targetIndex = state.tabs.findIndex((tab) => tab.id === targetId);
+
+        if (sourceIndex === -1 || targetIndex === -1) {
+          return state;
+        }
+
+        const nextTabs = [...state.tabs];
+        const [movedTab] = nextTabs.splice(sourceIndex, 1);
+        nextTabs.splice(targetIndex, 0, movedTab);
+
+        return {
+          tabs: nextTabs
+        };
+      });
+    },
+    togglePinTab: (id) => {
+      set((state) => ({
+        tabs: state.tabs.map((tab) =>
+          tab.id === id ? { ...tab, isPinned: !tab.isPinned, updatedAt: Date.now() } : tab
+        )
+      }));
+    },
+    activateNextTab: () => {
+      const { tabs, activeTabId } = get();
+      if (tabs.length <= 1) {
+        return;
+      }
+
+      const currentIndex = tabs.findIndex((tab) => tab.id === activeTabId);
+      if (currentIndex === -1) {
+        set({ activeTabId: tabs[0].id });
+        return;
+      }
+
+      const nextIndex = (currentIndex + 1) % tabs.length;
+      set({ activeTabId: tabs[nextIndex].id });
+    },
+    activatePrevTab: () => {
+      const { tabs, activeTabId } = get();
+      if (tabs.length <= 1) {
+        return;
+      }
+
+      const currentIndex = tabs.findIndex((tab) => tab.id === activeTabId);
+      if (currentIndex === -1) {
+        set({ activeTabId: tabs[0].id });
+        return;
+      }
+
+      const prevIndex = (currentIndex - 1 + tabs.length) % tabs.length;
+      set({ activeTabId: tabs[prevIndex].id });
     },
     updateActiveContent: (content, plainText) => {
       set((state) => ({

@@ -1,4 +1,4 @@
-import { Editor as TiptapEditor } from "@tiptap/react";
+﻿import { Editor as TiptapEditor } from "@tiptap/react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Editor from "./components/Editor";
 import SearchBar from "./components/SearchBar";
@@ -21,6 +21,11 @@ export default function App() {
   const createTab = useNoteStore((state) => state.createTab);
   const setActiveTab = useNoteStore((state) => state.setActiveTab);
   const closeTab = useNoteStore((state) => state.closeTab);
+  const closeOtherTabs = useNoteStore((state) => state.closeOtherTabs);
+  const reorderTabs = useNoteStore((state) => state.reorderTabs);
+  const togglePinTab = useNoteStore((state) => state.togglePinTab);
+  const activateNextTab = useNoteStore((state) => state.activateNextTab);
+  const activatePrevTab = useNoteStore((state) => state.activatePrevTab);
   const updateActiveContent = useNoteStore((state) => state.updateActiveContent);
   const markTabSaved = useNoteStore((state) => state.markTabSaved);
   const toggleSidebar = useNoteStore((state) => state.toggleSidebar);
@@ -77,14 +82,27 @@ export default function App() {
 
       const key = event.key.toLowerCase();
 
+      if (event.key === "Tab") {
+        event.preventDefault();
+        if (event.shiftKey) {
+          activatePrevTab();
+          return;
+        }
+
+        activateNextTab();
+        return;
+      }
+
       if (key === "s") {
         event.preventDefault();
         handleManualSave();
+        return;
       }
 
       if (key === "n" && !event.shiftKey) {
         event.preventDefault();
         createTab();
+        return;
       }
 
       if (key === "w" && activeTab) {
@@ -95,13 +113,21 @@ export default function App() {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [activeTab, closeTab, createTab, handleManualSave]);
+  }, [
+    activeTab,
+    activateNextTab,
+    activatePrevTab,
+    closeTab,
+    createTab,
+    handleManualSave
+  ]);
 
   const handleToggleMaximize = useCallback(async () => {
     const winApi = window.hwanNote?.window;
     if (!winApi) {
       return;
     }
+
     const nextState = await winApi.toggleMaximize();
     setIsMaximized(nextState);
   }, []);
@@ -115,6 +141,9 @@ export default function App() {
         onToggleSidebar={toggleSidebar}
         onSelectTab={setActiveTab}
         onCloseTab={closeTab}
+        onCloseOtherTabs={closeOtherTabs}
+        onTogglePinTab={togglePinTab}
+        onReorderTabs={reorderTabs}
         onCreateTab={createTab}
         onMinimize={() => void window.hwanNote?.window.minimize()}
         onToggleMaximize={() => void handleToggleMaximize()}
