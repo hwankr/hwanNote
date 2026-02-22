@@ -1,4 +1,6 @@
 import { type KeyboardEvent, useState } from "react";
+import { useI18n } from "../i18n/context";
+import type { AppLanguage } from "../i18n/messages";
 import {
   SHORTCUT_DEFINITIONS,
   SHORTCUT_GROUPS,
@@ -33,6 +35,7 @@ export default function SettingsPanel({
   onResetShortcuts,
   onClose
 }: SettingsPanelProps) {
+  const { t, language, setLanguage } = useI18n();
   const [listeningAction, setListeningAction] = useState<ShortcutAction | null>(null);
   const [shortcutHint, setShortcutHint] = useState("");
 
@@ -42,7 +45,11 @@ export default function SettingsPanel({
 
   const startCapture = (action: ShortcutAction) => {
     setListeningAction(action);
-    setShortcutHint(`Press a new shortcut for "${SHORTCUT_DEFINITIONS[action].label}". (Esc to cancel)`);
+    setShortcutHint(
+      t("settings.shortcutCaptureStarted", {
+        action: t(SHORTCUT_DEFINITIONS[action].labelKey)
+      })
+    );
   };
 
   const handleShortcutKeyDown =
@@ -58,66 +65,84 @@ export default function SettingsPanel({
 
       const nextCombo = shortcutFromKeyboardEvent(event.nativeEvent);
       if (!nextCombo) {
-        setShortcutHint("Use Ctrl/Cmd or Alt with another key.");
+        setShortcutHint(t("settings.shortcutUseModifier"));
         return;
       }
 
       const result = onShortcutChange(action, nextCombo);
       if (!result.ok && result.conflictAction) {
         setShortcutHint(
-          `"${formatShortcut(nextCombo)}" is already used by "${SHORTCUT_DEFINITIONS[result.conflictAction].label}".`
+          t("settings.shortcutConflict", {
+            combo: formatShortcut(nextCombo),
+            action: t(SHORTCUT_DEFINITIONS[result.conflictAction].labelKey)
+          })
         );
         return;
       }
 
       setListeningAction(null);
-      setShortcutHint(`Updated: ${SHORTCUT_DEFINITIONS[action].label} -> ${formatShortcut(nextCombo)}`);
+      setShortcutHint(
+        t("settings.shortcutUpdated", {
+          action: t(SHORTCUT_DEFINITIONS[action].labelKey),
+          combo: formatShortcut(nextCombo)
+        })
+      );
     };
 
   const handleResetShortcuts = () => {
     onResetShortcuts();
     setListeningAction(null);
-    setShortcutHint("All shortcuts restored to default values.");
+    setShortcutHint(t("settings.shortcutResetDone"));
   };
 
   return (
     <div className="settings-overlay no-drag" onClick={onClose}>
       <section className="settings-panel" onClick={(event) => event.stopPropagation()}>
         <div className="settings-header">
-          <h2>Settings</h2>
-          <button type="button" onClick={onClose} aria-label="Close settings">
-            Close
+          <h2>{t("settings.title")}</h2>
+          <button type="button" onClick={onClose} aria-label={t("settings.closeAria")}>
+            {t("settings.close")}
           </button>
         </div>
 
         <div className="settings-body">
           <div className="settings-item">
-            <label htmlFor="theme-mode">Theme Mode</label>
+            <label htmlFor="theme-mode">{t("settings.themeMode")}</label>
             <select
               id="theme-mode"
               value={themeMode}
               onChange={(event) => onThemeModeChange(event.target.value as ThemeMode)}
             >
-              <option value="light">Light</option>
-              <option value="dark">Dark</option>
-              <option value="system">Use System</option>
+              <option value="light">{t("settings.themeLight")}</option>
+              <option value="dark">{t("settings.themeDark")}</option>
+              <option value="system">{t("settings.themeSystem")}</option>
             </select>
           </div>
 
           <div className="settings-item">
-            <label>Auto-save Directory</label>
-            <div className="settings-readonly">{autoSaveDir || "Checking..."}</div>
+            <label htmlFor="language">{t("settings.language")}</label>
+            <select
+              id="language"
+              value={language}
+              onChange={(event) => setLanguage(event.target.value as AppLanguage)}
+            >
+              <option value="ko">{t("settings.languageKo")}</option>
+              <option value="en">{t("settings.languageEn")}</option>
+            </select>
           </div>
 
           <div className="settings-item">
-            <label>Keyboard Shortcuts</label>
-            <div className="settings-shortcut-help">
-              Click a shortcut, press a new key combo, then release keys. Esc cancels capture.
-            </div>
+            <label>{t("settings.autoSaveDir")}</label>
+            <div className="settings-readonly">{autoSaveDir || t("settings.autoSaveLoading")}</div>
+          </div>
+
+          <div className="settings-item">
+            <label>{t("settings.shortcuts")}</label>
+            <div className="settings-shortcut-help">{t("settings.shortcutHelp")}</div>
 
             {SHORTCUT_GROUPS.map((group) => (
-              <div className="shortcut-group" key={group.label}>
-                <div className="shortcut-group-title">{group.label}</div>
+              <div className="shortcut-group" key={group.labelKey}>
+                <div className="shortcut-group-title">{t(group.labelKey)}</div>
                 <div className="shortcut-list">
                   {group.actions.map((action) => {
                     const isListening = listeningAction === action;
@@ -125,7 +150,7 @@ export default function SettingsPanel({
 
                     return (
                       <div className="shortcut-row" key={action}>
-                        <span className="shortcut-name">{SHORTCUT_DEFINITIONS[action].label}</span>
+                        <span className="shortcut-name">{t(SHORTCUT_DEFINITIONS[action].labelKey)}</span>
                         <button
                           type="button"
                           className={`shortcut-capture${isListening ? " listening" : ""}`}
@@ -138,7 +163,7 @@ export default function SettingsPanel({
                             }
                           }}
                         >
-                          {isListening ? "Press keys..." : comboText}
+                          {isListening ? t("settings.shortcutPressKeys") : comboText}
                         </button>
                       </div>
                     );
@@ -148,7 +173,7 @@ export default function SettingsPanel({
             ))}
 
             <button type="button" className="shortcut-reset-btn" onClick={handleResetShortcuts}>
-              Reset Shortcuts
+              {t("settings.resetShortcuts")}
             </button>
 
             <div className="settings-shortcut-hint">{shortcutHint || "\u00a0"}</div>

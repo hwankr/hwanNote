@@ -1,4 +1,5 @@
 ﻿import { useEffect, useMemo, useState } from "react";
+import { useI18n } from "../i18n/context";
 import type { NoteTab } from "../stores/noteStore";
 
 interface TitleBarProps {
@@ -38,6 +39,7 @@ export default function TitleBar({
   onToggleMaximize,
   onCloseWindow
 }: TitleBarProps) {
+  const { t } = useI18n();
   const [draggingTabId, setDraggingTabId] = useState<string | null>(null);
   const [dragOverTabId, setDragOverTabId] = useState<string | null>(null);
   const [menu, setMenu] = useState<ContextMenuState | null>(null);
@@ -68,10 +70,10 @@ export default function TitleBar({
         <button
           type="button"
           className="titlebar-btn no-drag"
-          aria-label="Toggle sidebar"
+          aria-label={t("titlebar.toggleSidebar")}
           onClick={onToggleSidebar}
         >
-          Menu
+          {t("titlebar.menu")}
         </button>
       </div>
 
@@ -127,7 +129,7 @@ export default function TitleBar({
               <span
                 role="button"
                 className="tab-close"
-                aria-label={`Close ${tab.title}`}
+                aria-label={t("titlebar.closeTab", { title: tab.title })}
                 onClick={(event) => {
                   event.stopPropagation();
                   onCloseTab(tab.id);
@@ -145,14 +147,19 @@ export default function TitleBar({
       </div>
 
       <div className="titlebar-right no-drag">
-        <button type="button" className="window-control" onClick={onMinimize} aria-label="Minimize">
+        <button
+          type="button"
+          className="window-control"
+          onClick={onMinimize}
+          aria-label={t("titlebar.minimize")}
+        >
           -
         </button>
         <button
           type="button"
           className="window-control"
           onClick={onToggleMaximize}
-          aria-label={isMaximized ? "Restore" : "Maximize"}
+          aria-label={isMaximized ? t("titlebar.restore") : t("titlebar.maximize")}
         >
           {isMaximized ? "R" : "M"}
         </button>
@@ -160,7 +167,7 @@ export default function TitleBar({
           type="button"
           className="window-control close"
           onClick={onCloseWindow}
-          aria-label="Close"
+          aria-label={t("titlebar.closeWindow")}
         >
           X
         </button>
@@ -179,7 +186,7 @@ export default function TitleBar({
               setMenu(null);
             }}
           >
-            Close
+            {t("titlebar.context.close")}
           </button>
           <button
             type="button"
@@ -188,7 +195,7 @@ export default function TitleBar({
               setMenu(null);
             }}
           >
-            Close others
+            {t("titlebar.context.closeOthers")}
           </button>
           <button
             type="button"
@@ -197,7 +204,7 @@ export default function TitleBar({
               setMenu(null);
             }}
           >
-            {menuTarget.isPinned ? "Unpin" : "Pin"}
+            {menuTarget.isPinned ? t("titlebar.context.unpin") : t("titlebar.context.pin")}
           </button>
         </div>
       ) : null}

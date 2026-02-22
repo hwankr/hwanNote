@@ -1,4 +1,5 @@
 ﻿import { useEffect, useMemo, useState } from "react";
+import { useI18n } from "../i18n/context";
 import type { NoteTab } from "../stores/noteStore";
 
 export interface SidebarTag {
@@ -42,7 +43,7 @@ interface FolderMenuState {
   y: number;
 }
 
-function buildFolderRows(folderPaths: string[]) {
+function buildFolderRows(folderPaths: string[], localeTag: string) {
   const normalizedSet = new Set<string>(["inbox"]);
 
   folderPaths
@@ -59,7 +60,7 @@ function buildFolderRows(folderPaths: string[]) {
     });
 
   const rows: FolderRow[] = Array.from(normalizedSet)
-    .sort((a, b) => a.localeCompare(b, "ko"))
+    .sort((a, b) => a.localeCompare(b, localeTag))
     .map((path) => {
       const segments = path.split("/");
       return {
@@ -72,9 +73,9 @@ function buildFolderRows(folderPaths: string[]) {
   return rows;
 }
 
-function formatUpdatedTime(timestamp: number) {
+function formatUpdatedTime(timestamp: number, localeTag: string) {
   const date = new Date(timestamp);
-  return date.toLocaleString("ko-KR", {
+  return date.toLocaleString(localeTag, {
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
@@ -82,18 +83,18 @@ function formatUpdatedTime(timestamp: number) {
   });
 }
 
-function buildPreview(note: NoteTab) {
+function buildPreview(note: NoteTab, emptyLabel: string) {
   const lines = note.plainText
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean);
 
   if (lines.length === 0) {
-    return "내용 없음";
+    return emptyLabel;
   }
 
   if (lines[0] === note.title) {
-    return lines.slice(1).join(" ").slice(0, 60) || "내용 없음";
+    return lines.slice(1).join(" ").slice(0, 60) || emptyLabel;
   }
 
   return lines.join(" ").slice(0, 60);
@@ -119,8 +120,9 @@ export default function Sidebar({
   onRenameFolder,
   onDeleteFolder
 }: SidebarProps) {
+  const { t, localeTag } = useI18n();
   const [folderMenu, setFolderMenu] = useState<FolderMenuState | null>(null);
-  const folderRows = useMemo(() => buildFolderRows(folders), [folders]);
+  const folderRows = useMemo(() => buildFolderRows(folders, localeTag), [folders, localeTag]);
 
   useEffect(() => {
     if (!folderMenu) {
@@ -142,10 +144,10 @@ export default function Sidebar({
   return (
     <aside className={`sidebar ${visible ? "visible" : "hidden"}`}>
       <div className="sidebar-section">
-        <h3>검색</h3>
+        <h3>{t("sidebar.search")}</h3>
         <input
           type="text"
-          placeholder="제목 + 내용 통합 검색"
+          placeholder={t("sidebar.searchPlaceholder")}
           value={searchQuery}
           onChange={(event) => onSearchChange(event.target.value)}
         />
@@ -153,12 +155,12 @@ export default function Sidebar({
 
       <div className="sidebar-section">
         <div className="sidebar-section-head">
-          <h3>폴더</h3>
+          <h3>{t("sidebar.folders")}</h3>
           <button
             type="button"
             className="sidebar-mini-btn"
             onClick={() => {
-              const nextPath = window.prompt("새 폴더 경로를 입력하세요. 예: work/project");
+              const nextPath = window.prompt(t("sidebar.newFolderPrompt"));
               if (!nextPath?.trim()) {
                 return;
               }
@@ -176,7 +178,7 @@ export default function Sidebar({
             className={`folder-item ${selectedFolder === null ? "active" : ""}`}
             onClick={() => onSelectFolder(null)}
           >
-            모든 메모
+            {t("sidebar.allNotes")}
           </button>
 
           {folderRows.map((folder) => (
@@ -210,14 +212,14 @@ export default function Sidebar({
       </div>
 
       <div className="sidebar-section">
-        <h3>태그</h3>
+        <h3>{t("sidebar.tags")}</h3>
         <div className="tag-list">
           <button
             type="button"
             className={`tag-chip ${selectedTag === null ? "active" : ""}`}
             onClick={() => onSelectTag(null)}
           >
-            전체
+            {t("sidebar.allTags")}
           </button>
 
           {tags.map((tag) => (
@@ -236,20 +238,20 @@ export default function Sidebar({
 
       <div className="sidebar-section sidebar-notes-section">
         <div className="sidebar-section-head">
-          <h3>메모 목록</h3>
+          <h3>{t("sidebar.notes")}</h3>
           <select
             value={sortMode}
             onChange={(event) => onSortModeChange(event.target.value as SortMode)}
-            aria-label="메모 정렬"
+            aria-label={t("sidebar.sortAria")}
           >
-            <option value="updated">최신순</option>
-            <option value="title">이름순</option>
-            <option value="created">생성일순</option>
+            <option value="updated">{t("sidebar.sortUpdated")}</option>
+            <option value="title">{t("sidebar.sortTitle")}</option>
+            <option value="created">{t("sidebar.sortCreated")}</option>
           </select>
         </div>
 
         <div className="note-list">
-          {notes.length === 0 ? <p className="empty-note-list">조건에 맞는 메모가 없습니다.</p> : null}
+          {notes.length === 0 ? <p className="empty-note-list">{t("sidebar.noNotes")}</p> : null}
 
           {notes.map((note) => (
             <button
@@ -265,9 +267,9 @@ export default function Sidebar({
             >
               <div className="note-item-head">
                 <span className="note-item-title">{note.title}</span>
-                <span className="note-item-date">{formatUpdatedTime(note.updatedAt)}</span>
+                <span className="note-item-date">{formatUpdatedTime(note.updatedAt, localeTag)}</span>
               </div>
-              <span className="note-item-preview">{buildPreview(note)}</span>
+              <span className="note-item-preview">{buildPreview(note, t("sidebar.emptyPreview"))}</span>
               <span className="note-item-folder">/{note.folderPath}</span>
             </button>
           ))}
@@ -283,7 +285,7 @@ export default function Sidebar({
           <button
             type="button"
             onClick={() => {
-              const renamed = window.prompt("폴더 새 이름", folderMenu.folderPath);
+              const renamed = window.prompt(t("sidebar.renameFolderPrompt"), folderMenu.folderPath);
               if (!renamed || !renamed.trim()) {
                 setFolderMenu(null);
                 return;
@@ -293,19 +295,19 @@ export default function Sidebar({
               setFolderMenu(null);
             }}
           >
-            이름 변경
+            {t("sidebar.renameFolder")}
           </button>
           <button
             type="button"
             onClick={() => {
-              const ok = window.confirm(`'${folderMenu.folderPath}' 폴더를 삭제할까요?`);
+              const ok = window.confirm(t("sidebar.deleteFolderConfirm", { path: folderMenu.folderPath }));
               if (ok) {
                 onDeleteFolder(folderMenu.folderPath);
               }
               setFolderMenu(null);
             }}
           >
-            삭제
+            {t("sidebar.deleteFolder")}
           </button>
         </div>
       ) : null}

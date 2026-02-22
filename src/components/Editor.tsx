@@ -1,4 +1,4 @@
-import Bold from "@tiptap/extension-bold";
+﻿import Bold from "@tiptap/extension-bold";
 import Link from "@tiptap/extension-link";
 import Placeholder from "@tiptap/extension-placeholder";
 import Table from "@tiptap/extension-table";
@@ -11,6 +11,7 @@ import Italic from "@tiptap/extension-italic";
 import StarterKit from "@tiptap/starter-kit";
 import { Editor as TiptapEditor, EditorContent, useEditor } from "@tiptap/react";
 import { useEffect } from "react";
+import { useI18n } from "../i18n/context";
 
 interface EditorProps {
   content: string;
@@ -52,6 +53,9 @@ const ItalicWithoutShortcut = Italic.extend({
 });
 
 export default function Editor({ content, onChange, onCursorChange, onEditorReady }: EditorProps) {
+  const { t } = useI18n();
+  const placeholderText = t("editor.placeholder");
+
   const editor = useEditor({
     extensions: [
       StarterKit.configure({
@@ -79,7 +83,7 @@ export default function Editor({ content, onChange, onCursorChange, onEditorRead
       TableHeader,
       TableCell,
       Placeholder.configure({
-        placeholder: "메모를 입력하세요..."
+        placeholder: placeholderText
       })
     ],
     content,
@@ -99,7 +103,7 @@ export default function Editor({ content, onChange, onCursorChange, onEditorRead
       const cursor = collectCursor(editor);
       onCursorChange(cursor.line, cursor.column, cursor.chars);
     }
-  });
+  }, [placeholderText]);
 
   useEffect(() => {
     onEditorReady(editor);
@@ -126,3 +130,4 @@ export default function Editor({ content, onChange, onCursorChange, onEditorRead
     </section>
   );
 }
+

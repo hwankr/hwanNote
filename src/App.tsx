@@ -7,6 +7,7 @@ import StatusBar from "./components/StatusBar";
 import TitleBar from "./components/TitleBar";
 import Toolbar from "./components/Toolbar";
 import { useAutoSave } from "./hooks/useAutoSave";
+import { useI18n } from "./i18n/context";
 import {
   SHORTCUT_ACTIONS,
   SHORTCUT_DEFINITIONS,
@@ -43,14 +44,14 @@ function normalizeFolderPath(path: string) {
   return normalized || "inbox";
 }
 
-function toMarkdownDocument(title: string, plainText: string) {
+function toMarkdownDocument(title: string, plainText: string, fallbackTitle: string) {
   const normalizedBody = plainText.replace(/\r?\n/g, "\n").trimEnd();
   if (normalizedBody) {
     return `${normalizedBody}\n`;
   }
 
-  const fallbackTitle = title.trim() || "제목 없음";
-  return `# ${fallbackTitle}\n`;
+  const safeTitle = title.trim() || fallbackTitle;
+  return `# ${safeTitle}\n`;
 }
 
 function extractTags(plainText: string) {
@@ -95,6 +96,7 @@ function resolveTheme(mode: ThemeMode, prefersDark: boolean): ThemeName {
 }
 
 export default function App() {
+  const { t, localeTag } = useI18n();
   const tabs = useNoteStore((state) => state.tabs);
   const activeTabId = useNoteStore((state) => state.activeTabId);
   const sidebarVisible = useNoteStore((state) => state.sidebarVisible);
@@ -156,8 +158,8 @@ export default function App() {
         count: tagCount,
         color: tagColor(name)
       }))
-      .sort((a, b) => a.name.localeCompare(b.name, "ko"));
-  }, [noteTags]);
+      .sort((a, b) => a.name.localeCompare(b.name, localeTag));
+  }, [localeTag, noteTags]);
 
   const folderPaths = useMemo(() => {
     const merged = new Set<string>(["inbox"]);
@@ -165,8 +167,8 @@ export default function App() {
     customFolders.forEach((path) => merged.add(normalizeFolderPath(path)));
     tabs.forEach((tab) => merged.add(normalizeFolderPath(tab.folderPath)));
 
-    return Array.from(merged).sort((a, b) => a.localeCompare(b, "ko"));
-  }, [customFolders, tabs]);
+    return Array.from(merged).sort((a, b) => a.localeCompare(b, localeTag));
+  }, [customFolders, localeTag, tabs]);
 
   const filteredNotes = useMemo(() => {
     const normalizedQuery = searchQuery.trim().toLowerCase();
@@ -203,7 +205,7 @@ export default function App() {
 
       switch (sortMode) {
         case "title":
-          return a.title.localeCompare(b.title, "ko");
+          return a.title.localeCompare(b.title, localeTag);
         case "created":
           return b.createdAt - a.createdAt;
         case "updated":
@@ -211,7 +213,7 @@ export default function App() {
           return b.updatedAt - a.updatedAt;
       }
     });
-  }, [tabs, selectedFolder, selectedTag, searchQuery, noteTags, sortMode]);
+  }, [tabs, selectedFolder, selectedTag, searchQuery, noteTags, sortMode, localeTag]);
 
   useEffect(() => {
     try {
@@ -332,13 +334,13 @@ export default function App() {
     }
 
     try {
-      const markdown = toMarkdownDocument(activeTab.title, activeTab.plainText);
+      const markdown = toMarkdownDocument(activeTab.title, activeTab.plainText, t("common.untitled"));
       await noteApi.autoSave(activeTab.id, activeTab.title, markdown, normalizeFolderPath(activeTab.folderPath));
       markTabSaved(activeTab.id);
     } catch (error) {
       console.error("Auto-save failed:", error);
     }
-  }, [activeTab, markTabSaved]);
+  }, [activeTab, markTabSaved, t]);
 
   useAutoSave({
     value: activeTab?.content ?? "",
@@ -516,13 +518,13 @@ export default function App() {
 
   const themeLabel = useMemo(() => {
     if (themeMode === "system") {
-      return "Theme: System";
+      return t("theme.system");
     }
     if (themeMode === "dark") {
-      return "Theme: Dark";
+      return t("theme.dark");
     }
-    return "Theme: Light";
-  }, [themeMode]);
+    return t("theme.light");
+  }, [themeMode, t]);
 
   return (
     <div className="app-shell">

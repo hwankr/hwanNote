@@ -1,4 +1,6 @@
-﻿interface StatusBarProps {
+﻿import { useI18n } from "../i18n/context";
+
+interface StatusBarProps {
   line: number;
   column: number;
   chars: number;
@@ -6,11 +8,13 @@
 }
 
 export default function StatusBar({ line, column, chars, themeLabel }: StatusBarProps) {
+  const { t } = useI18n();
+
   return (
     <footer className="statusbar">
-      <div className="statusbar-left">{`줄 ${line}, 열 ${column} | ${chars}자`}</div>
-      <div className="statusbar-center">마크다운</div>
-      <div className="statusbar-right">{`${themeLabel} | 100% | Windows (CRLF) | UTF-8`}</div>
+      <div className="statusbar-left">{t("status.lineColChars", { line, column, chars })}</div>
+      <div className="statusbar-center">{t("status.markdown")}</div>
+      <div className="statusbar-right">{t("status.rightInfo", { theme: themeLabel })}</div>
     </footer>
   );
 }

@@ -1,4 +1,5 @@
 ﻿import { Editor as TiptapEditor } from "@tiptap/react";
+import { useI18n } from "../i18n/context";
 
 interface ToolbarProps {
   editor: TiptapEditor | null;
@@ -6,6 +7,8 @@ interface ToolbarProps {
 }
 
 export default function Toolbar({ editor, onOpenSettings }: ToolbarProps) {
+  const { t } = useI18n();
+
   const setHeading = (value: string) => {
     if (!editor) {
       return;
@@ -46,7 +49,7 @@ export default function Toolbar({ editor, onOpenSettings }: ToolbarProps) {
     }
 
     const previousUrl = editor.getAttributes("link").href as string | undefined;
-    const url = window.prompt("링크 주소를 입력하세요.", previousUrl ?? "https://");
+    const url = window.prompt(t("toolbar.linkPrompt"), previousUrl ?? "https://");
 
     if (url === null) {
       return;
@@ -71,24 +74,28 @@ export default function Toolbar({ editor, onOpenSettings }: ToolbarProps) {
   return (
     <div className="toolbar">
       <div className="toolbar-left no-drag">
-        <button type="button">파일(F)</button>
-        <button type="button">편집(E)</button>
-        <button type="button">보기(V)</button>
+        <button type="button">{t("toolbar.file")}</button>
+        <button type="button">{t("toolbar.edit")}</button>
+        <button type="button">{t("toolbar.view")}</button>
       </div>
 
       <div className="toolbar-center no-drag">
-        <select aria-label="Heading" defaultValue="paragraph" onChange={(event) => setHeading(event.target.value)}>
-          <option value="paragraph">본문</option>
+        <select
+          aria-label={t("toolbar.headingAria")}
+          defaultValue="paragraph"
+          onChange={(event) => setHeading(event.target.value)}
+        >
+          <option value="paragraph">{t("toolbar.paragraph")}</option>
           <option value="1">H1</option>
           <option value="2">H2</option>
           <option value="3">H3</option>
         </select>
 
-        <select aria-label="List type" defaultValue="" onChange={(event) => setList(event.target.value)}>
-          <option value="">목록</option>
-          <option value="bullet">글머리 기호</option>
-          <option value="ordered">번호 매기기</option>
-          <option value="task">체크리스트</option>
+        <select aria-label={t("toolbar.listAria")} defaultValue="" onChange={(event) => setList(event.target.value)}>
+          <option value="">{t("toolbar.listDefault")}</option>
+          <option value="bullet">{t("toolbar.listBullet")}</option>
+          <option value="ordered">{t("toolbar.listOrdered")}</option>
+          <option value="task">{t("toolbar.listTask")}</option>
         </select>
 
         <button type="button" onClick={() => editor?.chain().focus().toggleBold().run()}>
@@ -98,16 +105,16 @@ export default function Toolbar({ editor, onOpenSettings }: ToolbarProps) {
           I
         </button>
         <button type="button" onClick={insertLink}>
-          링크
+          {t("toolbar.link")}
         </button>
         <button type="button" onClick={insertTable}>
-          표
+          {t("toolbar.table")}
         </button>
       </div>
 
       <div className="toolbar-right no-drag">
-        <button type="button" onClick={onOpenSettings} aria-label="설정 열기">
-          설정
+        <button type="button" onClick={onOpenSettings} aria-label={t("toolbar.openSettings")}>
+          {t("toolbar.settings")}
         </button>
       </div>
     </div>

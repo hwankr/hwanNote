@@ -1,0 +1,210 @@
+export const SUPPORTED_LANGUAGES = ["ko", "en"] as const;
+
+export type AppLanguage = (typeof SUPPORTED_LANGUAGES)[number];
+
+type MessageValue = string;
+
+type MessageDictionary = Record<string, MessageValue>;
+
+const messages = {
+  ko: {
+    "common.untitled": "제목 없음",
+    "titlebar.menu": "Menu",
+    "titlebar.toggleSidebar": "사이드바 토글",
+    "titlebar.closeTab": "{{title}} 닫기",
+    "titlebar.minimize": "최소화",
+    "titlebar.maximize": "최대화",
+    "titlebar.restore": "복원",
+    "titlebar.closeWindow": "닫기",
+    "titlebar.context.close": "닫기",
+    "titlebar.context.closeOthers": "다른 탭 닫기",
+    "titlebar.context.pin": "고정",
+    "titlebar.context.unpin": "고정 해제",
+    "toolbar.file": "파일(F)",
+    "toolbar.edit": "편집(E)",
+    "toolbar.view": "보기(V)",
+    "toolbar.headingAria": "Heading",
+    "toolbar.paragraph": "본문",
+    "toolbar.listAria": "List type",
+    "toolbar.listDefault": "목록",
+    "toolbar.listBullet": "글머리 기호",
+    "toolbar.listOrdered": "번호 매기기",
+    "toolbar.listTask": "체크리스트",
+    "toolbar.link": "링크",
+    "toolbar.table": "표",
+    "toolbar.settings": "설정",
+    "toolbar.openSettings": "설정 열기",
+    "toolbar.linkPrompt": "링크 주소를 입력하세요.",
+    "editor.placeholder": "메모를 입력하세요...",
+    "sidebar.search": "검색",
+    "sidebar.searchPlaceholder": "제목 + 내용 통합 검색",
+    "sidebar.folders": "폴더",
+    "sidebar.newFolderPrompt": "새 폴더 경로를 입력하세요. 예: work/project",
+    "sidebar.allNotes": "모든 메모",
+    "sidebar.tags": "태그",
+    "sidebar.allTags": "전체",
+    "sidebar.notes": "메모 목록",
+    "sidebar.sortAria": "메모 정렬",
+    "sidebar.sortUpdated": "최신순",
+    "sidebar.sortTitle": "이름순",
+    "sidebar.sortCreated": "생성일순",
+    "sidebar.noNotes": "조건에 맞는 메모가 없습니다.",
+    "sidebar.emptyPreview": "내용 없음",
+    "sidebar.renameFolderPrompt": "폴더 새 이름",
+    "sidebar.renameFolder": "이름 변경",
+    "sidebar.deleteFolder": "삭제",
+    "sidebar.deleteFolderConfirm": "'{{path}}' 폴더를 삭제할까요?",
+    "settings.title": "설정",
+    "settings.closeAria": "설정 닫기",
+    "settings.close": "닫기",
+    "settings.themeMode": "테마 모드",
+    "settings.themeLight": "라이트",
+    "settings.themeDark": "다크",
+    "settings.themeSystem": "시스템 설정 따르기",
+    "settings.language": "언어",
+    "settings.languageKo": "한국어",
+    "settings.languageEn": "English",
+    "settings.autoSaveDir": "자동 저장 위치",
+    "settings.autoSaveLoading": "확인 중...",
+    "settings.shortcuts": "단축키",
+    "settings.shortcutHelp": "단축키를 클릭한 뒤 새 키 조합을 입력하세요. Esc로 취소할 수 있습니다.",
+    "settings.shortcutPressKeys": "키 입력 대기...",
+    "settings.resetShortcuts": "단축키 초기화",
+    "settings.shortcutUseModifier": "Ctrl/Cmd 또는 Alt와 함께 다른 키를 입력하세요.",
+    "settings.shortcutCaptureStarted": "\"{{action}}\" 단축키를 입력하세요. (Esc로 취소)",
+    "settings.shortcutConflict": "\"{{combo}}\"는 이미 \"{{action}}\"에 사용 중입니다.",
+    "settings.shortcutUpdated": "변경됨: {{action}} -> {{combo}}",
+    "settings.shortcutResetDone": "모든 단축키를 기본값으로 복원했습니다.",
+    "shortcut.group.app": "앱",
+    "shortcut.group.editor": "에디터",
+    "shortcut.action.toggleSidebar": "사이드바 토글",
+    "shortcut.action.nextTab": "다음 탭",
+    "shortcut.action.prevTab": "이전 탭",
+    "shortcut.action.saveNote": "메모 저장",
+    "shortcut.action.newNote": "새 메모",
+    "shortcut.action.closeTab": "탭 닫기",
+    "shortcut.action.toggleBold": "굵게 토글",
+    "shortcut.action.toggleItalic": "기울임 토글",
+    "status.lineColChars": "줄 {{line}}, 열 {{column}} | {{chars}}자",
+    "status.markdown": "마크다운",
+    "status.rightInfo": "{{theme}} | 100% | Windows (CRLF) | UTF-8",
+    "theme.light": "테마: 라이트",
+    "theme.dark": "테마: 다크",
+    "theme.system": "테마: 시스템"
+  },
+  en: {
+    "common.untitled": "Untitled",
+    "titlebar.menu": "Menu",
+    "titlebar.toggleSidebar": "Toggle sidebar",
+    "titlebar.closeTab": "Close {{title}}",
+    "titlebar.minimize": "Minimize",
+    "titlebar.maximize": "Maximize",
+    "titlebar.restore": "Restore",
+    "titlebar.closeWindow": "Close",
+    "titlebar.context.close": "Close",
+    "titlebar.context.closeOthers": "Close others",
+    "titlebar.context.pin": "Pin",
+    "titlebar.context.unpin": "Unpin",
+    "toolbar.file": "File(F)",
+    "toolbar.edit": "Edit(E)",
+    "toolbar.view": "View(V)",
+    "toolbar.headingAria": "Heading",
+    "toolbar.paragraph": "Paragraph",
+    "toolbar.listAria": "List type",
+    "toolbar.listDefault": "List",
+    "toolbar.listBullet": "Bullet list",
+    "toolbar.listOrdered": "Ordered list",
+    "toolbar.listTask": "Checklist",
+    "toolbar.link": "Link",
+    "toolbar.table": "Table",
+    "toolbar.settings": "Settings",
+    "toolbar.openSettings": "Open settings",
+    "toolbar.linkPrompt": "Enter a link URL.",
+    "editor.placeholder": "Start writing your note...",
+    "sidebar.search": "Search",
+    "sidebar.searchPlaceholder": "Search title + content",
+    "sidebar.folders": "Folders",
+    "sidebar.newFolderPrompt": "Enter a new folder path, e.g. work/project",
+    "sidebar.allNotes": "All notes",
+    "sidebar.tags": "Tags",
+    "sidebar.allTags": "All",
+    "sidebar.notes": "Notes",
+    "sidebar.sortAria": "Sort notes",
+    "sidebar.sortUpdated": "Recently updated",
+    "sidebar.sortTitle": "Title",
+    "sidebar.sortCreated": "Recently created",
+    "sidebar.noNotes": "No notes match your filters.",
+    "sidebar.emptyPreview": "No content",
+    "sidebar.renameFolderPrompt": "Rename folder",
+    "sidebar.renameFolder": "Rename",
+    "sidebar.deleteFolder": "Delete",
+    "sidebar.deleteFolderConfirm": "Delete folder '{{path}}'?",
+    "settings.title": "Settings",
+    "settings.closeAria": "Close settings",
+    "settings.close": "Close",
+    "settings.themeMode": "Theme mode",
+    "settings.themeLight": "Light",
+    "settings.themeDark": "Dark",
+    "settings.themeSystem": "Use system",
+    "settings.language": "Language",
+    "settings.languageKo": "Korean",
+    "settings.languageEn": "English",
+    "settings.autoSaveDir": "Auto-save directory",
+    "settings.autoSaveLoading": "Checking...",
+    "settings.shortcuts": "Keyboard shortcuts",
+    "settings.shortcutHelp": "Click a shortcut, then press a new key combo. Press Esc to cancel capture.",
+    "settings.shortcutPressKeys": "Press keys...",
+    "settings.resetShortcuts": "Reset shortcuts",
+    "settings.shortcutUseModifier": "Use Ctrl/Cmd or Alt with another key.",
+    "settings.shortcutCaptureStarted": "Press a new shortcut for \"{{action}}\". (Esc to cancel)",
+    "settings.shortcutConflict": "\"{{combo}}\" is already used by \"{{action}}\".",
+    "settings.shortcutUpdated": "Updated: {{action}} -> {{combo}}",
+    "settings.shortcutResetDone": "All shortcuts restored to defaults.",
+    "shortcut.group.app": "App",
+    "shortcut.group.editor": "Editor",
+    "shortcut.action.toggleSidebar": "Toggle sidebar",
+    "shortcut.action.nextTab": "Next tab",
+    "shortcut.action.prevTab": "Previous tab",
+    "shortcut.action.saveNote": "Save note",
+    "shortcut.action.newNote": "New note",
+    "shortcut.action.closeTab": "Close tab",
+    "shortcut.action.toggleBold": "Toggle bold",
+    "shortcut.action.toggleItalic": "Toggle italic",
+    "status.lineColChars": "Ln {{line}}, Col {{column}} | {{chars}} chars",
+    "status.markdown": "Markdown",
+    "status.rightInfo": "{{theme}} | 100% | Windows (CRLF) | UTF-8",
+    "theme.light": "Theme: Light",
+    "theme.dark": "Theme: Dark",
+    "theme.system": "Theme: System"
+  }
+} as const satisfies Record<AppLanguage, MessageDictionary>;
+
+export type TranslationKey = keyof (typeof messages)["ko"];
+
+export function isSupportedLanguage(value: string): value is AppLanguage {
+  return SUPPORTED_LANGUAGES.includes(value as AppLanguage);
+}
+
+export function localeTagFromLanguage(language: AppLanguage) {
+  return language === "ko" ? "ko-KR" : "en-US";
+}
+
+function interpolate(template: string, vars?: Record<string, string | number>) {
+  if (!vars) {
+    return template;
+  }
+
+  return template.replace(/\{\{(\w+)\}\}/g, (_, key: string) => {
+    const value = vars[key];
+    return value === undefined ? "" : String(value);
+  });
+}
+
+export function translate(
+  language: AppLanguage,
+  key: TranslationKey,
+  vars?: Record<string, string | number>
+) {
+  const localized = messages[language][key] ?? messages.ko[key] ?? key;
+  return interpolate(localized, vars);
+}

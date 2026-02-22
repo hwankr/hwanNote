@@ -1,3 +1,5 @@
+import type { TranslationKey } from "../i18n/messages";
+
 export type ShortcutContext = "global" | "editor" | "non-editor";
 
 export type ShortcutAction =
@@ -20,7 +22,7 @@ export interface ShortcutCombo {
 export type ShortcutMap = Record<ShortcutAction, ShortcutCombo>;
 
 export interface ShortcutDefinition {
-  label: string;
+  labelKey: TranslationKey;
   context: ShortcutContext;
   defaultCombo: ShortcutCombo;
 }
@@ -31,7 +33,7 @@ export interface ShortcutValidationResult {
 }
 
 export interface ShortcutGroup {
-  label: string;
+  labelKey: TranslationKey;
   actions: ShortcutAction[];
 }
 
@@ -75,42 +77,42 @@ export const SHORTCUT_ACTIONS: ShortcutAction[] = [
 
 export const SHORTCUT_DEFINITIONS: Record<ShortcutAction, ShortcutDefinition> = {
   toggleSidebar: {
-    label: "Toggle Sidebar",
+    labelKey: "shortcut.action.toggleSidebar",
     context: "non-editor",
     defaultCombo: { mod: true, alt: false, shift: false, key: "b" }
   },
   nextTab: {
-    label: "Next Tab",
+    labelKey: "shortcut.action.nextTab",
     context: "global",
     defaultCombo: { mod: true, alt: false, shift: false, key: "tab" }
   },
   prevTab: {
-    label: "Previous Tab",
+    labelKey: "shortcut.action.prevTab",
     context: "global",
     defaultCombo: { mod: true, alt: false, shift: true, key: "tab" }
   },
   saveNote: {
-    label: "Save Note",
+    labelKey: "shortcut.action.saveNote",
     context: "global",
     defaultCombo: { mod: true, alt: false, shift: false, key: "s" }
   },
   newNote: {
-    label: "New Note",
+    labelKey: "shortcut.action.newNote",
     context: "global",
     defaultCombo: { mod: true, alt: false, shift: false, key: "n" }
   },
   closeTab: {
-    label: "Close Tab",
+    labelKey: "shortcut.action.closeTab",
     context: "global",
     defaultCombo: { mod: true, alt: false, shift: false, key: "w" }
   },
   toggleBold: {
-    label: "Toggle Bold",
+    labelKey: "shortcut.action.toggleBold",
     context: "editor",
     defaultCombo: { mod: true, alt: false, shift: false, key: "b" }
   },
   toggleItalic: {
-    label: "Toggle Italic",
+    labelKey: "shortcut.action.toggleItalic",
     context: "editor",
     defaultCombo: { mod: true, alt: false, shift: false, key: "i" }
   }
@@ -118,11 +120,11 @@ export const SHORTCUT_DEFINITIONS: Record<ShortcutAction, ShortcutDefinition> = 
 
 export const SHORTCUT_GROUPS: ShortcutGroup[] = [
   {
-    label: "App",
+    labelKey: "shortcut.group.app",
     actions: ["toggleSidebar", "nextTab", "prevTab", "saveNote", "newNote", "closeTab"]
   },
   {
-    label: "Editor",
+    labelKey: "shortcut.group.editor",
     actions: ["toggleBold", "toggleItalic"]
   }
 ];
