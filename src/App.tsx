@@ -133,6 +133,7 @@ export default function App() {
   const activateNextTab = useNoteStore((state) => state.activateNextTab);
   const activatePrevTab = useNoteStore((state) => state.activatePrevTab);
   const updateActiveContent = useNoteStore((state) => state.updateActiveContent);
+  const setActiveTitle = useNoteStore((state) => state.setActiveTitle);
   const markTabSaved = useNoteStore((state) => state.markTabSaved);
   const toggleSidebar = useNoteStore((state) => state.toggleSidebar);
 
@@ -317,6 +318,7 @@ export default function App() {
           loaded.map((note) => ({
             id: note.noteId,
             title: note.title,
+            isTitleManual: note.isTitleManual,
             content: note.content,
             plainText: note.plainText,
             isDirty: false,
@@ -371,7 +373,13 @@ export default function App() {
 
     try {
       const markdown = toMarkdownDocument(activeTab.title, activeTab.plainText, t("common.untitled"));
-      await noteApi.autoSave(activeTab.id, activeTab.title, markdown, normalizeFolderPath(activeTab.folderPath));
+      await noteApi.autoSave(
+        activeTab.id,
+        activeTab.title,
+        markdown,
+        normalizeFolderPath(activeTab.folderPath),
+        activeTab.isTitleManual
+      );
       markTabSaved(activeTab.id);
     } catch (error) {
       console.error("Auto-save failed:", error);
@@ -580,7 +588,14 @@ export default function App() {
         onCloseWindow={() => void window.hwanNote?.window.close()}
       />
 
-      <Toolbar editor={editor} onOpenSettings={() => setSettingsOpen(true)} />
+      <Toolbar
+        editor={editor}
+        activeTitle={activeTab?.title ?? ""}
+        activeTabId={activeTab?.id ?? ""}
+        isTitleManual={Boolean(activeTab?.isTitleManual)}
+        onChangeTitle={setActiveTitle}
+        onOpenSettings={() => setSettingsOpen(true)}
+      />
 
       <div className="workspace">
         <Sidebar

@@ -1,13 +1,38 @@
-﻿import { Editor as TiptapEditor } from "@tiptap/react";
+import { Editor as TiptapEditor } from "@tiptap/react";
+import { useEffect, useState } from "react";
 import { useI18n } from "../i18n/context";
 
 interface ToolbarProps {
   editor: TiptapEditor | null;
+  activeTitle: string;
+  activeTabId: string;
+  isTitleManual: boolean;
+  onChangeTitle: (title: string) => void;
   onOpenSettings: () => void;
 }
 
-export default function Toolbar({ editor, onOpenSettings }: ToolbarProps) {
+export default function Toolbar({
+  editor,
+  activeTitle,
+  activeTabId,
+  isTitleManual,
+  onChangeTitle,
+  onOpenSettings
+}: ToolbarProps) {
   const { t } = useI18n();
+  const [titleInput, setTitleInput] = useState(activeTitle);
+  const normalizeTitle = (value: string) => value.trim().slice(0, 50);
+
+  useEffect(() => {
+    setTitleInput(activeTitle);
+  }, [activeTitle, activeTabId]);
+
+  const commitTitle = () => {
+    if (normalizeTitle(titleInput) === normalizeTitle(activeTitle)) {
+      return;
+    }
+    onChangeTitle(titleInput);
+  };
 
   const setHeading = (value: string) => {
     if (!editor) {
@@ -113,6 +138,41 @@ export default function Toolbar({ editor, onOpenSettings }: ToolbarProps) {
       </div>
 
       <div className="toolbar-right no-drag">
+        <div className="toolbar-title-field">
+          <input
+            type="text"
+            value={titleInput}
+            placeholder={t("common.untitled")}
+            aria-label="Note title"
+            onChange={(event) => setTitleInput(event.target.value)}
+            onBlur={commitTitle}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                commitTitle();
+                return;
+              }
+
+              if (event.key === "Escape") {
+                event.preventDefault();
+                setTitleInput(activeTitle);
+              }
+            }}
+          />
+          {isTitleManual ? (
+            <button
+              type="button"
+              className="toolbar-title-reset"
+              onClick={() => {
+                setTitleInput("");
+                onChangeTitle("");
+              }}
+              title={t("common.untitled")}
+            >
+              x
+            </button>
+          ) : null}
+        </div>
         <button type="button" onClick={onOpenSettings} aria-label={t("toolbar.openSettings")}>
           {t("toolbar.settings")}
         </button>

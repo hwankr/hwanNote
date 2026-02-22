@@ -18,13 +18,15 @@ declare global {
           noteId: string,
           title: string,
           content: string,
-          folderPath: string
+          folderPath: string,
+          isTitleManual: boolean
         ) => Promise<{ filePath: string }>;
         getAutoSaveDir: () => Promise<string>;
         loadAll: () => Promise<
           Array<{
             noteId: string;
             title: string;
+            isTitleManual: boolean;
             plainText: string;
             content: string;
             folderPath: string;

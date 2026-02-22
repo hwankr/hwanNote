@@ -3,6 +3,7 @@
 export interface NoteTab {
   id: string;
   title: string;
+  isTitleManual: boolean;
   content: string;
   plainText: string;
   isDirty: boolean;
@@ -28,6 +29,7 @@ interface NoteStore {
   clearFolderPath: (folderPath: string) => void;
   activateNextTab: () => void;
   activatePrevTab: () => void;
+  setActiveTitle: (title: string) => void;
   updateActiveContent: (content: string, plainText: string) => void;
   markTabSaved: (id: string) => void;
   toggleSidebar: () => void;
@@ -57,6 +59,7 @@ function createEmptyTab(): NoteTab {
   return {
     id: createId(),
     title: "\uC81C\uBAA9 \uC5C6\uC74C",
+    isTitleManual: false,
     content: "<p></p>",
     plainText: "",
     isDirty: false,
@@ -260,6 +263,48 @@ export const useNoteStore = create<NoteStore>((set, get) => {
       const prevIndex = (currentIndex - 1 + tabs.length) % tabs.length;
       set({ activeTabId: tabs[prevIndex].id });
     },
+    setActiveTitle: (title) => {
+      set((state) => ({
+        tabs: state.tabs.map((tab) => {
+          if (tab.id !== state.activeTabId) {
+            return tab;
+          }
+
+          const manualTitle = title.trim().slice(0, 50);
+          const currentTitle = tab.title.trim().slice(0, 50);
+          if (manualTitle && manualTitle === currentTitle) {
+            return tab;
+          }
+
+          if (!manualTitle) {
+            const derived = deriveTitle(tab.plainText);
+            if (!tab.isTitleManual && tab.title === derived) {
+              return tab;
+            }
+
+            return {
+              ...tab,
+              title: derived,
+              isTitleManual: false,
+              isDirty: true,
+              updatedAt: Date.now()
+            };
+          }
+
+          if (tab.isTitleManual && tab.title === manualTitle) {
+            return tab;
+          }
+
+          return {
+            ...tab,
+            title: manualTitle,
+            isTitleManual: true,
+            isDirty: true,
+            updatedAt: Date.now()
+          };
+        })
+      }));
+    },
     updateActiveContent: (content, plainText) => {
       set((state) => ({
         tabs: state.tabs.map((tab) =>
@@ -268,7 +313,7 @@ export const useNoteStore = create<NoteStore>((set, get) => {
                 ...tab,
                 content,
                 plainText,
-                title: deriveTitle(plainText),
+                title: tab.isTitleManual ? tab.title : deriveTitle(plainText),
                 isDirty: true,
                 updatedAt: Date.now()
               }

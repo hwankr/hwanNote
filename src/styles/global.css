@@ -247,6 +247,31 @@ select {
   cursor: pointer;
 }
 
+.toolbar-title-field {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.toolbar-title-field input {
+  width: 220px;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  background: var(--bg-elevated);
+}
+
+.toolbar-title-reset {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  line-height: 1;
+}
+
 .searchbar {
   display: flex;
   gap: 8px;
@@ -776,6 +801,10 @@ select {
 
   .toolbar-right {
     justify-content: flex-start;
+  }
+
+  .toolbar-title-field input {
+    width: min(100%, 320px);
   }
 
   .statusbar {

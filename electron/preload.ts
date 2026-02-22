@@ -10,8 +10,8 @@ const api = {
     save: (filePath: string, content: string) => ipcRenderer.invoke("note:save", filePath, content),
     read: (filePath: string) => ipcRenderer.invoke("note:read", filePath) as Promise<string>,
     list: (dirPath: string) => ipcRenderer.invoke("note:list", dirPath) as Promise<string[]>,
-    autoSave: (noteId: string, title: string, content: string, folderPath: string) =>
-      ipcRenderer.invoke("note:auto-save", { noteId, title, content, folderPath }) as Promise<{
+    autoSave: (noteId: string, title: string, content: string, folderPath: string, isTitleManual: boolean) =>
+      ipcRenderer.invoke("note:auto-save", { noteId, title, content, folderPath, isTitleManual }) as Promise<{
         filePath: string;
       }>,
     getAutoSaveDir: () => ipcRenderer.invoke("note:get-autosave-dir") as Promise<string>,
@@ -20,6 +20,7 @@ const api = {
         Array<{
           noteId: string;
           title: string;
+          isTitleManual: boolean;
           plainText: string;
           content: string;
           folderPath: string;

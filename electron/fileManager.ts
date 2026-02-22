@@ -7,6 +7,7 @@ const INDEX_FILENAME = ".hwan-note-index.json";
 interface NoteIndexEntry {
   relativePath: string;
   createdAt: number;
+  manualTitle?: string;
 }
 
 interface NoteIndex {
@@ -187,6 +188,7 @@ export interface AutoSavePayload {
   title: string;
   content: string;
   folderPath?: string;
+  isTitleManual?: boolean;
 }
 
 export interface AutoSaveResult {
@@ -199,6 +201,7 @@ export interface AutoSaveResult {
 export interface LoadedNote {
   noteId: string;
   title: string;
+  isTitleManual: boolean;
   plainText: string;
   content: string;
   folderPath: string;
@@ -256,9 +259,11 @@ export async function autoSaveMarkdownNote(
   const fileStat = await stat(nextFilePath);
   const createdAt = existingEntry?.createdAt ?? Date.now();
 
+  const manualTitle = payload.title.trim().slice(0, 50);
   index.entries[safeId] = {
     relativePath: toPosix(relative(autoSaveDir, nextFilePath)),
-    createdAt
+    createdAt,
+    manualTitle: payload.isTitleManual && manualTitle ? manualTitle : undefined
   };
 
   await writeIndex(autoSaveDir, index);
@@ -322,7 +327,8 @@ export async function loadMarkdownNotes(documentsDir: string): Promise<LoadedNot
 
     const markdown = await readFile(filePath, "utf8");
     const plainText = markdownToPlainText(markdown);
-    const title = deriveTitle(markdown);
+    const derivedTitle = deriveTitle(markdown);
+    const title = entry.manualTitle?.trim() ? entry.manualTitle.trim() : derivedTitle;
     const relativeFolder = toPosix(dirname(entry.relativePath));
     const folderPath = relativeFolder === "." ? "inbox" : relativeFolder;
     const fileStat = await stat(filePath);
@@ -330,6 +336,7 @@ export async function loadMarkdownNotes(documentsDir: string): Promise<LoadedNot
     notes.push({
       noteId,
       title,
+      isTitleManual: Boolean(entry.manualTitle?.trim()),
       plainText,
       content: plainTextToHtml(plainText),
       folderPath,
