@@ -24,8 +24,12 @@ import { applyTheme, type ThemeName } from "./styles/themes";
 import { useNoteStore } from "./stores/noteStore";
 
 const CUSTOM_FOLDERS_KEY = "hwan-note:custom-folders";
+const EDITOR_LINE_HEIGHT_KEY = "hwan-note:editor-line-height";
 const SHORTCUTS_KEY = "hwan-note:shortcuts";
 const THEME_MODE_KEY = "hwan-note:theme-mode";
+const MIN_EDITOR_LINE_HEIGHT = 1.2;
+const MAX_EDITOR_LINE_HEIGHT = 2.2;
+const DEFAULT_EDITOR_LINE_HEIGHT = 1.55;
 
 type SortMode = "updated" | "title" | "created";
 
@@ -95,6 +99,22 @@ function resolveTheme(mode: ThemeMode, prefersDark: boolean): ThemeName {
   return mode;
 }
 
+function normalizeEditorLineHeight(value: number) {
+  if (!Number.isFinite(value)) {
+    return DEFAULT_EDITOR_LINE_HEIGHT;
+  }
+
+  if (value < MIN_EDITOR_LINE_HEIGHT) {
+    return MIN_EDITOR_LINE_HEIGHT;
+  }
+
+  if (value > MAX_EDITOR_LINE_HEIGHT) {
+    return MAX_EDITOR_LINE_HEIGHT;
+  }
+
+  return Math.round(value * 100) / 100;
+}
+
 export default function App() {
   const { t, localeTag } = useI18n();
   const tabs = useNoteStore((state) => state.tabs);
@@ -127,6 +147,7 @@ export default function App() {
   const [customFolders, setCustomFolders] = useState<string[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [themeMode, setThemeMode] = useState<ThemeMode>("light");
+  const [editorLineHeight, setEditorLineHeight] = useState(DEFAULT_EDITOR_LINE_HEIGHT);
   const [autoSaveDir, setAutoSaveDir] = useState("");
   const [shortcuts, setShortcuts] = useState<ShortcutMap>(() => createDefaultShortcuts());
 
@@ -239,14 +260,24 @@ export default function App() {
 
     try {
       const rawShortcuts = window.localStorage.getItem(SHORTCUTS_KEY);
-      if (!rawShortcuts) {
+      if (rawShortcuts) {
+        const parsed = JSON.parse(rawShortcuts) as unknown;
+        setShortcuts(parseShortcutMap(parsed));
+      }
+    } catch (error) {
+      console.warn("Failed to load shortcuts", error);
+    }
+
+    try {
+      const rawLineHeight = window.localStorage.getItem(EDITOR_LINE_HEIGHT_KEY);
+      if (!rawLineHeight) {
         return;
       }
 
-      const parsed = JSON.parse(rawShortcuts) as unknown;
-      setShortcuts(parseShortcutMap(parsed));
+      const parsed = Number.parseFloat(rawLineHeight);
+      setEditorLineHeight(normalizeEditorLineHeight(parsed));
     } catch (error) {
-      console.warn("Failed to load shortcuts", error);
+      console.warn("Failed to load editor line-height", error);
     }
   }, []);
 
@@ -261,6 +292,11 @@ export default function App() {
   useEffect(() => {
     window.localStorage.setItem(SHORTCUTS_KEY, JSON.stringify(shortcuts));
   }, [shortcuts]);
+
+  useEffect(() => {
+    window.localStorage.setItem(EDITOR_LINE_HEIGHT_KEY, String(editorLineHeight));
+    document.documentElement.style.setProperty("--editor-line-height", String(editorLineHeight));
+  }, [editorLineHeight]);
 
   useEffect(() => {
     const noteApi = window.hwanNote?.note;
@@ -619,9 +655,11 @@ export default function App() {
       <SettingsPanel
         open={settingsOpen}
         themeMode={themeMode}
+        editorLineHeight={editorLineHeight}
         autoSaveDir={autoSaveDir}
         shortcuts={shortcuts}
         onThemeModeChange={setThemeMode}
+        onEditorLineHeightChange={(value) => setEditorLineHeight(normalizeEditorLineHeight(value))}
         onShortcutChange={handleShortcutChange}
         onResetShortcuts={handleShortcutReset}
         onClose={() => setSettingsOpen(false)}

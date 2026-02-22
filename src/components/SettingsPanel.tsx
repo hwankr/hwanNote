@@ -17,9 +17,11 @@ export type ThemeMode = "light" | "dark" | "system";
 interface SettingsPanelProps {
   open: boolean;
   themeMode: ThemeMode;
+  editorLineHeight: number;
   autoSaveDir: string;
   shortcuts: ShortcutMap;
   onThemeModeChange: (mode: ThemeMode) => void;
+  onEditorLineHeightChange: (value: number) => void;
   onShortcutChange: (action: ShortcutAction, combo: ShortcutCombo) => ShortcutValidationResult;
   onResetShortcuts: () => void;
   onClose: () => void;
@@ -28,9 +30,11 @@ interface SettingsPanelProps {
 export default function SettingsPanel({
   open,
   themeMode,
+  editorLineHeight,
   autoSaveDir,
   shortcuts,
   onThemeModeChange,
+  onEditorLineHeightChange,
   onShortcutChange,
   onResetShortcuts,
   onClose
@@ -129,6 +133,26 @@ export default function SettingsPanel({
               <option value="ko">{t("settings.languageKo")}</option>
               <option value="en">{t("settings.languageEn")}</option>
             </select>
+          </div>
+
+          <div className="settings-item">
+            <label htmlFor="editor-line-height">{t("settings.lineSpacing")}</label>
+            <div className="settings-range-row">
+              <input
+                id="editor-line-height"
+                type="range"
+                min={1.2}
+                max={2.2}
+                step={0.05}
+                value={editorLineHeight}
+                onChange={(event) => onEditorLineHeightChange(Number.parseFloat(event.target.value))}
+              />
+              <span className="settings-range-value">
+                {editorLineHeight.toFixed(2)}
+                x
+              </span>
+            </div>
+            <div className="settings-subtext">{t("settings.lineSpacingHelp")}</div>
           </div>
 
           <div className="settings-item">
