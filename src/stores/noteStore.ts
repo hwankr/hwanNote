@@ -16,6 +16,7 @@ interface NoteStore {
   tabs: NoteTab[];
   activeTabId: string;
   sidebarVisible: boolean;
+  hydrateTabs: (tabs: NoteTab[]) => void;
   createTab: () => void;
   setActiveTab: (id: string) => void;
   closeTab: (id: string) => void;
@@ -73,6 +74,18 @@ export const useNoteStore = create<NoteStore>((set, get) => {
     tabs: [firstTab],
     activeTabId: firstTab.id,
     sidebarVisible: false,
+    hydrateTabs: (tabs) => {
+      const normalizedTabs = tabs.length > 0 ? tabs : [createEmptyTab()];
+      const currentActiveId = get().activeTabId;
+      const nextActiveId = normalizedTabs.some((tab) => tab.id === currentActiveId)
+        ? currentActiveId
+        : normalizedTabs[0].id;
+
+      set({
+        tabs: normalizedTabs,
+        activeTabId: nextActiveId
+      });
+    },
     createTab: () => {
       const tab = createEmptyTab();
       set((state) => ({

@@ -21,6 +21,18 @@ declare global {
           folderPath: string
         ) => Promise<{ filePath: string }>;
         getAutoSaveDir: () => Promise<string>;
+        loadAll: () => Promise<
+          Array<{
+            noteId: string;
+            title: string;
+            plainText: string;
+            content: string;
+            folderPath: string;
+            createdAt: number;
+            updatedAt: number;
+            filePath: string;
+          }>
+        >;
       };
     };
   }

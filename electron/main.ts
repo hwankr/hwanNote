@@ -5,6 +5,7 @@ import {
   autoSaveMarkdownNote,
   getAutoSaveDir,
   listMarkdownFiles,
+  loadMarkdownNotes,
   readMarkdownFile,
   saveMarkdownFile
 } from "./fileManager";
@@ -81,6 +82,10 @@ function setupIpcHandlers() {
 
   ipcMain.handle("note:get-autosave-dir", () => {
     return getAutoSaveDir(app.getPath("documents"));
+  });
+
+  ipcMain.handle("note:load-all", async () => {
+    return loadMarkdownNotes(app.getPath("documents"));
   });
 }
 

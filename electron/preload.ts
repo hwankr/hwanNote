@@ -14,7 +14,20 @@ const api = {
       ipcRenderer.invoke("note:auto-save", { noteId, title, content, folderPath }) as Promise<{
         filePath: string;
       }>,
-    getAutoSaveDir: () => ipcRenderer.invoke("note:get-autosave-dir") as Promise<string>
+    getAutoSaveDir: () => ipcRenderer.invoke("note:get-autosave-dir") as Promise<string>,
+    loadAll: () =>
+      ipcRenderer.invoke("note:load-all") as Promise<
+        Array<{
+          noteId: string;
+          title: string;
+          plainText: string;
+          content: string;
+          folderPath: string;
+          createdAt: number;
+          updatedAt: number;
+          filePath: string;
+        }>
+      >
   }
 };
 

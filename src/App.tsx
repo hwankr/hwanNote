@@ -76,6 +76,7 @@ export default function App() {
   const activeTabId = useNoteStore((state) => state.activeTabId);
   const sidebarVisible = useNoteStore((state) => state.sidebarVisible);
   const createTab = useNoteStore((state) => state.createTab);
+  const hydrateTabs = useNoteStore((state) => state.hydrateTabs);
   const setActiveTab = useNoteStore((state) => state.setActiveTab);
   const closeTab = useNoteStore((state) => state.closeTab);
   const closeOtherTabs = useNoteStore((state) => state.closeOtherTabs);
@@ -212,6 +213,52 @@ export default function App() {
   }, [customFolders]);
 
   useEffect(() => {
+    const noteApi = window.hwanNote?.note;
+    if (!noteApi?.loadAll) {
+      return;
+    }
+
+    let disposed = false;
+
+    const run = async () => {
+      try {
+        const loaded = await noteApi.loadAll();
+        if (disposed || loaded.length === 0) {
+          return;
+        }
+
+        hydrateTabs(
+          loaded.map((note) => ({
+            id: note.noteId,
+            title: note.title,
+            content: note.content,
+            plainText: note.plainText,
+            isDirty: false,
+            isPinned: false,
+            folderPath: normalizeFolderPath(note.folderPath),
+            createdAt: note.createdAt,
+            updatedAt: note.updatedAt
+          }))
+        );
+
+        const loadedFolders = loaded
+          .map((note) => normalizeFolderPath(note.folderPath))
+          .filter((folderPath) => folderPath !== "inbox");
+
+        setCustomFolders((prev) => Array.from(new Set([...prev, ...loadedFolders])));
+      } catch (error) {
+        console.error("Failed to load notes from file system:", error);
+      }
+    };
+
+    void run();
+
+    return () => {
+      disposed = true;
+    };
+  }, [hydrateTabs]);
+
+  useEffect(() => {
     if (selectedFolder && !folderPaths.includes(selectedFolder)) {
       setSelectedFolder(null);
     }
@@ -255,21 +302,6 @@ export default function App() {
   useEffect(() => {
     applyTheme("light");
   }, []);
-
-  useEffect(() => {
-    if (!activeTab) {
-      return;
-    }
-
-    const draft = window.localStorage.getItem(getDraftKey(activeTab.id));
-    if (!draft || draft === activeTab.content) {
-      return;
-    }
-
-    const plainText = draft.replace(/<[^>]+>/g, "").trim();
-    updateActiveContent(draft, plainText);
-    markTabSaved(activeTab.id);
-  }, [activeTab, markTabSaved, updateActiveContent]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
