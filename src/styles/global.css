@@ -102,6 +102,7 @@ select {
 
 .tabs {
   display: flex;
+  flex: 1 1 auto;
   gap: 6px;
   min-width: 0;
   overflow-x: auto;
@@ -110,6 +111,11 @@ select {
 
 .tabs::-webkit-scrollbar {
   display: none;
+}
+
+.titlebar-tab-drag-space {
+  flex: 0 0 44px;
+  height: 100%;
 }
 
 .tab {

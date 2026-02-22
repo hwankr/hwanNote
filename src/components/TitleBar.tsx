@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useState } from "react";
+﻿import { useEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../i18n/context";
 import type { NoteTab } from "../stores/noteStore";
 
@@ -43,6 +43,8 @@ export default function TitleBar({
   const [draggingTabId, setDraggingTabId] = useState<string | null>(null);
   const [dragOverTabId, setDragOverTabId] = useState<string | null>(null);
   const [menu, setMenu] = useState<ContextMenuState | null>(null);
+  const [tabsOverflowing, setTabsOverflowing] = useState(false);
+  const tabsRef = useRef<HTMLDivElement | null>(null);
 
   const menuTarget = useMemo(() => tabs.find((tab) => tab.id === menu?.tabId), [tabs, menu]);
 
@@ -64,6 +66,29 @@ export default function TitleBar({
     };
   }, [menu]);
 
+  useEffect(() => {
+    const tabsElement = tabsRef.current;
+    if (!tabsElement) {
+      return;
+    }
+
+    const updateOverflowState = () => {
+      const isOverflowing = tabsElement.scrollWidth > tabsElement.clientWidth + 1;
+      setTabsOverflowing((prev) => (prev === isOverflowing ? prev : isOverflowing));
+    };
+
+    updateOverflowState();
+
+    const resizeObserver = new ResizeObserver(updateOverflowState);
+    resizeObserver.observe(tabsElement);
+    window.addEventListener("resize", updateOverflowState);
+
+    return () => {
+      resizeObserver.disconnect();
+      window.removeEventListener("resize", updateOverflowState);
+    };
+  }, [tabs]);
+
   return (
     <header className="titlebar">
       <div className="titlebar-left">
@@ -77,13 +102,13 @@ export default function TitleBar({
         </button>
       </div>
 
-      <div className="titlebar-center no-drag">
-        <div className="tabs">
+      <div className="titlebar-center">
+        <div ref={tabsRef} className={`tabs ${tabsOverflowing ? "no-drag" : ""}`}>
           {tabs.map((tab) => (
             <button
               type="button"
               key={tab.id}
-              className={`tab ${tab.id === activeTabId ? "active" : ""} ${
+              className={`tab no-drag ${tab.id === activeTabId ? "active" : ""} ${
                 tab.id === dragOverTabId ? "drag-over" : ""
               }`}
               onClick={() => onSelectTab(tab.id)}
@@ -140,6 +165,7 @@ export default function TitleBar({
             </button>
           ))}
         </div>
+        <div className="titlebar-tab-drag-space" aria-hidden="true" />
 
         <button type="button" className="titlebar-btn no-drag add-tab-btn" onClick={onCreateTab}>
           +
