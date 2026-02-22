@@ -14,6 +14,13 @@ declare global {
         save: (filePath: string, content: string) => Promise<boolean>;
         read: (filePath: string) => Promise<string>;
         list: (dirPath: string) => Promise<string[]>;
+        autoSave: (
+          noteId: string,
+          title: string,
+          content: string,
+          folderPath: string
+        ) => Promise<{ filePath: string }>;
+        getAutoSaveDir: () => Promise<string>;
       };
     };
   }

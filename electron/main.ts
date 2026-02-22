@@ -1,6 +1,13 @@
 import { app, BrowserWindow, ipcMain } from "electron";
 import path from "node:path";
-import { listMarkdownFiles, readMarkdownFile, saveMarkdownFile } from "./fileManager";
+import {
+  type AutoSavePayload,
+  autoSaveMarkdownNote,
+  getAutoSaveDir,
+  listMarkdownFiles,
+  readMarkdownFile,
+  saveMarkdownFile
+} from "./fileManager";
 
 const isDev = !app.isPackaged;
 
@@ -66,6 +73,14 @@ function setupIpcHandlers() {
 
   ipcMain.handle("note:list", async (_event, dirPath: string) => {
     return listMarkdownFiles(dirPath);
+  });
+
+  ipcMain.handle("note:auto-save", async (_event, payload: AutoSavePayload) => {
+    return autoSaveMarkdownNote(app.getPath("documents"), payload);
+  });
+
+  ipcMain.handle("note:get-autosave-dir", () => {
+    return getAutoSaveDir(app.getPath("documents"));
   });
 }
 

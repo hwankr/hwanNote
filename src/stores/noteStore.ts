@@ -7,6 +7,8 @@ export interface NoteTab {
   plainText: string;
   isDirty: boolean;
   isPinned: boolean;
+  folderPath: string;
+  createdAt: number;
   updatedAt: number;
 }
 
@@ -20,6 +22,9 @@ interface NoteStore {
   closeOtherTabs: (id: string) => void;
   reorderTabs: (sourceId: string, targetId: string) => void;
   togglePinTab: (id: string) => void;
+  moveTabToFolder: (id: string, folderPath: string) => void;
+  renameFolderPath: (from: string, to: string) => void;
+  clearFolderPath: (folderPath: string) => void;
   activateNextTab: () => void;
   activatePrevTab: () => void;
   updateActiveContent: (content: string, plainText: string) => void;
@@ -46,6 +51,8 @@ function deriveTitle(plainText: string) {
 }
 
 function createEmptyTab(): NoteTab {
+  const now = Date.now();
+
   return {
     id: createId(),
     title: "\uC81C\uBAA9 \uC5C6\uC74C",
@@ -53,7 +60,9 @@ function createEmptyTab(): NoteTab {
     plainText: "",
     isDirty: false,
     isPinned: false,
-    updatedAt: Date.now()
+    folderPath: "inbox",
+    createdAt: now,
+    updatedAt: now
   };
 }
 
@@ -153,6 +162,59 @@ export const useNoteStore = create<NoteStore>((set, get) => {
         tabs: state.tabs.map((tab) =>
           tab.id === id ? { ...tab, isPinned: !tab.isPinned, updatedAt: Date.now() } : tab
         )
+      }));
+    },
+    moveTabToFolder: (id, folderPath) => {
+      const normalized = folderPath.trim() || "inbox";
+
+      set((state) => ({
+        tabs: state.tabs.map((tab) =>
+          tab.id === id ? { ...tab, folderPath: normalized, updatedAt: Date.now(), isDirty: true } : tab
+        )
+      }));
+    },
+    renameFolderPath: (from, to) => {
+      const fromPath = from.trim();
+      const toPath = to.trim() || "inbox";
+      if (!fromPath || fromPath === toPath) {
+        return;
+      }
+
+      set((state) => ({
+        tabs: state.tabs.map((tab) => {
+          if (tab.folderPath === fromPath || tab.folderPath.startsWith(`${fromPath}/`)) {
+            const nextFolderPath = tab.folderPath.replace(fromPath, toPath);
+            return {
+              ...tab,
+              folderPath: nextFolderPath,
+              updatedAt: Date.now(),
+              isDirty: true
+            };
+          }
+
+          return tab;
+        })
+      }));
+    },
+    clearFolderPath: (folderPath) => {
+      const normalized = folderPath.trim();
+      if (!normalized) {
+        return;
+      }
+
+      set((state) => ({
+        tabs: state.tabs.map((tab) => {
+          if (tab.folderPath === normalized || tab.folderPath.startsWith(`${normalized}/`)) {
+            return {
+              ...tab,
+              folderPath: "inbox",
+              updatedAt: Date.now(),
+              isDirty: true
+            };
+          }
+
+          return tab;
+        })
       }));
     },
     activateNextTab: () => {

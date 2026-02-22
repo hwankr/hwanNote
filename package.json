@@ -2,6 +2,7 @@
   "name": "hwan-note",
   "version": "0.1.0",
   "private": true,
+  "author": "HwanKR",
   "description": "Windows 11 Notepad-style desktop markdown note app with Electron + React + TypeScript.",
   "main": "dist-electron/main.js",
   "scripts": {
@@ -12,6 +13,9 @@
     "build:main": "tsc -p tsconfig.electron.json",
     "build:renderer": "vite build",
     "build": "npm run build:main && npm run build:renderer",
+    "pack:win": "cross-env CSC_IDENTITY_AUTO_DISCOVERY=false npm run build && electron-builder --win portable --x64",
+    "dist:win": "cross-env CSC_IDENTITY_AUTO_DISCOVERY=false npm run build && electron-builder --win portable --x64",
+    "dist:installer": "cross-env CSC_IDENTITY_AUTO_DISCOVERY=false npm run build && electron-builder --win nsis --x64",
     "preview": "vite preview",
     "start": "npm run build && electron dist-electron/main.js",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.electron.json --noEmit"
@@ -39,10 +43,48 @@
     "concurrently": "^9.1.2",
     "cross-env": "^7.0.3",
     "electron": "^33.3.1",
+    "electron-builder": "^25.1.8",
     "electronmon": "^2.0.3",
     "typescript": "^5.7.3",
     "vite": "^6.0.7",
     "wait-on": "^8.0.1"
+  },
+  "build": {
+    "appId": "com.hwankr.hwannote",
+    "productName": "HwanNote",
+    "asar": true,
+    "directories": {
+      "output": "release",
+      "buildResources": "resources"
+    },
+    "files": [
+      "dist/**",
+      "dist-electron/**",
+      "package.json"
+    ],
+    "win": {
+      "signAndEditExecutable": false,
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
+    }
   },
   "engines": {
     "node": ">=20"
