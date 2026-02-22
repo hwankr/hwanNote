@@ -3,6 +3,8 @@ import { access, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/p
 import { dirname, extname, join, relative } from "node:path";
 
 const INDEX_FILENAME = ".hwan-note-index.json";
+const TOGGLE_BLOCK_PATTERN = /^:::toggle\[(open|closed)\](?:\s+(.*))?$/i;
+const TOGGLE_BLOCK_END = ":::";
 
 interface NoteIndexEntry {
   relativePath: string;
@@ -73,7 +75,16 @@ function deriveTitle(markdownText: string) {
     return "제목 없음";
   }
 
-  const stripped = firstLine.replace(/^#{1,3}\s+/, "").replace(/^- \[[ xX]\]\s*/, "");
+  const toggleMatch = firstLine.match(TOGGLE_BLOCK_PATTERN);
+  if (toggleMatch) {
+    const summaryTitle = (toggleMatch[2] ?? "").trim();
+    return summaryTitle || "제목 없음";
+  }
+
+  const stripped = firstLine
+    .replace(/^#{1,3}\s+/, "")
+    .replace(/^- \[[ xX]\]\s*/, "")
+    .replace(/^:::\s*$/, "");
   return stripped || "제목 없음";
 }
 
@@ -81,7 +92,19 @@ function markdownToPlainText(markdownText: string) {
   return markdownText
     .replace(/\r\n/g, "\n")
     .split("\n")
-    .map((line) => line.replace(/^(\s*)- \[[ xX]\]\s*/, "$1"))
+    .map((line) => {
+      const trimmed = line.trim();
+      const toggleMatch = trimmed.match(TOGGLE_BLOCK_PATTERN);
+      if (toggleMatch) {
+        return (toggleMatch[2] ?? "").trim();
+      }
+
+      if (trimmed === TOGGLE_BLOCK_END) {
+        return "";
+      }
+
+      return line.replace(/^(\s*)- \[[ xX]\]\s*/, "$1");
+    })
     .join("\n")
     .trimEnd();
 }
@@ -108,11 +131,7 @@ function markdownToHtml(markdownText: string) {
     children: TaskNode[];
   }
 
-  const lines = normalized.split("\n");
-  const html: string[] = [];
   const checklistPattern = /^(\s*)-\s+\[([ xX])\]\s*(.*)$/;
-  let inCodeFence = false;
-  let lineIndex = 0;
 
   const renderTaskNodes = (nodes: TaskNode[]): string => {
     const renderNode = (node: TaskNode): string => {
@@ -131,80 +150,131 @@ function markdownToHtml(markdownText: string) {
     return `<ul data-type="taskList">${nodes.map(renderNode).join("")}</ul>`;
   };
 
-  while (lineIndex < lines.length) {
-    const line = lines[lineIndex];
-    const trimmed = line.trim();
+  const findToggleBlockEnd = (lines: string[], startIndex: number) => {
+    let depth = 0;
 
-    if (trimmed.startsWith("```")) {
-      inCodeFence = !inCodeFence;
-      html.push(`<p>${escapeHtml(line)}</p>`);
-      lineIndex += 1;
-      continue;
-    }
+    for (let i = startIndex; i < lines.length; i += 1) {
+      const trimmed = lines[i].trim();
 
-    if (!inCodeFence && checklistPattern.test(line)) {
-      const taskLines: Array<{ indent: number; checked: boolean; text: string }> = [];
-
-      while (lineIndex < lines.length) {
-        const taskLine = lines[lineIndex];
-        if (!taskLine.trim() || !checklistPattern.test(taskLine)) {
-          break;
-        }
-
-        const match = taskLine.match(checklistPattern);
-        if (!match) {
-          break;
-        }
-
-        const indent = match[1].replace(/\t/g, "  ").length;
-        const depth = Math.max(0, Math.floor(indent / 2));
-        const checked = match[2].toLowerCase() === "x";
-        taskLines.push({
-          indent: depth,
-          checked,
-          text: match[3] ?? ""
-        });
-        lineIndex += 1;
+      if (TOGGLE_BLOCK_PATTERN.test(trimmed)) {
+        depth += 1;
+        continue;
       }
 
-      const roots: TaskNode[] = [];
-      const stack: TaskNode[] = [];
-
-      taskLines.forEach((taskLine) => {
-        const node: TaskNode = {
-          checked: taskLine.checked,
-          text: taskLine.text,
-          depth: taskLine.indent,
-          children: []
-        };
-
-        const safeDepth = Math.min(node.depth, stack.length);
-        while (stack.length > safeDepth) {
-          stack.pop();
+      if (trimmed === TOGGLE_BLOCK_END) {
+        depth -= 1;
+        if (depth === 0) {
+          return i;
         }
-
-        if (stack.length === 0) {
-          roots.push(node);
-        } else {
-          stack[stack.length - 1].children.push(node);
-        }
-
-        stack.push(node);
-      });
-
-      html.push(renderTaskNodes(roots));
-      continue;
+      }
     }
 
-    if (!trimmed) {
-      html.push("<p><br></p>");
-    } else {
-      html.push(`<p>${escapeHtml(line)}</p>`);
-    }
-    lineIndex += 1;
-  }
+    return -1;
+  };
 
-  return html.join("");
+  const renderLines = (lines: string[]) => {
+    const html: string[] = [];
+    let inCodeFence = false;
+    let lineIndex = 0;
+
+    while (lineIndex < lines.length) {
+      const line = lines[lineIndex];
+      const trimmed = line.trim();
+
+      if (trimmed.startsWith("```")) {
+        inCodeFence = !inCodeFence;
+        html.push(`<p>${escapeHtml(line)}</p>`);
+        lineIndex += 1;
+        continue;
+      }
+
+      if (!inCodeFence) {
+        const toggleMatch = trimmed.match(TOGGLE_BLOCK_PATTERN);
+        if (toggleMatch) {
+          const endIndex = findToggleBlockEnd(lines, lineIndex);
+          if (endIndex !== -1) {
+            const open = toggleMatch[1].toLowerCase() === "open";
+            const summaryText = escapeHtml((toggleMatch[2] ?? "").trim()) || "Toggle";
+            const innerLines = lines.slice(lineIndex + 1, endIndex);
+            const innerHtml = renderLines(innerLines) || "<p><br></p>";
+            const openAttr = open ? ' open="open"' : "";
+
+            html.push(
+              `<details data-type="toggleBlock"${openAttr}><summary>${summaryText}</summary>` +
+                `<div data-type="toggleContent">${innerHtml}</div></details>`
+            );
+            lineIndex = endIndex + 1;
+            continue;
+          }
+        }
+
+        if (checklistPattern.test(line)) {
+          const taskLines: Array<{ indent: number; checked: boolean; text: string }> = [];
+
+          while (lineIndex < lines.length) {
+            const taskLine = lines[lineIndex];
+            if (!taskLine.trim() || !checklistPattern.test(taskLine)) {
+              break;
+            }
+
+            const match = taskLine.match(checklistPattern);
+            if (!match) {
+              break;
+            }
+
+            const indent = match[1].replace(/\t/g, "  ").length;
+            const depth = Math.max(0, Math.floor(indent / 2));
+            const checked = match[2].toLowerCase() === "x";
+            taskLines.push({
+              indent: depth,
+              checked,
+              text: match[3] ?? ""
+            });
+            lineIndex += 1;
+          }
+
+          const roots: TaskNode[] = [];
+          const stack: TaskNode[] = [];
+
+          taskLines.forEach((taskLine) => {
+            const node: TaskNode = {
+              checked: taskLine.checked,
+              text: taskLine.text,
+              depth: taskLine.indent,
+              children: []
+            };
+
+            const safeDepth = Math.min(node.depth, stack.length);
+            while (stack.length > safeDepth) {
+              stack.pop();
+            }
+
+            if (stack.length === 0) {
+              roots.push(node);
+            } else {
+              stack[stack.length - 1].children.push(node);
+            }
+
+            stack.push(node);
+          });
+
+          html.push(renderTaskNodes(roots));
+          continue;
+        }
+      }
+
+      if (!trimmed) {
+        html.push("<p><br></p>");
+      } else {
+        html.push(`<p>${escapeHtml(line)}</p>`);
+      }
+      lineIndex += 1;
+    }
+
+    return html.join("");
+  };
+
+  return renderLines(normalized.split("\n"));
 }
 
 function getIndexPath(autoSaveDir: string) {

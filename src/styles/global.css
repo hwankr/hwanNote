@@ -253,6 +253,12 @@ select {
   cursor: pointer;
 }
 
+.toolbar button.is-active {
+  border-color: var(--accent);
+  background: var(--bg-active);
+  color: var(--accent);
+}
+
 .toolbar-title-field {
   display: flex;
   align-items: center;
@@ -589,6 +595,55 @@ select {
   padding-left: 10px;
   border-left: 3px solid var(--border-soft);
   color: var(--text-muted);
+}
+
+.note-editor details[data-type="toggleBlock"] {
+  margin: 8px 0 12px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--bg-surface);
+}
+
+.note-editor details[data-type="toggleBlock"] > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  list-style: none;
+  font-weight: 600;
+}
+
+.note-editor details[data-type="toggleBlock"] > summary::-webkit-details-marker {
+  display: none;
+}
+
+.note-editor details[data-type="toggleBlock"] > summary::before {
+  content: ">";
+  font-size: 10px;
+  color: var(--text-muted);
+  transition: transform 120ms ease;
+}
+
+.note-editor details[data-type="toggleBlock"][open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.note-editor details[data-type="toggleBlock"] > summary > p {
+  margin: 0;
+}
+
+.note-editor details[data-type="toggleBlock"] > div[data-type="toggleContent"] {
+  margin-top: 8px;
+  padding-left: 18px;
+}
+
+.note-editor details[data-type="toggleBlock"]:not([open]) > div[data-type="toggleContent"] {
+  display: none;
+}
+
+.note-editor details[data-type="toggleBlock"] > div[data-type="toggleContent"] > :last-child {
+  margin-bottom: 0;
 }
 
 .note-editor ul[data-type="taskList"] {

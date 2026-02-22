@@ -11,7 +11,8 @@ export type ShortcutAction =
   | "closeTab"
   | "toggleBold"
   | "toggleItalic"
-  | "toggleChecklist";
+  | "toggleChecklist"
+  | "insertToggleBlock";
 
 export interface ShortcutCombo {
   mod: boolean;
@@ -74,7 +75,8 @@ export const SHORTCUT_ACTIONS: ShortcutAction[] = [
   "closeTab",
   "toggleBold",
   "toggleItalic",
-  "toggleChecklist"
+  "toggleChecklist",
+  "insertToggleBlock"
 ];
 
 export const SHORTCUT_DEFINITIONS: Record<ShortcutAction, ShortcutDefinition> = {
@@ -122,6 +124,11 @@ export const SHORTCUT_DEFINITIONS: Record<ShortcutAction, ShortcutDefinition> = 
     labelKey: "shortcut.action.toggleChecklist",
     context: "editor",
     defaultCombo: { mod: true, alt: false, shift: true, key: "x" }
+  },
+  insertToggleBlock: {
+    labelKey: "shortcut.action.insertToggleBlock",
+    context: "editor",
+    defaultCombo: { mod: true, alt: false, shift: true, key: "t" }
   }
 };
 
@@ -132,7 +139,7 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
   },
   {
     labelKey: "shortcut.group.editor",
-    actions: ["toggleBold", "toggleItalic", "toggleChecklist"]
+    actions: ["toggleBold", "toggleItalic", "toggleChecklist", "insertToggleBlock"]
   }
 ];
 

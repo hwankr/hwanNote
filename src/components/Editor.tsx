@@ -11,6 +11,7 @@ import Italic from "@tiptap/extension-italic";
 import StarterKit from "@tiptap/starter-kit";
 import { Editor as TiptapEditor, EditorContent, useEditor } from "@tiptap/react";
 import { type MouseEvent as ReactMouseEvent, useCallback, useEffect } from "react";
+import { ToggleBlock, ToggleContent, ToggleSummary } from "../extensions/toggleBlock";
 import { useI18n } from "../i18n/context";
 
 interface EditorProps {
@@ -71,6 +72,9 @@ export default function Editor({ content, onChange, onCursorChange, onEditorRead
       TaskItem.configure({
         nested: true
       }),
+      ToggleBlock,
+      ToggleSummary,
+      ToggleContent,
       Link.configure({
         openOnClick: false,
         autolink: true,

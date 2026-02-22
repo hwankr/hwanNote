@@ -21,6 +21,7 @@ export default function Toolbar({
 }: ToolbarProps) {
   const { t } = useI18n();
   const [titleInput, setTitleInput] = useState(activeTitle);
+  const [listMenuKey, setListMenuKey] = useState(0);
   const normalizeTitle = (value: string) => value.trim().slice(0, 50);
 
   useEffect(() => {
@@ -63,9 +64,20 @@ export default function Toolbar({
       case "task":
         editor.chain().focus().toggleTaskList().run();
         break;
+      case "toggle":
+        editor.chain().focus().insertToggleBlock().run();
+        break;
       default:
         break;
     }
+  };
+
+  const insertToggleBlock = () => {
+    if (!editor) {
+      return;
+    }
+
+    editor.chain().focus().insertToggleBlock().run();
   };
 
   const insertLink = () => {
@@ -96,6 +108,8 @@ export default function Toolbar({
     editor.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run();
   };
 
+  const isToggleBlockActive = editor?.isActive("toggleBlock") ?? false;
+
   return (
     <div className="toolbar">
       <div className="toolbar-left no-drag">
@@ -116,11 +130,20 @@ export default function Toolbar({
           <option value="3">H3</option>
         </select>
 
-        <select aria-label={t("toolbar.listAria")} defaultValue="" onChange={(event) => setList(event.target.value)}>
+        <select
+          key={listMenuKey}
+          aria-label={t("toolbar.listAria")}
+          defaultValue=""
+          onChange={(event) => {
+            setList(event.target.value);
+            setListMenuKey((prev) => prev + 1);
+          }}
+        >
           <option value="">{t("toolbar.listDefault")}</option>
           <option value="bullet">{t("toolbar.listBullet")}</option>
           <option value="ordered">{t("toolbar.listOrdered")}</option>
           <option value="task">{t("toolbar.listTask")}</option>
+          <option value="toggle">{t("toolbar.listToggle")}</option>
         </select>
 
         <button type="button" onClick={() => editor?.chain().focus().toggleBold().run()}>
@@ -128,6 +151,15 @@ export default function Toolbar({
         </button>
         <button type="button" onClick={() => editor?.chain().focus().toggleItalic().run()}>
           I
+        </button>
+        <button
+          type="button"
+          className={isToggleBlockActive ? "is-active" : undefined}
+          onClick={insertToggleBlock}
+          aria-label={t("toolbar.listToggle")}
+          title={t("toolbar.listToggle")}
+        >
+          {t("toolbar.listToggle")}
         </button>
         <button type="button" onClick={insertLink}>
           {t("toolbar.link")}

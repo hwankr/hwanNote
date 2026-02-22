@@ -48,7 +48,7 @@ function normalizeFolderPath(path: string) {
   return normalized || "inbox";
 }
 
-function htmlToMarkdownWithTasks(contentHtml: string) {
+function htmlToMarkdownWithBlocks(contentHtml: string) {
   const parser = new DOMParser();
   const document = parser.parseFromString(contentHtml, "text/html");
   const lines: string[] = [];
@@ -105,7 +105,7 @@ function htmlToMarkdownWithTasks(contentHtml: string) {
     });
   };
 
-  Array.from(document.body.childNodes).forEach((node) => {
+  const pushNode = (node: ChildNode) => {
     if (node.nodeType === Node.TEXT_NODE) {
       const text = node.textContent?.replace(/\r?\n/g, "\n").trim();
       if (text) {
@@ -120,6 +120,26 @@ function htmlToMarkdownWithTasks(contentHtml: string) {
 
     if (node.matches('ul[data-type="taskList"]')) {
       pushTaskList(node, 0);
+      return;
+    }
+
+    if (node.matches('details[data-type="toggleBlock"], details')) {
+      const isOpen = node.hasAttribute("open");
+      const summary = node.querySelector(":scope > summary");
+      const summaryText = normalizeText(summary?.textContent ?? "");
+      lines.push(`:::toggle[${isOpen ? "open" : "closed"}]${summaryText ? ` ${summaryText}` : ""}`);
+
+      const content = Array.from(node.children).find((child) => child !== summary);
+      if (content) {
+        Array.from(content.childNodes).forEach(pushNode);
+      }
+
+      lines.push(":::");
+      return;
+    }
+
+    if (node.matches('div[data-type="toggleContent"]')) {
+      Array.from(node.childNodes).forEach(pushNode);
       return;
     }
 
@@ -139,14 +159,18 @@ function htmlToMarkdownWithTasks(contentHtml: string) {
 
     const text = extractText(node);
     lines.push(text);
-  });
+  };
+
+  Array.from(document.body.childNodes).forEach(pushNode);
 
   return lines.join("\n").replace(/\n{3,}/g, "\n\n");
 }
 
 function toMarkdownDocument(title: string, plainText: string, contentHtml: string, fallbackTitle: string) {
   const hasTaskList = /<ul[^>]*data-type=(['"])taskList\1/i.test(contentHtml);
-  const sourceText = hasTaskList ? htmlToMarkdownWithTasks(contentHtml) : plainText;
+  const hasToggleBlock = /<details/i.test(contentHtml);
+  const hasStructuredBlocks = hasTaskList || hasToggleBlock;
+  const sourceText = hasStructuredBlocks ? htmlToMarkdownWithBlocks(contentHtml) : plainText;
   const normalizedBody = sourceText.replace(/\r?\n/g, "\n").trimEnd();
   if (normalizedBody) {
     return `${normalizedBody}\n`;
@@ -627,6 +651,15 @@ export default function App() {
 
             event.preventDefault();
             editor.chain().focus().toggleTaskList().run();
+            return;
+
+          case "insertToggleBlock":
+            if (!editor) {
+              return;
+            }
+
+            event.preventDefault();
+            editor.chain().focus().insertToggleBlock().run();
             return;
 
           default:
