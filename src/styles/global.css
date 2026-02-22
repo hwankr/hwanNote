@@ -684,6 +684,8 @@ select {
   box-shadow: var(--shadow-soft);
   display: flex;
   flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .settings-header {
@@ -708,9 +710,12 @@ select {
 }
 
 .settings-body {
+  flex: 1;
+  min-height: 0;
   display: grid;
   gap: 16px;
   padding: 16px;
+  overflow-y: auto;
 }
 
 .settings-item {
