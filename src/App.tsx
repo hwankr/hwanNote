@@ -7,10 +7,23 @@ import StatusBar from "./components/StatusBar";
 import TitleBar from "./components/TitleBar";
 import Toolbar from "./components/Toolbar";
 import { useAutoSave } from "./hooks/useAutoSave";
+import {
+  SHORTCUT_ACTIONS,
+  SHORTCUT_DEFINITIONS,
+  createDefaultShortcuts,
+  isContextMatch,
+  matchesShortcut,
+  parseShortcutMap,
+  validateShortcutAssignment,
+  type ShortcutAction,
+  type ShortcutCombo,
+  type ShortcutMap
+} from "./lib/shortcuts";
 import { applyTheme, type ThemeName } from "./styles/themes";
 import { useNoteStore } from "./stores/noteStore";
 
 const CUSTOM_FOLDERS_KEY = "hwan-note:custom-folders";
+const SHORTCUTS_KEY = "hwan-note:shortcuts";
 const THEME_MODE_KEY = "hwan-note:theme-mode";
 
 type SortMode = "updated" | "title" | "created";
@@ -113,6 +126,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [themeMode, setThemeMode] = useState<ThemeMode>("light");
   const [autoSaveDir, setAutoSaveDir] = useState("");
+  const [shortcuts, setShortcuts] = useState<ShortcutMap>(() => createDefaultShortcuts());
 
   const activeTab = useMemo(
     () => tabs.find((tab) => tab.id === activeTabId) ?? tabs[0],
@@ -202,20 +216,16 @@ export default function App() {
   useEffect(() => {
     try {
       const raw = window.localStorage.getItem(CUSTOM_FOLDERS_KEY);
-      if (!raw) {
-        return;
+      if (raw) {
+        const parsed = JSON.parse(raw) as unknown;
+        if (Array.isArray(parsed)) {
+          const normalized = parsed
+            .filter((entry): entry is string => typeof entry === "string")
+            .map((path) => normalizeFolderPath(path));
+
+          setCustomFolders(Array.from(new Set(normalized)));
+        }
       }
-
-      const parsed = JSON.parse(raw) as unknown;
-      if (!Array.isArray(parsed)) {
-        return;
-      }
-
-      const normalized = parsed
-        .filter((entry): entry is string => typeof entry === "string")
-        .map((path) => normalizeFolderPath(path));
-
-      setCustomFolders(Array.from(new Set(normalized)));
     } catch (error) {
       console.warn("Failed to load custom folders", error);
     }
@@ -223,6 +233,18 @@ export default function App() {
     const savedThemeMode = window.localStorage.getItem(THEME_MODE_KEY);
     if (savedThemeMode === "light" || savedThemeMode === "dark" || savedThemeMode === "system") {
       setThemeMode(savedThemeMode);
+    }
+
+    try {
+      const rawShortcuts = window.localStorage.getItem(SHORTCUTS_KEY);
+      if (!rawShortcuts) {
+        return;
+      }
+
+      const parsed = JSON.parse(rawShortcuts) as unknown;
+      setShortcuts(parseShortcutMap(parsed));
+    } catch (error) {
+      console.warn("Failed to load shortcuts", error);
     }
   }, []);
 
@@ -233,6 +255,10 @@ export default function App() {
   useEffect(() => {
     window.localStorage.setItem(THEME_MODE_KEY, themeMode);
   }, [themeMode]);
+
+  useEffect(() => {
+    window.localStorage.setItem(SHORTCUTS_KEY, JSON.stringify(shortcuts));
+  }, [shortcuts]);
 
   useEffect(() => {
     const noteApi = window.hwanNote?.note;
@@ -348,48 +374,103 @@ export default function App() {
     return () => media.removeEventListener("change", applyCurrentTheme);
   }, [themeMode]);
 
+  const handleShortcutChange = useCallback((action: ShortcutAction, combo: ShortcutCombo) => {
+    const validation = validateShortcutAssignment(action, combo, shortcuts);
+    if (!validation.ok) {
+      return validation;
+    }
+
+    setShortcuts((prev) => ({
+      ...prev,
+      [action]: combo
+    }));
+    return validation;
+  }, [shortcuts]);
+
+  const handleShortcutReset = useCallback(() => {
+    setShortcuts(createDefaultShortcuts());
+  }, []);
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (!(event.ctrlKey || event.metaKey)) {
+      if (settingsOpen) {
         return;
       }
 
-      const key = event.key.toLowerCase();
       const target = event.target as HTMLElement | null;
+      if (target?.closest("[data-shortcut-capture='true']")) {
+        return;
+      }
+
       const isEditorFocus = Boolean(target?.closest(".note-editor"));
 
-      if (key === "b" && !event.shiftKey && !isEditorFocus) {
-        event.preventDefault();
-        toggleSidebar();
-        return;
-      }
-
-      if (event.key === "Tab") {
-        event.preventDefault();
-        if (event.shiftKey) {
-          activatePrevTab();
-          return;
+      for (const action of SHORTCUT_ACTIONS) {
+        const shortcut = shortcuts[action];
+        if (!matchesShortcut(event, shortcut)) {
+          continue;
         }
 
-        activateNextTab();
-        return;
-      }
+        const { context } = SHORTCUT_DEFINITIONS[action];
+        if (!isContextMatch(context, isEditorFocus)) {
+          continue;
+        }
 
-      if (key === "s") {
-        event.preventDefault();
-        void handleManualSave();
-        return;
-      }
+        switch (action) {
+          case "toggleSidebar":
+            event.preventDefault();
+            toggleSidebar();
+            return;
 
-      if (key === "n" && !event.shiftKey) {
-        event.preventDefault();
-        createTab();
-        return;
-      }
+          case "nextTab":
+            event.preventDefault();
+            activateNextTab();
+            return;
 
-      if (key === "w" && activeTab) {
-        event.preventDefault();
-        closeTab(activeTab.id);
+          case "prevTab":
+            event.preventDefault();
+            activatePrevTab();
+            return;
+
+          case "saveNote":
+            event.preventDefault();
+            void handleManualSave();
+            return;
+
+          case "newNote":
+            event.preventDefault();
+            createTab();
+            return;
+
+          case "closeTab":
+            if (!activeTab) {
+              return;
+            }
+
+            event.preventDefault();
+            closeTab(activeTab.id);
+            return;
+
+          case "toggleBold":
+            if (!editor) {
+              return;
+            }
+
+            event.preventDefault();
+            editor.chain().focus().toggleBold().run();
+            return;
+
+          case "toggleItalic":
+            if (!editor) {
+              return;
+            }
+
+            event.preventDefault();
+            editor.chain().focus().toggleItalic().run();
+            return;
+
+          default:
+            return;
+        }
       }
     };
 
@@ -401,7 +482,10 @@ export default function App() {
     activatePrevTab,
     closeTab,
     createTab,
+    editor,
     handleManualSave,
+    settingsOpen,
+    shortcuts,
     toggleSidebar
   ]);
 
@@ -534,7 +618,10 @@ export default function App() {
         open={settingsOpen}
         themeMode={themeMode}
         autoSaveDir={autoSaveDir}
+        shortcuts={shortcuts}
         onThemeModeChange={setThemeMode}
+        onShortcutChange={handleShortcutChange}
+        onResetShortcuts={handleShortcutReset}
         onClose={() => setSettingsOpen(false)}
       />
     </div>

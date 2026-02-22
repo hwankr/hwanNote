@@ -1,3 +1,4 @@
+import Bold from "@tiptap/extension-bold";
 import Link from "@tiptap/extension-link";
 import Placeholder from "@tiptap/extension-placeholder";
 import Table from "@tiptap/extension-table";
@@ -6,6 +7,7 @@ import TableHeader from "@tiptap/extension-table-header";
 import TableRow from "@tiptap/extension-table-row";
 import TaskItem from "@tiptap/extension-task-item";
 import TaskList from "@tiptap/extension-task-list";
+import Italic from "@tiptap/extension-italic";
 import StarterKit from "@tiptap/starter-kit";
 import { Editor as TiptapEditor, EditorContent, useEditor } from "@tiptap/react";
 import { useEffect } from "react";
@@ -37,14 +39,30 @@ function collectCursor(editor: TiptapEditor) {
   };
 }
 
+const BoldWithoutShortcut = Bold.extend({
+  addKeyboardShortcuts() {
+    return {};
+  }
+});
+
+const ItalicWithoutShortcut = Italic.extend({
+  addKeyboardShortcuts() {
+    return {};
+  }
+});
+
 export default function Editor({ content, onChange, onCursorChange, onEditorReady }: EditorProps) {
   const editor = useEditor({
     extensions: [
       StarterKit.configure({
+        bold: false,
         heading: {
           levels: [1, 2, 3]
-        }
+        },
+        italic: false
       }),
+      BoldWithoutShortcut,
+      ItalicWithoutShortcut,
       TaskList,
       TaskItem.configure({
         nested: true
