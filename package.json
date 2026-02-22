@@ -16,6 +16,7 @@
     "pack:win": "cross-env CSC_IDENTITY_AUTO_DISCOVERY=false npm run build && electron-builder --win portable --x64",
     "dist:win": "cross-env CSC_IDENTITY_AUTO_DISCOVERY=false npm run build && electron-builder --win portable --x64",
     "dist:installer": "cross-env CSC_IDENTITY_AUTO_DISCOVERY=false npm run build && electron-builder --win nsis --x64",
+    "dist:all": "cross-env CSC_IDENTITY_AUTO_DISCOVERY=false npm run build && electron-builder --win nsis portable --x64",
     "preview": "vite preview",
     "start": "npm run build && electron dist-electron/main.js",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.electron.json --noEmit"
@@ -62,6 +63,14 @@
       "dist-electron/**",
       "package.json"
     ],
+    "fileAssociations": [
+      {
+        "ext": "md",
+        "name": "Markdown Document",
+        "description": "Markdown note file",
+        "role": "Editor"
+      }
+    ],
     "win": {
       "signAndEditExecutable": false,
       "target": [
@@ -83,7 +92,10 @@
     "nsis": {
       "oneClick": false,
       "perMachine": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "HwanNote"
     }
   },
   "engines": {

@@ -3,10 +3,14 @@
   --bg-surface: #f5f0eb;
   --bg-editor: #ffffff;
   --bg-status: #f0ebe5;
+  --bg-elevated: #ffffff;
+  --bg-hover: rgba(0, 0, 0, 0.06);
+  --bg-active: rgba(0, 120, 212, 0.12);
   --text-primary: #1a1a1a;
   --text-muted: #666666;
   --accent: #0078d4;
   --border-soft: #e6ded8;
+  --shadow-soft: 0 8px 24px rgba(0, 0, 0, 0.18);
 }
 
 * {
@@ -86,7 +90,7 @@ select {
 
 .titlebar-btn:hover {
   border-color: var(--border-soft);
-  background: rgba(0, 0, 0, 0.03);
+  background: var(--bg-hover);
 }
 
 .tabs {
@@ -115,7 +119,7 @@ select {
 }
 
 .tab.active {
-  background: #ffffff;
+  background: var(--bg-elevated);
 }
 
 .tab.drag-over {
@@ -156,7 +160,7 @@ select {
 
 .tab-close:hover {
   color: var(--text-primary);
-  background: rgba(0, 0, 0, 0.06);
+  background: var(--bg-hover);
 }
 
 .add-tab-btn {
@@ -172,7 +176,7 @@ select {
 }
 
 .window-control:hover {
-  background: rgba(0, 0, 0, 0.05);
+  background: var(--bg-hover);
 }
 
 .window-control.close:hover {
@@ -189,8 +193,8 @@ select {
   gap: 4px;
   border-radius: 8px;
   border: 1px solid var(--border-soft);
-  background: #ffffff;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-soft);
 }
 
 .tab-context-menu button {
@@ -203,7 +207,7 @@ select {
 }
 
 .tab-context-menu button:hover {
-  background: rgba(0, 120, 212, 0.12);
+  background: var(--bg-active);
 }
 
 .toolbar {
@@ -235,7 +239,7 @@ select {
   padding: 0 10px;
   border: 1px solid var(--border-soft);
   border-radius: 6px;
-  background: #ffffff;
+  background: var(--bg-elevated);
 }
 
 .toolbar button {
@@ -258,7 +262,7 @@ select {
   padding: 0 10px;
   border: 1px solid var(--border-soft);
   border-radius: 6px;
-  background: #ffffff;
+  background: var(--bg-elevated);
 }
 
 .searchbar button {
@@ -266,7 +270,7 @@ select {
   min-width: 72px;
   border: 1px solid var(--border-soft);
   border-radius: 6px;
-  background: #ffffff;
+  background: var(--bg-elevated);
   cursor: pointer;
 }
 
@@ -331,7 +335,7 @@ select {
   padding: 0 10px;
   border: 1px solid var(--border-soft);
   border-radius: 6px;
-  background: #ffffff;
+  background: var(--bg-elevated);
 }
 
 .sidebar-section p {
@@ -345,7 +349,7 @@ select {
   min-width: 22px;
   border: 1px solid var(--border-soft);
   border-radius: 6px;
-  background: #ffffff;
+  background: var(--bg-elevated);
   cursor: pointer;
 }
 
@@ -366,12 +370,12 @@ select {
 }
 
 .folder-item:hover {
-  background: rgba(0, 0, 0, 0.05);
+  background: var(--bg-hover);
 }
 
 .folder-item.active {
-  background: rgba(0, 120, 212, 0.14);
-  color: #0c4f86;
+  background: var(--bg-active);
+  color: var(--text-primary);
 }
 
 .tag-list {
@@ -383,14 +387,14 @@ select {
 .tag-chip {
   border: 1px solid var(--border-soft);
   border-radius: 999px;
-  background: #ffffff;
+  background: var(--bg-elevated);
   font-size: 12px;
   padding: 4px 8px;
   cursor: pointer;
 }
 
 .tag-chip.active {
-  background: rgba(0, 120, 212, 0.12);
+  background: var(--bg-active);
   border-color: var(--accent);
 }
 
@@ -404,19 +408,19 @@ select {
 .note-list-item {
   border: 1px solid var(--border-soft);
   border-radius: 8px;
-  background: #ffffff;
+  background: var(--bg-elevated);
   text-align: left;
   padding: 8px;
   cursor: pointer;
 }
 
 .note-list-item:hover {
-  border-color: #d8cbc1;
+  border-color: var(--accent);
 }
 
 .note-list-item.active {
   border-color: var(--accent);
-  background: rgba(0, 120, 212, 0.07);
+  background: var(--bg-active);
 }
 
 .note-item-head {
@@ -452,7 +456,7 @@ select {
 .note-item-folder {
   display: block;
   font-size: 11px;
-  color: #7a7a7a;
+  color: var(--text-muted);
   margin-top: 4px;
 }
 
@@ -470,8 +474,8 @@ select {
   gap: 4px;
   border-radius: 8px;
   border: 1px solid var(--border-soft);
-  background: #ffffff;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-soft);
 }
 
 .sidebar-context-menu button {
@@ -484,7 +488,7 @@ select {
 }
 
 .sidebar-context-menu button:hover {
-  background: rgba(0, 120, 212, 0.12);
+  background: var(--bg-active);
 }
 
 .editor-workspace {
@@ -531,7 +535,7 @@ select {
   margin: 10px 0;
   padding: 10px 12px;
   border-radius: 8px;
-  background: #f6f6f6;
+  background: var(--bg-surface);
 }
 
 .note-editor a {
@@ -599,6 +603,80 @@ select {
 
 .statusbar-right {
   justify-self: end;
+}
+
+.settings-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.28);
+  display: flex;
+  justify-content: flex-end;
+  z-index: 60;
+}
+
+.settings-panel {
+  width: min(420px, 92vw);
+  height: 100%;
+  background: var(--bg-elevated);
+  border-left: 1px solid var(--border-soft);
+  box-shadow: var(--shadow-soft);
+  display: flex;
+  flex-direction: column;
+}
+
+.settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.settings-header h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.settings-header button {
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.settings-body {
+  display: grid;
+  gap: 16px;
+  padding: 16px;
+}
+
+.settings-item {
+  display: grid;
+  gap: 8px;
+}
+
+.settings-item label {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.settings-item select {
+  height: 34px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  padding: 0 10px;
+}
+
+.settings-readonly {
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--bg-surface);
+  font-size: 12px;
+  color: var(--text-muted);
+  word-break: break-all;
 }
 
 @media (max-width: 980px) {

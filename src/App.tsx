@@ -1,15 +1,17 @@
 ﻿import { Editor as TiptapEditor } from "@tiptap/react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Editor from "./components/Editor";
+import SettingsPanel, { type ThemeMode } from "./components/SettingsPanel";
 import Sidebar, { type SidebarTag } from "./components/Sidebar";
 import StatusBar from "./components/StatusBar";
 import TitleBar from "./components/TitleBar";
 import Toolbar from "./components/Toolbar";
 import { useAutoSave } from "./hooks/useAutoSave";
-import { applyTheme } from "./styles/themes";
+import { applyTheme, type ThemeName } from "./styles/themes";
 import { useNoteStore } from "./stores/noteStore";
 
 const CUSTOM_FOLDERS_KEY = "hwan-note:custom-folders";
+const THEME_MODE_KEY = "hwan-note:theme-mode";
 
 type SortMode = "updated" | "title" | "created";
 
@@ -71,6 +73,14 @@ function replaceFolderPrefix(path: string, from: string, to: string) {
   return path;
 }
 
+function resolveTheme(mode: ThemeMode, prefersDark: boolean): ThemeName {
+  if (mode === "system") {
+    return prefersDark ? "dark" : "light";
+  }
+
+  return mode;
+}
+
 export default function App() {
   const tabs = useNoteStore((state) => state.tabs);
   const activeTabId = useNoteStore((state) => state.activeTabId);
@@ -100,6 +110,9 @@ export default function App() {
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
   const [sortMode, setSortMode] = useState<SortMode>("updated");
   const [customFolders, setCustomFolders] = useState<string[]>([]);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [themeMode, setThemeMode] = useState<ThemeMode>("light");
+  const [autoSaveDir, setAutoSaveDir] = useState("");
 
   const activeTab = useMemo(
     () => tabs.find((tab) => tab.id === activeTabId) ?? tabs[0],
@@ -206,11 +219,20 @@ export default function App() {
     } catch (error) {
       console.warn("Failed to load custom folders", error);
     }
+
+    const savedThemeMode = window.localStorage.getItem(THEME_MODE_KEY);
+    if (savedThemeMode === "light" || savedThemeMode === "dark" || savedThemeMode === "system") {
+      setThemeMode(savedThemeMode);
+    }
   }, []);
 
   useEffect(() => {
     window.localStorage.setItem(CUSTOM_FOLDERS_KEY, JSON.stringify(customFolders));
   }, [customFolders]);
+
+  useEffect(() => {
+    window.localStorage.setItem(THEME_MODE_KEY, themeMode);
+  }, [themeMode]);
 
   useEffect(() => {
     const noteApi = window.hwanNote?.note;
@@ -300,8 +322,31 @@ export default function App() {
   });
 
   useEffect(() => {
-    applyTheme("light");
+    const noteApi = window.hwanNote?.note;
+    if (!noteApi?.getAutoSaveDir) {
+      return;
+    }
+
+    void noteApi.getAutoSaveDir().then(setAutoSaveDir).catch(() => {
+      setAutoSaveDir("");
+    });
   }, []);
+
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const applyCurrentTheme = () => {
+      applyTheme(resolveTheme(themeMode, media.matches));
+    };
+
+    applyCurrentTheme();
+
+    if (themeMode !== "system") {
+      return;
+    }
+
+    media.addEventListener("change", applyCurrentTheme);
+    return () => media.removeEventListener("change", applyCurrentTheme);
+  }, [themeMode]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -360,6 +405,21 @@ export default function App() {
     toggleSidebar
   ]);
 
+  useEffect(() => {
+    if (!settingsOpen) {
+      return;
+    }
+
+    const onEsc = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setSettingsOpen(false);
+      }
+    };
+
+    window.addEventListener("keydown", onEsc);
+    return () => window.removeEventListener("keydown", onEsc);
+  }, [settingsOpen]);
+
   const handleToggleMaximize = useCallback(async () => {
     const winApi = window.hwanNote?.window;
     if (!winApi) {
@@ -369,6 +429,16 @@ export default function App() {
     const nextState = await winApi.toggleMaximize();
     setIsMaximized(nextState);
   }, []);
+
+  const themeLabel = useMemo(() => {
+    if (themeMode === "system") {
+      return "Theme: System";
+    }
+    if (themeMode === "dark") {
+      return "Theme: Dark";
+    }
+    return "Theme: Light";
+  }, [themeMode]);
 
   return (
     <div className="app-shell">
@@ -388,7 +458,7 @@ export default function App() {
         onCloseWindow={() => void window.hwanNote?.window.close()}
       />
 
-      <Toolbar editor={editor} />
+      <Toolbar editor={editor} onOpenSettings={() => setSettingsOpen(true)} />
 
       <div className="workspace">
         <Sidebar
@@ -458,7 +528,15 @@ export default function App() {
         </main>
       </div>
 
-      <StatusBar line={cursor.line} column={cursor.column} chars={cursor.chars} />
+      <StatusBar line={cursor.line} column={cursor.column} chars={cursor.chars} themeLabel={themeLabel} />
+
+      <SettingsPanel
+        open={settingsOpen}
+        themeMode={themeMode}
+        autoSaveDir={autoSaveDir}
+        onThemeModeChange={setThemeMode}
+        onClose={() => setSettingsOpen(false)}
+      />
     </div>
   );
 }

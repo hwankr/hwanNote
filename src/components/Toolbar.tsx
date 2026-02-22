@@ -1,10 +1,11 @@
-import { Editor as TiptapEditor } from "@tiptap/react";
+﻿import { Editor as TiptapEditor } from "@tiptap/react";
 
 interface ToolbarProps {
   editor: TiptapEditor | null;
+  onOpenSettings: () => void;
 }
 
-export default function Toolbar({ editor }: ToolbarProps) {
+export default function Toolbar({ editor, onOpenSettings }: ToolbarProps) {
   const setHeading = (value: string) => {
     if (!editor) {
       return;
@@ -76,18 +77,14 @@ export default function Toolbar({ editor }: ToolbarProps) {
       </div>
 
       <div className="toolbar-center no-drag">
-        <select
-          aria-label="제목 레벨"
-          defaultValue="paragraph"
-          onChange={(event) => setHeading(event.target.value)}
-        >
+        <select aria-label="Heading" defaultValue="paragraph" onChange={(event) => setHeading(event.target.value)}>
           <option value="paragraph">본문</option>
           <option value="1">H1</option>
           <option value="2">H2</option>
           <option value="3">H3</option>
         </select>
 
-        <select aria-label="목록 형식" defaultValue="" onChange={(event) => setList(event.target.value)}>
+        <select aria-label="List type" defaultValue="" onChange={(event) => setList(event.target.value)}>
           <option value="">목록</option>
           <option value="bullet">글머리 기호</option>
           <option value="ordered">번호 매기기</option>
@@ -109,7 +106,9 @@ export default function Toolbar({ editor }: ToolbarProps) {
       </div>
 
       <div className="toolbar-right no-drag">
-        <button type="button">⚙</button>
+        <button type="button" onClick={onOpenSettings} aria-label="설정 열기">
+          설정
+        </button>
       </div>
     </div>
   );
