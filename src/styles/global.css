@@ -531,6 +531,16 @@ select {
   overflow: auto;
 }
 
+.editor-content {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+}
+
+.editor-content > div {
+  width: 100%;
+}
+
 .note-editor {
   width: 100%;
   min-height: 100%;

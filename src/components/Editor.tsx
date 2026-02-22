@@ -10,7 +10,7 @@ import TaskList from "@tiptap/extension-task-list";
 import Italic from "@tiptap/extension-italic";
 import StarterKit from "@tiptap/starter-kit";
 import { Editor as TiptapEditor, EditorContent, useEditor } from "@tiptap/react";
-import { useEffect } from "react";
+import { type MouseEvent as ReactMouseEvent, useCallback, useEffect } from "react";
 import { useI18n } from "../i18n/context";
 
 interface EditorProps {
@@ -124,9 +124,26 @@ export default function Editor({ content, onChange, onCursorChange, onEditorRead
     }
   }, [content, editor, onCursorChange]);
 
+  const handleShellMouseDown = useCallback((event: ReactMouseEvent<HTMLElement>) => {
+    if (!editor) {
+      return;
+    }
+
+    if (event.button !== 0) {
+      return;
+    }
+
+    const target = event.target as HTMLElement | null;
+    if (target?.closest(".note-editor")) {
+      return;
+    }
+
+    editor.chain().focus("end").run();
+  }, [editor]);
+
   return (
-    <section className="editor-shell">
-      <EditorContent editor={editor} />
+    <section className="editor-shell" onMouseDown={handleShellMouseDown}>
+      <EditorContent className="editor-content" editor={editor} />
     </section>
   );
 }

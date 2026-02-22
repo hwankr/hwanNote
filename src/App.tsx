@@ -448,7 +448,10 @@ export default function App() {
         return;
       }
 
-      const isEditorFocus = Boolean(target?.closest(".note-editor"));
+      const activeElement = document.activeElement as HTMLElement | null;
+      const isEditorFocus = Boolean(
+        target?.closest(".note-editor, .editor-shell") ?? activeElement?.closest(".note-editor")
+      );
 
       for (const action of SHORTCUT_ACTIONS) {
         const shortcut = shortcuts[action];
