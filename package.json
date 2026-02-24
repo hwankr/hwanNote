@@ -64,6 +64,12 @@
       "dist-electron/**",
       "package.json"
     ],
+    "extraResources": [
+      {
+        "from": "resources/icon.ico",
+        "to": "icon.ico"
+      }
+    ],
     "fileAssociations": [
       {
         "ext": "md",
@@ -73,6 +79,7 @@
       }
     ],
     "win": {
+      "icon": "resources/icon.ico",
       "signAndEditExecutable": false,
       "target": [
         {

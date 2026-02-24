@@ -13,7 +13,12 @@ import {
 const isDev = !app.isPackaged;
 
 function createMainWindow() {
+  const iconPath = isDev
+    ? path.join(__dirname, "../resources/icon.ico")
+    : path.join(process.resourcesPath, "icon.ico");
+
   const mainWindow = new BrowserWindow({
+    icon: iconPath,
     width: 1280,
     height: 840,
     minWidth: 960,
