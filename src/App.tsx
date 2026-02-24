@@ -26,10 +26,13 @@ import { useNoteStore } from "./stores/noteStore";
 const CUSTOM_FOLDERS_KEY = "hwan-note:custom-folders";
 const EDITOR_LINE_HEIGHT_KEY = "hwan-note:editor-line-height";
 const SHORTCUTS_KEY = "hwan-note:shortcuts";
+const TAB_SIZE_KEY = "hwan-note:tab-size";
 const THEME_MODE_KEY = "hwan-note:theme-mode";
 const MIN_EDITOR_LINE_HEIGHT = 1.2;
 const MAX_EDITOR_LINE_HEIGHT = 2.2;
 const DEFAULT_EDITOR_LINE_HEIGHT = 1.55;
+const DEFAULT_TAB_SIZE = 4;
+const VALID_TAB_SIZES = [2, 4, 8];
 
 type SortMode = "updated" | "title" | "created";
 
@@ -273,6 +276,7 @@ export default function App() {
   const [editorLineHeight, setEditorLineHeight] = useState(DEFAULT_EDITOR_LINE_HEIGHT);
   const [autoSaveDir, setAutoSaveDir] = useState("");
   const [shortcuts, setShortcuts] = useState<ShortcutMap>(() => createDefaultShortcuts());
+  const [tabSize, setTabSize] = useState(DEFAULT_TAB_SIZE);
 
   const activeTab = useMemo(
     () => tabs.find((tab) => tab.id === activeTabId) ?? tabs[0],
@@ -393,14 +397,24 @@ export default function App() {
 
     try {
       const rawLineHeight = window.localStorage.getItem(EDITOR_LINE_HEIGHT_KEY);
-      if (!rawLineHeight) {
-        return;
+      if (rawLineHeight) {
+        const parsed = Number.parseFloat(rawLineHeight);
+        setEditorLineHeight(normalizeEditorLineHeight(parsed));
       }
-
-      const parsed = Number.parseFloat(rawLineHeight);
-      setEditorLineHeight(normalizeEditorLineHeight(parsed));
     } catch (error) {
       console.warn("Failed to load editor line-height", error);
+    }
+
+    try {
+      const rawTabSize = window.localStorage.getItem(TAB_SIZE_KEY);
+      if (rawTabSize) {
+        const parsed = Number.parseInt(rawTabSize, 10);
+        if (VALID_TAB_SIZES.includes(parsed)) {
+          setTabSize(parsed);
+        }
+      }
+    } catch (error) {
+      console.warn("Failed to load tab size", error);
     }
   }, []);
 
@@ -415,6 +429,10 @@ export default function App() {
   useEffect(() => {
     window.localStorage.setItem(SHORTCUTS_KEY, JSON.stringify(shortcuts));
   }, [shortcuts]);
+
+  useEffect(() => {
+    window.localStorage.setItem(TAB_SIZE_KEY, String(tabSize));
+  }, [tabSize]);
 
   useEffect(() => {
     window.localStorage.setItem(EDITOR_LINE_HEIGHT_KEY, String(editorLineHeight));
@@ -805,6 +823,7 @@ export default function App() {
             <Editor
               key={activeTab.id}
               content={activeTab.content}
+              tabSize={tabSize}
               onEditorReady={setEditor}
               onChange={(content, plainText) => updateActiveContent(content, plainText)}
               onCursorChange={(line, column, chars) => setCursor({ line, column, chars })}
@@ -819,10 +838,12 @@ export default function App() {
         open={settingsOpen}
         themeMode={themeMode}
         editorLineHeight={editorLineHeight}
+        tabSize={tabSize}
         autoSaveDir={autoSaveDir}
         shortcuts={shortcuts}
         onThemeModeChange={setThemeMode}
         onEditorLineHeightChange={(value) => setEditorLineHeight(normalizeEditorLineHeight(value))}
+        onTabSizeChange={(size) => setTabSize(VALID_TAB_SIZES.includes(size) ? size : DEFAULT_TAB_SIZE)}
         onShortcutChange={handleShortcutChange}
         onResetShortcuts={handleShortcutReset}
         onClose={() => setSettingsOpen(false)}

@@ -11,11 +11,13 @@ import Italic from "@tiptap/extension-italic";
 import StarterKit from "@tiptap/starter-kit";
 import { Editor as TiptapEditor, EditorContent, useEditor } from "@tiptap/react";
 import { type MouseEvent as ReactMouseEvent, useCallback, useEffect } from "react";
+import { TabIndent } from "../extensions/tabIndent";
 import { ToggleBlock, ToggleContent, ToggleSummary } from "../extensions/toggleBlock";
 import { useI18n } from "../i18n/context";
 
 interface EditorProps {
   content: string;
+  tabSize: number;
   onChange: (content: string, plainText: string) => void;
   onCursorChange: (line: number, column: number, chars: number) => void;
   onEditorReady: (editor: TiptapEditor | null) => void;
@@ -53,7 +55,7 @@ const ItalicWithoutShortcut = Italic.extend({
   }
 });
 
-export default function Editor({ content, onChange, onCursorChange, onEditorReady }: EditorProps) {
+export default function Editor({ content, tabSize, onChange, onCursorChange, onEditorReady }: EditorProps) {
   const { t } = useI18n();
   const placeholderText = t("editor.placeholder");
 
@@ -88,6 +90,9 @@ export default function Editor({ content, onChange, onCursorChange, onEditorRead
       TableCell,
       Placeholder.configure({
         placeholder: placeholderText
+      }),
+      TabIndent.configure({
+        tabSize
       })
     ],
     content,
@@ -115,6 +120,17 @@ export default function Editor({ content, onChange, onCursorChange, onEditorRead
       onEditorReady(null);
     };
   }, [editor, onEditorReady]);
+
+  useEffect(() => {
+    if (!editor) {
+      return;
+    }
+
+    const tabIndentExt = editor.extensionManager.extensions.find((ext) => ext.name === "tabIndent");
+    if (tabIndentExt) {
+      tabIndentExt.options.tabSize = tabSize;
+    }
+  }, [editor, tabSize]);
 
   useEffect(() => {
     if (!editor) {

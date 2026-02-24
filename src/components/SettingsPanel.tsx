@@ -18,10 +18,12 @@ interface SettingsPanelProps {
   open: boolean;
   themeMode: ThemeMode;
   editorLineHeight: number;
+  tabSize: number;
   autoSaveDir: string;
   shortcuts: ShortcutMap;
   onThemeModeChange: (mode: ThemeMode) => void;
   onEditorLineHeightChange: (value: number) => void;
+  onTabSizeChange: (size: number) => void;
   onShortcutChange: (action: ShortcutAction, combo: ShortcutCombo) => ShortcutValidationResult;
   onResetShortcuts: () => void;
   onClose: () => void;
@@ -31,10 +33,12 @@ export default function SettingsPanel({
   open,
   themeMode,
   editorLineHeight,
+  tabSize,
   autoSaveDir,
   shortcuts,
   onThemeModeChange,
   onEditorLineHeightChange,
+  onTabSizeChange,
   onShortcutChange,
   onResetShortcuts,
   onClose
@@ -153,6 +157,20 @@ export default function SettingsPanel({
               </span>
             </div>
             <div className="settings-subtext">{t("settings.lineSpacingHelp")}</div>
+          </div>
+
+          <div className="settings-item">
+            <label htmlFor="tab-size">{t("settings.tabSize")}</label>
+            <select
+              id="tab-size"
+              value={tabSize}
+              onChange={(event) => onTabSizeChange(Number.parseInt(event.target.value, 10))}
+            >
+              <option value="2">2</option>
+              <option value="4">4</option>
+              <option value="8">8</option>
+            </select>
+            <div className="settings-subtext">{t("settings.tabSizeHelp")}</div>
           </div>
 
           <div className="settings-item">
