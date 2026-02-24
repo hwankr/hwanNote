@@ -302,6 +302,12 @@ select {
   gap: 6px;
 }
 
+.toolbar-save-time {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
 .toolbar button {
   height: 28px;
   width: 28px;
@@ -1220,6 +1226,10 @@ select {
 
   .toolbar-separator {
     margin: 0 2px;
+  }
+
+  .toolbar-save-time {
+    display: none;
   }
 }
 

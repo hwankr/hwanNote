@@ -11,6 +11,7 @@ export interface NoteTab {
   folderPath: string;
   createdAt: number;
   updatedAt: number;
+  lastSavedAt: number;
 }
 
 interface NoteStore {
@@ -66,7 +67,8 @@ function createEmptyTab(): NoteTab {
     isPinned: false,
     folderPath: "inbox",
     createdAt: now,
-    updatedAt: now
+    updatedAt: now,
+    lastSavedAt: 0
   };
 }
 
@@ -323,7 +325,7 @@ export const useNoteStore = create<NoteStore>((set, get) => {
     },
     markTabSaved: (id) => {
       set((state) => ({
-        tabs: state.tabs.map((tab) => (tab.id === id ? { ...tab, isDirty: false } : tab))
+        tabs: state.tabs.map((tab) => (tab.id === id ? { ...tab, isDirty: false, lastSavedAt: Date.now() } : tab))
       }));
     },
     toggleSidebar: () => {

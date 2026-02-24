@@ -465,7 +465,8 @@ export default function App() {
             isPinned: false,
             folderPath: normalizeFolderPath(note.folderPath),
             createdAt: note.createdAt,
-            updatedAt: note.updatedAt
+            updatedAt: note.updatedAt,
+            lastSavedAt: 0
           }))
         );
 
@@ -781,6 +782,7 @@ export default function App() {
         activeTabId={activeTab?.id ?? ""}
         isTitleManual={Boolean(activeTab?.isTitleManual)}
         onChangeTitle={setActiveTitle}
+        lastSavedAt={activeTab?.lastSavedAt ?? 0}
         onOpenSettings={() => setSettingsOpen(true)}
       />
 

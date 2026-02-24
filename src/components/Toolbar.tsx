@@ -60,6 +60,7 @@ interface ToolbarProps {
   activeTabId: string;
   isTitleManual: boolean;
   onChangeTitle: (title: string) => void;
+  lastSavedAt: number;
   onOpenSettings: () => void;
 }
 
@@ -69,9 +70,10 @@ export default function Toolbar({
   activeTabId,
   isTitleManual,
   onChangeTitle,
+  lastSavedAt,
   onOpenSettings
 }: ToolbarProps) {
-  const { t } = useI18n();
+  const { t, localeTag } = useI18n();
   const [titleInput, setTitleInput] = useState(activeTitle);
   const [listMenuKey, setListMenuKey] = useState(0);
   const [tablePopupAnchor, setTablePopupAnchor] = useState<{ x: number; y: number } | null>(null);
@@ -360,6 +362,16 @@ export default function Toolbar({
       )}
 
       <div className="toolbar-right no-drag">
+        {lastSavedAt > 0 && (
+          <span className="toolbar-save-time">
+            {t("toolbar.savedAt", {
+              time: new Intl.DateTimeFormat(localeTag, {
+                hour: "2-digit",
+                minute: "2-digit"
+              }).format(new Date(lastSavedAt))
+            })}
+          </span>
+        )}
         <button
           type="button"
           aria-label={t("toolbar.openSettings")}
