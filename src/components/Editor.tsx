@@ -5,7 +5,7 @@ import Table from "@tiptap/extension-table";
 import TableCell from "@tiptap/extension-table-cell";
 import TableHeader from "@tiptap/extension-table-header";
 import TableRow from "@tiptap/extension-table-row";
-import TaskItem from "@tiptap/extension-task-item";
+import { TaskItemExtended } from "../extensions/taskItemExtended";
 import TaskList from "@tiptap/extension-task-list";
 import Italic from "@tiptap/extension-italic";
 import StarterKit from "@tiptap/starter-kit";
@@ -69,7 +69,7 @@ export default function Editor({ content, onChange, onCursorChange, onEditorRead
       BoldWithoutShortcut,
       ItalicWithoutShortcut,
       TaskList,
-      TaskItem.configure({
+      TaskItemExtended.configure({
         nested: true
       }),
       ToggleBlock,

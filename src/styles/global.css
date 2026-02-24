@@ -658,6 +658,10 @@ select {
   padding: 0;
 }
 
+.note-editor ul[data-type="taskList"]:empty {
+  display: none;
+}
+
 .note-editor ul[data-type="taskList"] li {
   display: flex;
   align-items: flex-start;
