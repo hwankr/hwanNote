@@ -1,6 +1,6 @@
 ﻿import { Editor as TiptapEditor } from "@tiptap/react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import Editor from "./components/Editor";
+import Editor, { restoreEditorFocus } from "./components/Editor";
 import SettingsPanel, { type ThemeMode } from "./components/SettingsPanel";
 import Sidebar, { type SidebarTag } from "./components/Sidebar";
 import StatusBar from "./components/StatusBar";
@@ -806,12 +806,13 @@ export default function App() {
     const onEsc = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         setSettingsOpen(false);
+        restoreEditorFocus(editor);
       }
     };
 
     window.addEventListener("keydown", onEsc);
     return () => window.removeEventListener("keydown", onEsc);
-  }, [settingsOpen]);
+  }, [editor, settingsOpen]);
 
   const handleToggleMaximize = useCallback(async () => {
     const winApi = window.hwanNote?.window;
@@ -947,7 +948,10 @@ export default function App() {
         onTabSizeChange={(size) => setTabSize(VALID_TAB_SIZES.includes(size) ? size : DEFAULT_TAB_SIZE)}
         onShortcutChange={handleShortcutChange}
         onResetShortcuts={handleShortcutReset}
-        onClose={() => setSettingsOpen(false)}
+        onClose={() => {
+          setSettingsOpen(false);
+          restoreEditorFocus(editor);
+        }}
       />
     </div>
   );

@@ -64,11 +64,19 @@ interface LinkBubbleState {
   to: number;
 }
 
+export function restoreEditorFocus(editor: TiptapEditor | null) {
+  if (!editor || editor.isDestroyed) return;
+  requestAnimationFrame(() => {
+    if (!editor.isDestroyed) {
+      editor.commands.focus();
+    }
+  });
+}
+
 export default function Editor({ content, tabSize, onChange, onCursorChange, onEditorReady }: EditorProps) {
   const { t } = useI18n();
   const placeholderText = t("editor.placeholder");
   const [linkBubble, setLinkBubble] = useState<LinkBubbleState | null>(null);
-  const closeLinkBubble = useCallback(() => setLinkBubble(null), []);
   const editor = useEditor({
     extensions: [
       StarterKit.configure({
@@ -123,6 +131,11 @@ export default function Editor({ content, tabSize, onChange, onCursorChange, onE
       onCursorChange(cursor.line, cursor.column, cursor.chars);
     }
   }, [placeholderText]);
+
+  const closeLinkBubble = useCallback(() => {
+    setLinkBubble(null);
+    restoreEditorFocus(editor);
+  }, [editor]);
 
   useEffect(() => {
     onEditorReady(editor);

@@ -2,6 +2,7 @@ import { getMarkRange } from "@tiptap/core";
 import { Editor as TiptapEditor } from "@tiptap/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useI18n } from "../i18n/context";
+import { restoreEditorFocus } from "./Editor";
 import LinkPopup from "./LinkPopup";
 import TableSizePopup from "./TableSizePopup";
 
@@ -81,8 +82,14 @@ export default function Toolbar({
   const [linkContext, setLinkContext] = useState<{ url: string; name: string; from: number; to: number }>({ url: "https://", name: "", from: 0, to: 0 });
   const tableButtonRef = useRef<HTMLButtonElement>(null);
   const linkButtonRef = useRef<HTMLButtonElement>(null);
-  const closeTablePopup = useCallback(() => setTablePopupAnchor(null), []);
-  const closeLinkPopup = useCallback(() => setLinkPopupAnchor(null), []);
+  const closeTablePopup = useCallback(() => {
+    setTablePopupAnchor(null);
+    restoreEditorFocus(editor);
+  }, [editor]);
+  const closeLinkPopup = useCallback(() => {
+    setLinkPopupAnchor(null);
+    restoreEditorFocus(editor);
+  }, [editor]);
   const normalizeTitle = (value: string) => value.trim().slice(0, 50);
 
   useEffect(() => {
@@ -244,12 +251,14 @@ export default function Toolbar({
             if (event.key === "Enter") {
               event.preventDefault();
               commitTitle();
+              editor?.commands.focus();
               return;
             }
 
             if (event.key === "Escape") {
               event.preventDefault();
               setTitleInput(activeTitle);
+              editor?.commands.focus();
             }
           }}
         />
