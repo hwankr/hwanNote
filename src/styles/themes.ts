@@ -12,7 +12,8 @@ export const lightTheme = {
   "--text-muted": "#666666",
   "--accent": "#0078D4",
   "--border-soft": "#E6DED8",
-  "--shadow-soft": "0 8px 24px rgba(0, 0, 0, 0.18)"
+  "--shadow-soft": "0 8px 24px rgba(0, 0, 0, 0.18)",
+  "--shadow-tab": "0 1px 3px rgba(0, 0, 0, 0.08)"
 };
 
 export const darkTheme = {
@@ -27,7 +28,8 @@ export const darkTheme = {
   "--text-muted": "#888888",
   "--accent": "#4FC3F7",
   "--border-soft": "#3C3C3C",
-  "--shadow-soft": "0 8px 24px rgba(0, 0, 0, 0.45)"
+  "--shadow-soft": "0 8px 24px rgba(0, 0, 0, 0.45)",
+  "--shadow-tab": "0 1px 3px rgba(255, 255, 255, 0.06)"
 };
 
 export function applyTheme(theme: ThemeName) {

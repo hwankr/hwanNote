@@ -2,6 +2,55 @@
 import { useI18n } from "../i18n/context";
 import type { NoteTab } from "../stores/noteStore";
 
+const MenuIcon = (
+  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path d="M2 4h12M2 8h12M2 12h12" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+  </svg>
+);
+
+const CloseTabIcon = (
+  <svg width="12" height="12" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+  </svg>
+);
+
+const AddTabIcon = (
+  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+  </svg>
+);
+
+const PinIcon = (
+  <svg width="10" height="10" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path d="M10 2L6 6 3 5.5 2 7l3.5 3.5L4 14l1.5-1 3.5-3L9.5 13 11 10l4-4-5-4z" fill="currentColor"/>
+  </svg>
+);
+
+const MinimizeIcon = (
+  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path d="M4 8h8" stroke="currentColor" strokeWidth="1" strokeLinecap="round"/>
+  </svg>
+);
+
+const MaximizeIcon = (
+  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <rect x="3.5" y="3.5" width="9" height="9" rx="1" stroke="currentColor" strokeWidth="1"/>
+  </svg>
+);
+
+const RestoreIcon = (
+  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <rect x="4.5" y="5.5" width="7" height="7" rx="1" stroke="currentColor" strokeWidth="1"/>
+    <path d="M6.5 5.5V4.5a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-1" stroke="currentColor" strokeWidth="1"/>
+  </svg>
+);
+
+const CloseWindowIcon = (
+  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1" strokeLinecap="round"/>
+  </svg>
+);
+
 interface TitleBarProps {
   tabs: NoteTab[];
   activeTabId: string;
@@ -98,7 +147,7 @@ export default function TitleBar({
           aria-label={t("titlebar.toggleSidebar")}
           onClick={onToggleSidebar}
         >
-          {t("titlebar.menu")}
+          {MenuIcon}
         </button>
       </div>
 
@@ -148,7 +197,7 @@ export default function TitleBar({
               title={tab.title}
               draggable
             >
-              {tab.isPinned ? <span className="tab-pin">PIN</span> : null}
+              {tab.isPinned ? <span className="tab-pin">{PinIcon}</span> : null}
               <span className="tab-title">{tab.title}</span>
               {tab.isDirty ? <span className="tab-dirty">*</span> : null}
               <span
@@ -160,16 +209,15 @@ export default function TitleBar({
                   onCloseTab(tab.id);
                 }}
               >
-                x
+                {CloseTabIcon}
               </span>
             </button>
           ))}
+          <button type="button" className="titlebar-btn no-drag add-tab-btn" onClick={onCreateTab}>
+            {AddTabIcon}
+          </button>
         </div>
         <div className="titlebar-tab-drag-space" aria-hidden="true" />
-
-        <button type="button" className="titlebar-btn no-drag add-tab-btn" onClick={onCreateTab}>
-          +
-        </button>
       </div>
 
       <div className="titlebar-right no-drag">
@@ -179,7 +227,7 @@ export default function TitleBar({
           onClick={onMinimize}
           aria-label={t("titlebar.minimize")}
         >
-          -
+          {MinimizeIcon}
         </button>
         <button
           type="button"
@@ -187,7 +235,7 @@ export default function TitleBar({
           onClick={onToggleMaximize}
           aria-label={isMaximized ? t("titlebar.restore") : t("titlebar.maximize")}
         >
-          {isMaximized ? "R" : "M"}
+          {isMaximized ? RestoreIcon : MaximizeIcon}
         </button>
         <button
           type="button"
@@ -195,7 +243,7 @@ export default function TitleBar({
           onClick={onCloseWindow}
           aria-label={t("titlebar.closeWindow")}
         >
-          X
+          {CloseWindowIcon}
         </button>
       </div>
 
