@@ -2,6 +2,7 @@
   "name": "hwan-note",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "author": "HwanKR",
   "description": "Windows 11 Notepad-style desktop markdown note app with Electron + React + TypeScript.",
   "main": "dist-electron/main.js",
