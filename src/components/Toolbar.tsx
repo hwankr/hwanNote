@@ -41,8 +41,8 @@ const TableIcon = (
 
 const SettingsIcon = (
   <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path d="M6.5 2.2L9.5 2.2L9 4.1L10.8 5.2L12.2 3.8L13.8 6.5L11.9 7L11.9 9L13.8 9.5L12.2 12.2L10.8 10.8L9 11.9L9.5 13.8L6.5 13.8L7 11.9L5.2 10.8L3.8 12.2L2.2 9.5L4.1 9L4.1 7L2.2 6.5L3.8 3.8L5.2 5.2L7 4.1Z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"/>
     <circle cx="8" cy="8" r="2" stroke="currentColor" strokeWidth="1.5"/>
-    <path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.05 3.05l1.41 1.41M11.54 11.54l1.41 1.41M3.05 12.95l1.41-1.41M11.54 4.46l1.41-1.41" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
   </svg>
 );
 
