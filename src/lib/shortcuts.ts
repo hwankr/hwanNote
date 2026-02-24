@@ -12,7 +12,8 @@ export type ShortcutAction =
   | "toggleBold"
   | "toggleItalic"
   | "toggleChecklist"
-  | "insertToggleBlock";
+  | "insertToggleBlock"
+  | "insertDateTime";
 
 export interface ShortcutCombo {
   mod: boolean;
@@ -66,6 +67,10 @@ const DISPLAY_KEY_MAP: Record<string, string> = {
 
 const MODIFIER_KEYS = new Set(["control", "alt", "shift", "meta"]);
 
+function isFunctionKey(key: string): boolean {
+  return /^f([1-9]|1[0-2])$/.test(key);
+}
+
 export const SHORTCUT_ACTIONS: ShortcutAction[] = [
   "toggleSidebar",
   "nextTab",
@@ -76,7 +81,8 @@ export const SHORTCUT_ACTIONS: ShortcutAction[] = [
   "toggleBold",
   "toggleItalic",
   "toggleChecklist",
-  "insertToggleBlock"
+  "insertToggleBlock",
+  "insertDateTime"
 ];
 
 export const SHORTCUT_DEFINITIONS: Record<ShortcutAction, ShortcutDefinition> = {
@@ -129,6 +135,11 @@ export const SHORTCUT_DEFINITIONS: Record<ShortcutAction, ShortcutDefinition> = 
     labelKey: "shortcut.action.insertToggleBlock",
     context: "editor",
     defaultCombo: { mod: true, alt: false, shift: true, key: "t" }
+  },
+  insertDateTime: {
+    labelKey: "shortcut.action.insertDateTime",
+    context: "editor",
+    defaultCombo: { mod: false, alt: false, shift: false, key: "f5" }
   }
 };
 
@@ -139,7 +150,7 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
   },
   {
     labelKey: "shortcut.group.editor",
-    actions: ["toggleBold", "toggleItalic", "toggleChecklist", "insertToggleBlock"]
+    actions: ["toggleBold", "toggleItalic", "toggleChecklist", "insertToggleBlock", "insertDateTime"]
   }
 ];
 
@@ -177,7 +188,7 @@ function isShortcutCombo(value: unknown): value is ShortcutCombo {
     return false;
   }
 
-  if (!candidate.mod && !candidate.alt) {
+  if (!candidate.mod && !candidate.alt && !isFunctionKey(normalizedKey)) {
     return false;
   }
 
@@ -311,7 +322,7 @@ export function shortcutFromKeyboardEvent(event: ShortcutKeyboardEvent): Shortcu
     key: normalizedKey
   };
 
-  if (!nextCombo.mod && !nextCombo.alt) {
+  if (!nextCombo.mod && !nextCombo.alt && !isFunctionKey(normalizedKey)) {
     return null;
   }
 

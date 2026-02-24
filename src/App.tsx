@@ -680,6 +680,26 @@ export default function App() {
             editor.chain().focus().insertToggleBlock().run();
             return;
 
+          case "insertDateTime": {
+            if (!editor) {
+              return;
+            }
+
+            event.preventDefault();
+            const now = new Date();
+            const dateTimeStr = now.toLocaleString(localeTag, {
+              year: "numeric",
+              month: "2-digit",
+              day: "2-digit",
+              hour: "2-digit",
+              minute: "2-digit",
+              second: "2-digit",
+              hour12: false
+            });
+            editor.chain().focus().insertContent(dateTimeStr).run();
+            return;
+          }
+
           default:
             return;
         }
@@ -696,6 +716,7 @@ export default function App() {
     createTab,
     editor,
     handleManualSave,
+    localeTag,
     settingsOpen,
     shortcuts,
     toggleSidebar
