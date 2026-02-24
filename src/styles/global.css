@@ -830,6 +830,50 @@ select {
   min-width: 90px;
 }
 
+/* Table size picker popup */
+.table-size-popup {
+  position: fixed;
+  z-index: 50;
+  padding: 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border-soft);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-soft);
+}
+
+.table-size-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  text-align: center;
+  margin-bottom: 6px;
+  min-height: 18px;
+}
+
+.table-size-grid {
+  display: grid;
+  grid-template-columns: repeat(10, 20px);
+  gap: 2px;
+}
+
+.table-size-cell {
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--border-soft);
+  border-radius: 3px;
+  background: var(--bg-surface);
+  cursor: pointer;
+  transition: background 80ms ease, border-color 80ms ease;
+}
+
+.table-size-cell:hover {
+  border-color: var(--accent);
+}
+
+.table-size-cell.highlighted {
+  background: var(--bg-active);
+  border-color: var(--accent);
+}
+
 .note-editor p.is-editor-empty:first-child::before {
   content: attr(data-placeholder);
   float: left;

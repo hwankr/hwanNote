@@ -1,6 +1,7 @@
 import { Editor as TiptapEditor } from "@tiptap/react";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useI18n } from "../i18n/context";
+import TableSizePopup from "./TableSizePopup";
 
 const BoldIcon = (
   <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -71,6 +72,9 @@ export default function Toolbar({
   const { t } = useI18n();
   const [titleInput, setTitleInput] = useState(activeTitle);
   const [listMenuKey, setListMenuKey] = useState(0);
+  const [tablePopupAnchor, setTablePopupAnchor] = useState<{ x: number; y: number } | null>(null);
+  const tableButtonRef = useRef<HTMLButtonElement>(null);
+  const closeTablePopup = useCallback(() => setTablePopupAnchor(null), []);
   const normalizeTitle = (value: string) => value.trim().slice(0, 50);
 
   useEffect(() => {
@@ -149,12 +153,23 @@ export default function Toolbar({
     editor.chain().focus().setLink({ href: url.trim() }).run();
   };
 
-  const insertTable = () => {
+  const toggleTablePopup = () => {
+    if (tablePopupAnchor) {
+      setTablePopupAnchor(null);
+      return;
+    }
+    const rect = tableButtonRef.current?.getBoundingClientRect();
+    if (rect) {
+      setTablePopupAnchor({ x: rect.left, y: rect.bottom });
+    }
+  };
+
+  const handleTableSelect = (rows: number, cols: number) => {
     if (!editor) {
       return;
     }
-
-    editor.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run();
+    editor.chain().focus().insertTable({ rows, cols, withHeaderRow: true }).run();
+    setTablePopupAnchor(null);
   };
 
   const isToggleBlockActive = editor?.isActive("toggleBlock") ?? false;
@@ -254,13 +269,26 @@ export default function Toolbar({
         </button>
         <button
           type="button"
+          ref={tableButtonRef}
           aria-label={t("toolbar.table")}
           title={t("toolbar.table")}
-          onClick={insertTable}
+          onMouseDown={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+          }}
+          onClick={toggleTablePopup}
         >
           {TableIcon}
         </button>
       </div>
+
+      {tablePopupAnchor && (
+        <TableSizePopup
+          anchor={tablePopupAnchor}
+          onSelect={handleTableSelect}
+          onClose={closeTablePopup}
+        />
+      )}
 
       <div className="toolbar-right no-drag">
         <button

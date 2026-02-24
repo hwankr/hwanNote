@@ -27,8 +27,8 @@ function collectPlainText(editor: TiptapEditor) {
   return editor.state.doc.textBetween(0, editor.state.doc.content.size, "\n");
 }
 
-function collectCursor(editor: TiptapEditor) {
-  const plainText = collectPlainText(editor);
+function collectCursor(editor: TiptapEditor, existingPlainText?: string) {
+  const plainText = existingPlainText ?? collectPlainText(editor);
   const cursorPos = editor.state.selection.from;
   const textBeforeCursor = editor.state.doc.textBetween(0, cursorPos, "\n", "\0");
   const lines = textBeforeCursor.split("\n");
@@ -58,7 +58,6 @@ const ItalicWithoutShortcut = Italic.extend({
 export default function Editor({ content, tabSize, onChange, onCursorChange, onEditorReady }: EditorProps) {
   const { t } = useI18n();
   const placeholderText = t("editor.placeholder");
-
   const editor = useEditor({
     extensions: [
       StarterKit.configure({
@@ -104,7 +103,7 @@ export default function Editor({ content, tabSize, onChange, onCursorChange, onE
     },
     onUpdate: ({ editor }) => {
       const plainText = collectPlainText(editor);
-      const cursor = collectCursor(editor);
+      const cursor = collectCursor(editor, plainText);
       onChange(editor.getHTML(), plainText);
       onCursorChange(cursor.line, cursor.column, cursor.chars);
     },
