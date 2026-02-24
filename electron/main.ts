@@ -1,5 +1,6 @@
-import { app, BrowserWindow, ipcMain, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import path from "node:path";
+import { getCustomAutoSaveDir, getEffectiveAutoSaveDir, setCustomAutoSaveDir } from "./configManager";
 import {
   type AutoSavePayload,
   autoSaveMarkdownNote,
@@ -81,16 +82,44 @@ function setupIpcHandlers() {
     return listMarkdownFiles(dirPath);
   });
 
-  ipcMain.handle("note:auto-save", async (_event, payload: AutoSavePayload) => {
-    return autoSaveMarkdownNote(app.getPath("documents"), payload);
-  });
+  async function resolveEffectiveAutoSaveDir() {
+    const defaultDir = getAutoSaveDir(app.getPath("documents"));
+    return getEffectiveAutoSaveDir(defaultDir);
+  }
 
-  ipcMain.handle("note:get-autosave-dir", () => {
-    return getAutoSaveDir(app.getPath("documents"));
+  ipcMain.handle("note:auto-save", async (_event, payload: AutoSavePayload) => {
+    const effectiveDir = await resolveEffectiveAutoSaveDir();
+    return autoSaveMarkdownNote(effectiveDir, payload);
   });
 
   ipcMain.handle("note:load-all", async () => {
-    return loadMarkdownNotes(app.getPath("documents"));
+    const effectiveDir = await resolveEffectiveAutoSaveDir();
+    return loadMarkdownNotes(effectiveDir);
+  });
+
+  ipcMain.handle("settings:browse-autosave-dir", async () => {
+    const win = BrowserWindow.getFocusedWindow();
+    if (!win) return null;
+    const result = await dialog.showOpenDialog(win, {
+      properties: ["openDirectory", "createDirectory"]
+    });
+    if (result.canceled || result.filePaths.length === 0) return null;
+    return result.filePaths[0];
+  });
+
+  ipcMain.handle("settings:set-autosave-dir", async (_event, dir: string | null) => {
+    await setCustomAutoSaveDir(dir);
+    const defaultDir = getAutoSaveDir(app.getPath("documents"));
+    const effectiveDir = await getEffectiveAutoSaveDir(defaultDir);
+    const customDir = await getCustomAutoSaveDir();
+    return { customDir, effectiveDir, isDefault: customDir === null };
+  });
+
+  ipcMain.handle("settings:get-autosave-dir", async () => {
+    const defaultDir = getAutoSaveDir(app.getPath("documents"));
+    const effectiveDir = await getEffectiveAutoSaveDir(defaultDir);
+    const customDir = await getCustomAutoSaveDir();
+    return { customDir, effectiveDir, isDefault: customDir === null };
   });
 
   ipcMain.handle("shell:open-external", async (_event, url: string) => {

@@ -14,7 +14,6 @@ const api = {
       ipcRenderer.invoke("note:auto-save", { noteId, title, content, folderPath, isTitleManual }) as Promise<{
         filePath: string;
       }>,
-    getAutoSaveDir: () => ipcRenderer.invoke("note:get-autosave-dir") as Promise<string>,
     loadAll: () =>
       ipcRenderer.invoke("note:load-all") as Promise<
         Array<{
@@ -29,6 +28,21 @@ const api = {
           filePath: string;
         }>
       >
+  },
+  settings: {
+    browseAutoSaveDir: () => ipcRenderer.invoke("settings:browse-autosave-dir") as Promise<string | null>,
+    setAutoSaveDir: (dir: string | null) =>
+      ipcRenderer.invoke("settings:set-autosave-dir", dir) as Promise<{
+        customDir: string | null;
+        effectiveDir: string;
+        isDefault: boolean;
+      }>,
+    getAutoSaveDir: () =>
+      ipcRenderer.invoke("settings:get-autosave-dir") as Promise<{
+        customDir: string | null;
+        effectiveDir: string;
+        isDefault: boolean;
+      }>
   }
 };
 

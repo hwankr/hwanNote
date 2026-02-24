@@ -24,7 +24,6 @@ declare global {
           folderPath: string,
           isTitleManual: boolean
         ) => Promise<{ filePath: string }>;
-        getAutoSaveDir: () => Promise<string>;
         loadAll: () => Promise<
           Array<{
             noteId: string;
@@ -38,6 +37,19 @@ declare global {
             filePath: string;
           }>
         >;
+      };
+      settings: {
+        browseAutoSaveDir: () => Promise<string | null>;
+        setAutoSaveDir: (dir: string | null) => Promise<{
+          customDir: string | null;
+          effectiveDir: string;
+          isDefault: boolean;
+        }>;
+        getAutoSaveDir: () => Promise<{
+          customDir: string | null;
+          effectiveDir: string;
+          isDefault: boolean;
+        }>;
       };
     };
   }

@@ -275,6 +275,7 @@ export default function App() {
   const [themeMode, setThemeMode] = useState<ThemeMode>("light");
   const [editorLineHeight, setEditorLineHeight] = useState(DEFAULT_EDITOR_LINE_HEIGHT);
   const [autoSaveDir, setAutoSaveDir] = useState("");
+  const [autoSaveDirIsDefault, setAutoSaveDirIsDefault] = useState(true);
   const [shortcuts, setShortcuts] = useState<ShortcutMap>(() => createDefaultShortcuts());
   const [tabSize, setTabSize] = useState(DEFAULT_TAB_SIZE);
 
@@ -532,6 +533,77 @@ export default function App() {
     }
   }, [activeTab, markTabSaved, t]);
 
+  const handleBrowseAutoSaveDir = useCallback(async () => {
+    await handleManualSave();
+    const settingsApi = window.hwanNote?.settings;
+    if (!settingsApi) return;
+
+    const selected = await settingsApi.browseAutoSaveDir();
+    if (!selected) return;
+
+    try {
+      const result = await settingsApi.setAutoSaveDir(selected);
+      setAutoSaveDir(result.effectiveDir);
+      setAutoSaveDirIsDefault(result.isDefault);
+
+      const noteApi = window.hwanNote?.note;
+      if (noteApi?.loadAll) {
+        const loaded = await noteApi.loadAll();
+        hydrateTabs(
+          loaded.map((note) => ({
+            id: note.noteId,
+            title: note.title,
+            isTitleManual: note.isTitleManual,
+            content: note.content,
+            plainText: note.plainText,
+            isDirty: false,
+            isPinned: false,
+            folderPath: normalizeFolderPath(note.folderPath),
+            createdAt: note.createdAt,
+            updatedAt: note.updatedAt,
+            lastSavedAt: 0
+          }))
+        );
+      }
+    } catch (error) {
+      console.error("Failed to set auto-save directory:", error);
+    }
+  }, [handleManualSave, hydrateTabs]);
+
+  const handleResetAutoSaveDir = useCallback(async () => {
+    await handleManualSave();
+    const settingsApi = window.hwanNote?.settings;
+    if (!settingsApi) return;
+
+    try {
+      const result = await settingsApi.setAutoSaveDir(null);
+      setAutoSaveDir(result.effectiveDir);
+      setAutoSaveDirIsDefault(result.isDefault);
+
+      const noteApi = window.hwanNote?.note;
+      if (noteApi?.loadAll) {
+        const loaded = await noteApi.loadAll();
+        hydrateTabs(
+          loaded.map((note) => ({
+            id: note.noteId,
+            title: note.title,
+            isTitleManual: note.isTitleManual,
+            content: note.content,
+            plainText: note.plainText,
+            isDirty: false,
+            isPinned: false,
+            folderPath: normalizeFolderPath(note.folderPath),
+            createdAt: note.createdAt,
+            updatedAt: note.updatedAt,
+            lastSavedAt: 0
+          }))
+        );
+      }
+    } catch (error) {
+      console.error("Failed to reset auto-save directory:", error);
+    }
+  }, [handleManualSave, hydrateTabs]);
+
   useAutoSave({
     value: activeTab?.content ?? "",
     enabled: Boolean(activeTab?.isDirty),
@@ -540,12 +612,15 @@ export default function App() {
   });
 
   useEffect(() => {
-    const noteApi = window.hwanNote?.note;
-    if (!noteApi?.getAutoSaveDir) {
+    const settingsApi = window.hwanNote?.settings;
+    if (!settingsApi?.getAutoSaveDir) {
       return;
     }
 
-    void noteApi.getAutoSaveDir().then(setAutoSaveDir).catch(() => {
+    void settingsApi.getAutoSaveDir().then((result) => {
+      setAutoSaveDir(result.effectiveDir);
+      setAutoSaveDirIsDefault(result.isDefault);
+    }).catch(() => {
       setAutoSaveDir("");
     });
   }, []);
@@ -863,6 +938,9 @@ export default function App() {
         editorLineHeight={editorLineHeight}
         tabSize={tabSize}
         autoSaveDir={autoSaveDir}
+        autoSaveDirIsDefault={autoSaveDirIsDefault}
+        onBrowseAutoSaveDir={() => void handleBrowseAutoSaveDir()}
+        onResetAutoSaveDir={() => void handleResetAutoSaveDir()}
         shortcuts={shortcuts}
         onThemeModeChange={setThemeMode}
         onEditorLineHeightChange={(value) => setEditorLineHeight(normalizeEditorLineHeight(value))}

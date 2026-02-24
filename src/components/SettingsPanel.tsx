@@ -20,6 +20,9 @@ interface SettingsPanelProps {
   editorLineHeight: number;
   tabSize: number;
   autoSaveDir: string;
+  autoSaveDirIsDefault: boolean;
+  onBrowseAutoSaveDir: () => void;
+  onResetAutoSaveDir: () => void;
   shortcuts: ShortcutMap;
   onThemeModeChange: (mode: ThemeMode) => void;
   onEditorLineHeightChange: (value: number) => void;
@@ -35,6 +38,9 @@ export default function SettingsPanel({
   editorLineHeight,
   tabSize,
   autoSaveDir,
+  autoSaveDirIsDefault,
+  onBrowseAutoSaveDir,
+  onResetAutoSaveDir,
   shortcuts,
   onThemeModeChange,
   onEditorLineHeightChange,
@@ -175,7 +181,24 @@ export default function SettingsPanel({
 
           <div className="settings-item">
             <label>{t("settings.autoSaveDir")}</label>
-            <div className="settings-readonly">{autoSaveDir || t("settings.autoSaveLoading")}</div>
+            <div className="settings-autosave-row">
+              <div className="settings-readonly settings-autosave-path">
+                {autoSaveDir || t("settings.autoSaveLoading")}
+              </div>
+              <button type="button" className="settings-autosave-btn" onClick={onBrowseAutoSaveDir}>
+                {t("settings.autoSaveBrowse")}
+              </button>
+              {!autoSaveDirIsDefault && (
+                <button
+                  type="button"
+                  className="settings-autosave-btn settings-autosave-reset"
+                  onClick={onResetAutoSaveDir}
+                >
+                  {t("settings.autoSaveReset")}
+                </button>
+              )}
+            </div>
+            <div className="settings-subtext">{t("settings.autoSaveDirHelp")}</div>
           </div>
 
           <div className="settings-item">

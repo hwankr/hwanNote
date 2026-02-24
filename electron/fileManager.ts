@@ -403,10 +403,9 @@ export async function listMarkdownFiles(dirPath: string) {
 }
 
 export async function autoSaveMarkdownNote(
-  documentsDir: string,
+  autoSaveDir: string,
   payload: AutoSavePayload
 ): Promise<AutoSaveResult> {
-  const autoSaveDir = getAutoSaveDir(documentsDir);
   const safeId = sanitizeNoteId(payload.noteId) || "note";
   const safeFolderPath = sanitizeFolderPath(payload.folderPath);
   const targetDir = safeFolderPath ? join(autoSaveDir, safeFolderPath) : autoSaveDir;
@@ -446,8 +445,7 @@ export async function autoSaveMarkdownNote(
   };
 }
 
-export async function loadMarkdownNotes(documentsDir: string): Promise<LoadedNote[]> {
-  const autoSaveDir = getAutoSaveDir(documentsDir);
+export async function loadMarkdownNotes(autoSaveDir: string): Promise<LoadedNote[]> {
   await mkdir(autoSaveDir, { recursive: true });
 
   const index = await readIndex(autoSaveDir);
