@@ -1,5 +1,6 @@
 import { Node, mergeAttributes } from "@tiptap/core";
-import { Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
+import { Fragment, Node as ProseMirrorNode } from "@tiptap/pm/model";
+import { NodeSelection, Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
 import { EditorView } from "@tiptap/pm/view";
 
 declare module "@tiptap/core" {
@@ -277,6 +278,67 @@ export const ToggleBlock = Node.create({
     };
 
     return [
+      new Plugin({
+        key: new PluginKey("toggleBlockBackspace"),
+        props: {
+          handleKeyDown: (view, event) => {
+            if (event.key !== "Backspace") {
+              return false;
+            }
+
+            const { state } = view;
+            const { selection } = state;
+
+            // Case 1: NodeSelection on a toggleBlock → unwrap content
+            if (selection instanceof NodeSelection && selection.node.type.name === "toggleBlock") {
+              const toggleNode = selection.node;
+              const togglePos = selection.from;
+              const toggleEnd = selection.to;
+
+              const summaryNode = toggleNode.child(0);
+              const toggleContentNode = toggleNode.child(1);
+              const contentChildren: ProseMirrorNode[] = [];
+
+              if (summaryNode.textContent.trim().length > 0) {
+                contentChildren.push(state.schema.nodes.paragraph.create(null, summaryNode.content));
+              }
+
+              toggleContentNode.forEach((child: ProseMirrorNode) => {
+                contentChildren.push(child);
+              });
+
+              if (contentChildren.length === 0) {
+                contentChildren.push(state.schema.nodes.paragraph.create());
+              }
+
+              const tr = state.tr;
+              tr.replaceWith(togglePos, toggleEnd, contentChildren);
+              tr.setSelection(TextSelection.near(tr.doc.resolve(togglePos), 1));
+              tr.scrollIntoView();
+              view.dispatch(tr);
+              return true;
+            }
+
+            // Case 2: Cursor at beginning of a block right after a toggleBlock → select the toggle
+            const { $from } = selection;
+            if (selection.empty && $from.parentOffset === 0 && $from.depth >= 1) {
+              const blockStartPos = $from.before($from.depth);
+              const $blockStart = state.doc.resolve(blockStartPos);
+              const nodeBefore = $blockStart.nodeBefore;
+
+              if (nodeBefore && nodeBefore.type.name === "toggleBlock") {
+                const togglePos = blockStartPos - nodeBefore.nodeSize;
+                const tr = state.tr.setSelection(NodeSelection.create(state.doc, togglePos));
+                tr.scrollIntoView();
+                view.dispatch(tr);
+                return true;
+              }
+            }
+
+            return false;
+          }
+        }
+      }),
       new Plugin({
         key: new PluginKey("toggleBlockOpenState"),
         props: {
