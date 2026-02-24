@@ -1,6 +1,8 @@
+import { getMarkRange } from "@tiptap/core";
 import { Editor as TiptapEditor } from "@tiptap/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useI18n } from "../i18n/context";
+import LinkPopup from "./LinkPopup";
 import TableSizePopup from "./TableSizePopup";
 
 const BoldIcon = (
@@ -73,8 +75,12 @@ export default function Toolbar({
   const [titleInput, setTitleInput] = useState(activeTitle);
   const [listMenuKey, setListMenuKey] = useState(0);
   const [tablePopupAnchor, setTablePopupAnchor] = useState<{ x: number; y: number } | null>(null);
+  const [linkPopupAnchor, setLinkPopupAnchor] = useState<{ x: number; y: number } | null>(null);
+  const [linkContext, setLinkContext] = useState<{ url: string; name: string; from: number; to: number }>({ url: "https://", name: "", from: 0, to: 0 });
   const tableButtonRef = useRef<HTMLButtonElement>(null);
+  const linkButtonRef = useRef<HTMLButtonElement>(null);
   const closeTablePopup = useCallback(() => setTablePopupAnchor(null), []);
+  const closeLinkPopup = useCallback(() => setLinkPopupAnchor(null), []);
   const normalizeTitle = (value: string) => value.trim().slice(0, 50);
 
   useEffect(() => {
@@ -133,25 +139,73 @@ export default function Toolbar({
     editor.chain().focus().insertToggleBlock().run();
   };
 
-  const insertLink = () => {
-    if (!editor) {
+  const toggleLinkPopup = () => {
+    if (linkPopupAnchor) {
+      setLinkPopupAnchor(null);
       return;
     }
+    if (!editor) return;
 
+    let { from, to } = editor.state.selection;
     const previousUrl = editor.getAttributes("link").href as string | undefined;
-    const url = window.prompt(t("toolbar.linkPrompt"), previousUrl ?? "https://");
 
-    if (url === null) {
-      return;
+    let name = "";
+    if (from !== to) {
+      name = editor.state.doc.textBetween(from, to);
+    } else if (previousUrl) {
+      const $from = editor.state.doc.resolve(from);
+      const linkType = editor.schema.marks.link;
+      const range = linkType ? getMarkRange($from, linkType) : undefined;
+      if (range) {
+        name = editor.state.doc.textBetween(range.from, range.to);
+        from = range.from;
+        to = range.to;
+      }
     }
 
-    if (!url.trim()) {
-      editor.chain().focus().unsetLink().run();
-      return;
+    const rect = linkButtonRef.current?.getBoundingClientRect();
+    if (rect) {
+      setLinkContext({ url: previousUrl ?? "https://", name, from, to });
+      setLinkPopupAnchor({ x: rect.left, y: rect.bottom });
     }
-
-    editor.chain().focus().setLink({ href: url.trim() }).run();
   };
+
+  const handleLinkConfirm = useCallback((url: string, displayName: string) => {
+    if (!editor) {
+      setLinkPopupAnchor(null);
+      return;
+    }
+
+    if (!url) {
+      editor.chain().focus().setTextSelection({ from: linkContext.from, to: linkContext.to }).unsetLink().run();
+      setLinkPopupAnchor(null);
+      return;
+    }
+
+    const textToInsert = displayName || url;
+    const { from, to } = linkContext;
+
+    if (from === to) {
+      editor.chain().focus().setTextSelection(from).insertContent({
+        type: "text",
+        text: textToInsert,
+        marks: [{ type: "link", attrs: { href: url } }]
+      }).run();
+    } else {
+      const selectedText = editor.state.doc.textBetween(from, to);
+      if (selectedText === textToInsert) {
+        editor.chain().focus().setTextSelection({ from, to }).setLink({ href: url }).run();
+      } else {
+        editor.chain().focus().setTextSelection({ from, to }).deleteSelection().insertContent({
+          type: "text",
+          text: textToInsert,
+          marks: [{ type: "link", attrs: { href: url } }]
+        }).run();
+      }
+    }
+
+    setLinkPopupAnchor(null);
+  }, [editor, linkContext]);
 
   const toggleTablePopup = () => {
     if (tablePopupAnchor) {
@@ -261,9 +315,14 @@ export default function Toolbar({
         </button>
         <button
           type="button"
+          ref={linkButtonRef}
           aria-label={t("toolbar.link")}
           title={t("toolbar.link")}
-          onClick={insertLink}
+          onMouseDown={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+          }}
+          onClick={toggleLinkPopup}
         >
           {LinkIcon}
         </button>
@@ -287,6 +346,16 @@ export default function Toolbar({
           anchor={tablePopupAnchor}
           onSelect={handleTableSelect}
           onClose={closeTablePopup}
+        />
+      )}
+
+      {linkPopupAnchor && (
+        <LinkPopup
+          anchor={linkPopupAnchor}
+          initialUrl={linkContext.url}
+          initialName={linkContext.name}
+          onConfirm={handleLinkConfirm}
+          onClose={closeLinkPopup}
         />
       )}
 

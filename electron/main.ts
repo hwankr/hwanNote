@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain } from "electron";
+import { app, BrowserWindow, ipcMain, shell } from "electron";
 import path from "node:path";
 import {
   type AutoSavePayload,
@@ -91,6 +91,20 @@ function setupIpcHandlers() {
 
   ipcMain.handle("note:load-all", async () => {
     return loadMarkdownNotes(app.getPath("documents"));
+  });
+
+  ipcMain.handle("shell:open-external", async (_event, url: string) => {
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      return;
+    }
+    const allowed = ["http:", "https:", "mailto:"];
+    if (!allowed.includes(parsed.protocol)) {
+      return;
+    }
+    await shell.openExternal(url);
   });
 }
 

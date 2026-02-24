@@ -874,6 +874,141 @@ select {
   border-color: var(--accent);
 }
 
+/* Link popup */
+.link-popup {
+  position: fixed;
+  z-index: 50;
+  width: 280px;
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border-soft);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-soft);
+}
+
+.link-popup-field {
+  display: grid;
+  gap: 4px;
+}
+
+.link-popup-field label {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.link-popup-field input {
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  font-size: 13px;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.link-popup-field input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(0, 120, 212, 0.15);
+  outline: none;
+}
+
+.link-popup-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.link-popup-actions button {
+  height: 28px;
+  width: auto;
+  min-width: unset;
+  padding: 0 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.link-popup-cancel {
+  border: 1px solid var(--border-soft);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+}
+
+.link-popup-cancel:hover {
+  background: var(--bg-hover);
+}
+
+.link-popup-confirm {
+  border: none;
+  background: var(--accent);
+  color: #ffffff;
+}
+
+.link-popup-confirm:hover {
+  opacity: 0.9;
+}
+
+/* Link bubble tooltip */
+.link-bubble {
+  position: fixed;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border-soft);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-soft);
+  max-width: 320px;
+}
+
+.link-bubble-edit {
+  display: grid;
+  gap: 10px;
+  width: 280px;
+  padding: 12px;
+  max-width: none;
+}
+
+.link-bubble-url {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--accent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.link-bubble-actions {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.link-bubble-actions button {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.link-bubble-actions button:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
 .note-editor p.is-editor-empty:first-child::before {
   content: attr(data-placeholder);
   float: left;

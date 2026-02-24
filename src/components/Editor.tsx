@@ -9,11 +9,13 @@ import { TaskItemExtended } from "../extensions/taskItemExtended";
 import TaskList from "@tiptap/extension-task-list";
 import Italic from "@tiptap/extension-italic";
 import StarterKit from "@tiptap/starter-kit";
+import { getMarkRange } from "@tiptap/core";
 import { Editor as TiptapEditor, EditorContent, useEditor } from "@tiptap/react";
-import { type MouseEvent as ReactMouseEvent, useCallback, useEffect } from "react";
+import { type MouseEvent as ReactMouseEvent, useCallback, useEffect, useState } from "react";
 import { TabIndent } from "../extensions/tabIndent";
 import { ToggleBlock, ToggleContent, ToggleSummary } from "../extensions/toggleBlock";
 import { useI18n } from "../i18n/context";
+import LinkBubble from "./LinkBubble";
 
 interface EditorProps {
   content: string;
@@ -55,9 +57,18 @@ const ItalicWithoutShortcut = Italic.extend({
   }
 });
 
+interface LinkBubbleState {
+  anchor: { x: number; y: number };
+  href: string;
+  from: number;
+  to: number;
+}
+
 export default function Editor({ content, tabSize, onChange, onCursorChange, onEditorReady }: EditorProps) {
   const { t } = useI18n();
   const placeholderText = t("editor.placeholder");
+  const [linkBubble, setLinkBubble] = useState<LinkBubbleState | null>(null);
+  const closeLinkBubble = useCallback(() => setLinkBubble(null), []);
   const editor = useEditor({
     extensions: [
       StarterKit.configure({
@@ -160,9 +171,65 @@ export default function Editor({ content, tabSize, onChange, onCursorChange, onE
     editor.chain().focus("end").run();
   }, [editor]);
 
+  const handleEditorClick = useCallback((event: ReactMouseEvent<HTMLElement>) => {
+    if (!editor) return;
+
+    const target = event.target as HTMLElement;
+    const linkEl = target.closest("a");
+
+    if (!linkEl) {
+      setLinkBubble(null);
+      return;
+    }
+
+    const href = linkEl.getAttribute("href");
+    if (!href) return;
+
+    // Ctrl+click (or Cmd+click on Mac) -> open in browser
+    if (event.ctrlKey || event.metaKey) {
+      event.preventDefault();
+      if (window.hwanShell) {
+        window.hwanShell.openExternal(href);
+      } else {
+        window.open(href, "_blank");
+      }
+      return;
+    }
+
+    // Normal click -> show bubble tooltip
+    event.preventDefault();
+    const rect = linkEl.getBoundingClientRect();
+
+    // Find the link mark range in the document
+    const rawPos = editor.view.posAtDOM(linkEl, 0);
+    const pos = Math.max(0, Math.min(rawPos, editor.state.doc.content.size));
+    const $pos = editor.state.doc.resolve(pos);
+    const linkType = editor.schema.marks.link;
+    const range = linkType ? getMarkRange($pos, linkType) : undefined;
+
+    if (range) {
+      setLinkBubble({
+        anchor: { x: rect.left, y: rect.bottom },
+        href,
+        from: range.from,
+        to: range.to
+      });
+    }
+  }, [editor]);
+
   return (
     <section className="editor-shell" onMouseDown={handleShellMouseDown}>
-      <EditorContent className="editor-content" editor={editor} />
+      <EditorContent className="editor-content" editor={editor} onClick={handleEditorClick} />
+      {linkBubble && editor && (
+        <LinkBubble
+          editor={editor}
+          anchor={linkBubble.anchor}
+          href={linkBubble.href}
+          linkFrom={linkBubble.from}
+          linkTo={linkBubble.to}
+          onClose={closeLinkBubble}
+        />
+      )}
     </section>
   );
 }

@@ -4,6 +4,9 @@ export {};
 
 declare global {
   interface Window {
+    hwanShell?: {
+      openExternal: (url: string) => Promise<void>;
+    };
     hwanNote?: {
       window: {
         minimize: () => Promise<void>;

@@ -32,4 +32,9 @@ const api = {
   }
 };
 
+const shellApi = {
+  openExternal: (url: string) => ipcRenderer.invoke("shell:open-external", url)
+};
+
 contextBridge.exposeInMainWorld("hwanNote", api);
+contextBridge.exposeInMainWorld("hwanShell", shellApi);
