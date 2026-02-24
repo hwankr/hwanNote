@@ -161,6 +161,29 @@ export default function Toolbar({
 
   return (
     <div className="toolbar">
+      <div className="toolbar-title-field no-drag">
+        <input
+          type="text"
+          value={titleInput}
+          placeholder={t("common.untitled")}
+          aria-label="Note title"
+          onChange={(event) => setTitleInput(event.target.value)}
+          onBlur={commitTitle}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              commitTitle();
+              return;
+            }
+
+            if (event.key === "Escape") {
+              event.preventDefault();
+              setTitleInput(activeTitle);
+            }
+          }}
+        />
+      </div>
+
       <div className="toolbar-format no-drag">
         <select
           className="toolbar-select"
@@ -240,42 +263,6 @@ export default function Toolbar({
       </div>
 
       <div className="toolbar-right no-drag">
-        <div className="toolbar-title-field">
-          <input
-            type="text"
-            value={titleInput}
-            placeholder={t("common.untitled")}
-            aria-label="Note title"
-            onChange={(event) => setTitleInput(event.target.value)}
-            onBlur={commitTitle}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.preventDefault();
-                commitTitle();
-                return;
-              }
-
-              if (event.key === "Escape") {
-                event.preventDefault();
-                setTitleInput(activeTitle);
-              }
-            }}
-          />
-          {isTitleManual ? (
-            <button
-              type="button"
-              className="toolbar-title-reset"
-              aria-label={t("common.untitled")}
-              onClick={() => {
-                setTitleInput("");
-                onChangeTitle("");
-              }}
-              title={t("common.untitled")}
-            >
-              {CloseIcon}
-            </button>
-          ) : null}
-        </div>
         <button
           type="button"
           aria-label={t("toolbar.openSettings")}

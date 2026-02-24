@@ -377,15 +377,15 @@ select {
   width: 180px;
   height: 28px;
   padding: 0 8px;
-  border: none;
-  border-bottom: 1px solid var(--border-soft);
-  border-radius: 0;
-  background: transparent;
-  transition: border-color 120ms ease;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  transition: border-color 120ms ease, box-shadow 120ms ease;
 }
 
 .toolbar-title-field input:focus {
-  border-bottom-color: var(--accent);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(0, 120, 212, 0.15);
   outline: none;
 }
 
