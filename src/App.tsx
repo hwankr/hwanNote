@@ -267,6 +267,7 @@ export default function App() {
   const [isMaximized, setIsMaximized] = useState(false);
 
   const [searchQuery, setSearchQuery] = useState("");
+  const [searchMode, setSearchMode] = useState<"all" | "title" | "content">("all");
   const [selectedFolder, setSelectedFolder] = useState<string | null>(null);
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
   const [sortMode, setSortMode] = useState<SortMode>("updated");
@@ -338,7 +339,17 @@ export default function App() {
       }
 
       if (normalizedQuery) {
-        const haystack = `${tab.title} ${tab.plainText}`.toLowerCase();
+        let haystack: string;
+        switch (searchMode) {
+          case "title":
+            haystack = tab.title.toLowerCase();
+            break;
+          case "content":
+            haystack = tab.plainText.toLowerCase();
+            break;
+          default:
+            haystack = `${tab.title} ${tab.plainText}`.toLowerCase();
+        }
         if (!haystack.includes(normalizedQuery)) {
           return false;
         }
@@ -362,7 +373,7 @@ export default function App() {
           return b.updatedAt - a.updatedAt;
       }
     });
-  }, [tabs, selectedFolder, selectedTag, searchQuery, noteTags, sortMode, localeTag]);
+  }, [tabs, selectedFolder, selectedTag, searchQuery, searchMode, noteTags, sortMode, localeTag]);
 
   useEffect(() => {
     try {
@@ -872,8 +883,10 @@ export default function App() {
           selectedFolder={selectedFolder}
           selectedTag={selectedTag}
           searchQuery={searchQuery}
+          searchMode={searchMode}
           sortMode={sortMode}
           onSearchChange={setSearchQuery}
+          onSearchModeChange={setSearchMode}
           onSelectFolder={setSelectedFolder}
           onSelectTag={setSelectedTag}
           onSortModeChange={setSortMode}

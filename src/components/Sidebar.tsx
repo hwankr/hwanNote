@@ -9,6 +9,7 @@ export interface SidebarTag {
 }
 
 type SortMode = "updated" | "title" | "created";
+type SearchMode = "all" | "title" | "content";
 
 interface SidebarProps {
   visible: boolean;
@@ -19,8 +20,10 @@ interface SidebarProps {
   selectedFolder: string | null;
   selectedTag: string | null;
   searchQuery: string;
+  searchMode: SearchMode;
   sortMode: SortMode;
   onSearchChange: (query: string) => void;
+  onSearchModeChange: (mode: SearchMode) => void;
   onSelectFolder: (folderPath: string | null) => void;
   onSelectTag: (tag: string | null) => void;
   onSortModeChange: (mode: SortMode) => void;
@@ -109,8 +112,10 @@ export default function Sidebar({
   selectedFolder,
   selectedTag,
   searchQuery,
+  searchMode,
   sortMode,
   onSearchChange,
+  onSearchModeChange,
   onSelectFolder,
   onSelectTag,
   onSortModeChange,
@@ -151,6 +156,18 @@ export default function Sidebar({
           value={searchQuery}
           onChange={(event) => onSearchChange(event.target.value)}
         />
+        <div className="search-mode-group">
+          {(["all", "title", "content"] as const).map((mode) => (
+            <button
+              key={mode}
+              type="button"
+              className={`search-mode-btn ${searchMode === mode ? "active" : ""}`}
+              onClick={() => onSearchModeChange(mode)}
+            >
+              {t(`sidebar.search${mode[0].toUpperCase()}${mode.slice(1)}` as "sidebar.searchAll" | "sidebar.searchTitle" | "sidebar.searchContent")}
+            </button>
+          ))}
+        </div>
       </div>
 
       <div className="sidebar-section">
