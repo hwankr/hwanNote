@@ -1,6 +1,6 @@
 ﻿import { createHash } from "node:crypto";
 import { access, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { dirname, extname, join, relative } from "node:path";
+import { basename, dirname, extname, join, relative } from "node:path";
 
 const INDEX_FILENAME = ".hwan-note-index.json";
 const TOGGLE_BLOCK_PATTERN = /^:::toggle\[(open|closed)\](?:\s+(.*))?$/i;
@@ -519,4 +519,18 @@ export async function loadMarkdownNotes(autoSaveDir: string): Promise<LoadedNote
   }
 
   return notes.sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+export async function readTextFile(filePath: string): Promise<string> {
+  return readFile(filePath, "utf8");
+}
+
+export async function saveTextFile(filePath: string, content: string): Promise<void> {
+  await mkdir(dirname(filePath), { recursive: true });
+  await writeFile(filePath, toWindowsCrlf(content), "utf8");
+}
+
+export function titleFromFilename(filePath: string): string {
+  const base = basename(filePath, extname(filePath));
+  return base.trim().slice(0, 50) || "제목 없음";
 }

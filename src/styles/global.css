@@ -1243,6 +1243,20 @@ select {
   justify-self: center;
 }
 
+.statusbar-format-toggle {
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  padding: 2px 8px;
+  border-radius: 3px;
+}
+
+.statusbar-format-toggle:hover {
+  background: var(--bg-hover);
+}
+
 .statusbar-right {
   justify-self: end;
 }

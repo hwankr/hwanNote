@@ -272,7 +272,9 @@ export default function App() {
   const updateActiveContent = useNoteStore((state) => state.updateActiveContent);
   const setActiveTitle = useNoteStore((state) => state.setActiveTitle);
   const markTabSaved = useNoteStore((state) => state.markTabSaved);
+  const toggleFileFormat = useNoteStore((state) => state.toggleFileFormat);
   const toggleSidebar = useNoteStore((state) => state.toggleSidebar);
+  const addImportedTab = useNoteStore((state) => state.addImportedTab);
 
   const [editor, setEditor] = useState<TiptapEditor | null>(null);
   const [cursor, setCursor] = useState({ line: 1, column: 1, chars: 0 });
@@ -503,7 +505,8 @@ export default function App() {
             folderPath: normalizeFolderPath(note.folderPath),
             createdAt: note.createdAt,
             updatedAt: note.updatedAt,
-            lastSavedAt: 0
+            lastSavedAt: 0,
+            fileFormat: "md" as const
           }))
         );
 
@@ -536,8 +539,43 @@ export default function App() {
     }
   }, [selectedTag, tags]);
 
+  const handleImportTxt = useCallback(async () => {
+    const noteApi = window.hwanNote?.note;
+    if (!noteApi?.importTxt) return;
+
+    const imported = await noteApi.importTxt();
+    if (!imported || imported.length === 0) return;
+
+    for (const { title, content, filePath } of imported) {
+      const escapeHtml = (text: string) =>
+        text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+      const html = content
+        .replace(/\r\n/g, "\n")
+        .split("\n")
+        .map((line) => (line ? `<p>${escapeHtml(line)}</p>` : "<p><br></p>"))
+        .join("");
+
+      addImportedTab(title, html || "<p></p>", content.replace(/\r?\n/g, "\n"), filePath);
+    }
+  }, [addImportedTab]);
+
   const handleManualSave = useCallback(async () => {
     if (!activeTab) {
+      return;
+    }
+
+    // 외부 .txt 파일인 경우: 원본 위치에 plain text로 저장
+    if (activeTab.fileFormat === "txt" && activeTab.sourceFilePath) {
+      const noteApi = window.hwanNote?.note;
+      if (!noteApi?.saveTxt) return;
+
+      try {
+        await noteApi.saveTxt(activeTab.sourceFilePath, activeTab.plainText);
+        markTabSaved(activeTab.id);
+      } catch (error) {
+        console.error("Save txt failed:", error);
+      }
       return;
     }
 
@@ -550,12 +588,15 @@ export default function App() {
     }
 
     try {
-      const markdown = toMarkdownDocument(
-        activeTab.title,
-        activeTab.plainText,
-        activeTab.content,
-        t("common.untitled")
-      );
+      const isTxtWithoutSource = activeTab.fileFormat === "txt" && !activeTab.sourceFilePath;
+      const markdown = isTxtWithoutSource
+        ? activeTab.plainText.trimEnd() + "\n"
+        : toMarkdownDocument(
+            activeTab.title,
+            activeTab.plainText,
+            activeTab.content,
+            t("common.untitled")
+          );
       await noteApi.autoSave(
         activeTab.id,
         activeTab.title,
@@ -597,7 +638,8 @@ export default function App() {
             folderPath: normalizeFolderPath(note.folderPath),
             createdAt: note.createdAt,
             updatedAt: note.updatedAt,
-            lastSavedAt: 0
+            lastSavedAt: 0,
+            fileFormat: "md" as const
           }))
         );
       }
@@ -631,7 +673,8 @@ export default function App() {
             folderPath: normalizeFolderPath(note.folderPath),
             createdAt: note.createdAt,
             updatedAt: note.updatedAt,
-            lastSavedAt: 0
+            lastSavedAt: 0,
+            fileFormat: "md" as const
           }))
         );
       }
@@ -929,6 +972,7 @@ export default function App() {
         onChangeTitle={setActiveTitle}
         lastSavedAt={activeTab?.lastSavedAt ?? 0}
         onOpenSettings={() => setSettingsOpen(true)}
+        onImportTxt={() => void handleImportTxt()}
       />
 
       <div className="workspace">
@@ -1002,7 +1046,31 @@ export default function App() {
         </main>
       </div>
 
-      <StatusBar line={cursor.line} column={cursor.column} chars={cursor.chars} themeLabel={themeLabel} zoomPercent={zoomPercent} />
+      <StatusBar
+        line={cursor.line}
+        column={cursor.column}
+        chars={cursor.chars}
+        themeLabel={themeLabel}
+        zoomPercent={zoomPercent}
+        fileFormat={activeTab?.fileFormat ?? "md"}
+        onToggleFileFormat={() => {
+          if (!activeTab) return;
+          if (activeTab.fileFormat === "md") {
+            const hasFormatting =
+              /<ul[^>]*data-type=(['"])taskList\1/i.test(activeTab.content) ||
+              /<details/i.test(activeTab.content) ||
+              /<strong/i.test(activeTab.content) ||
+              /<em>/i.test(activeTab.content) ||
+              /<s>/i.test(activeTab.content) ||
+              /<a\s/i.test(activeTab.content) ||
+              /<h[1-3]/i.test(activeTab.content);
+            if (hasFormatting && !window.confirm(t("status.confirmSwitchToTxt"))) {
+              return;
+            }
+          }
+          toggleFileFormat(activeTab.id);
+        }}
+      />
 
       <SettingsPanel
         open={settingsOpen}

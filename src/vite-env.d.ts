@@ -37,6 +37,8 @@ declare global {
             filePath: string;
           }>
         >;
+        importTxt: () => Promise<Array<{ title: string; content: string; filePath: string }> | null>;
+        saveTxt: (filePath: string, content: string) => Promise<boolean>;
       };
       settings: {
         browseAutoSaveDir: () => Promise<string | null>;

@@ -49,6 +49,13 @@ const SettingsIcon = (
   </svg>
 );
 
+const ImportIcon = (
+  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path d="M8 2v8M8 10l-3-3M8 10l3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+    <path d="M3 13h10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+  </svg>
+);
+
 const CloseIcon = (
   <svg width="12" height="12" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
     <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
@@ -63,6 +70,7 @@ interface ToolbarProps {
   onChangeTitle: (title: string) => void;
   lastSavedAt: number;
   onOpenSettings: () => void;
+  onImportTxt: () => void;
 }
 
 export default function Toolbar({
@@ -72,7 +80,8 @@ export default function Toolbar({
   isTitleManual,
   onChangeTitle,
   lastSavedAt,
-  onOpenSettings
+  onOpenSettings,
+  onImportTxt
 }: ToolbarProps) {
   const { t, localeTag } = useI18n();
   const [titleInput, setTitleInput] = useState(activeTitle);
@@ -381,6 +390,14 @@ export default function Toolbar({
             })}
           </span>
         )}
+        <button
+          type="button"
+          aria-label={t("toolbar.importTxt")}
+          title={t("toolbar.importTxt")}
+          onClick={onImportTxt}
+        >
+          {ImportIcon}
+        </button>
         <button
           type="button"
           aria-label={t("toolbar.openSettings")}

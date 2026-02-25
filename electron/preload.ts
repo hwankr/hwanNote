@@ -27,7 +27,13 @@ const api = {
           updatedAt: number;
           filePath: string;
         }>
-      >
+      >,
+    importTxt: () =>
+      ipcRenderer.invoke("note:import-txt") as Promise<
+        Array<{ title: string; content: string; filePath: string }> | null
+      >,
+    saveTxt: (filePath: string, content: string) =>
+      ipcRenderer.invoke("note:save-txt", filePath, content) as Promise<boolean>
   },
   settings: {
     browseAutoSaveDir: () => ipcRenderer.invoke("settings:browse-autosave-dir") as Promise<string | null>,

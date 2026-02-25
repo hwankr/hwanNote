@@ -8,7 +8,10 @@ import {
   listMarkdownFiles,
   loadMarkdownNotes,
   readMarkdownFile,
-  saveMarkdownFile
+  readTextFile,
+  saveMarkdownFile,
+  saveTextFile,
+  titleFromFilename
 } from "./fileManager";
 
 const isDev = !app.isPackaged;
@@ -120,6 +123,37 @@ function setupIpcHandlers() {
     const effectiveDir = await getEffectiveAutoSaveDir(defaultDir);
     const customDir = await getCustomAutoSaveDir();
     return { customDir, effectiveDir, isDefault: customDir === null };
+  });
+
+  ipcMain.handle("note:import-txt", async () => {
+    const win = BrowserWindow.getFocusedWindow();
+    if (!win) return null;
+
+    const result = await dialog.showOpenDialog(win, {
+      title: "텍스트 파일 가져오기",
+      properties: ["openFile", "multiSelections"],
+      filters: [
+        { name: "Text Files", extensions: ["txt"] },
+        { name: "All Files", extensions: ["*"] }
+      ]
+    });
+
+    if (result.canceled || result.filePaths.length === 0) return null;
+
+    const imported = await Promise.all(
+      result.filePaths.map(async (filePath) => {
+        const content = await readTextFile(filePath);
+        const title = titleFromFilename(filePath);
+        return { title, content, filePath };
+      })
+    );
+
+    return imported;
+  });
+
+  ipcMain.handle("note:save-txt", async (_event, filePath: string, content: string) => {
+    await saveTextFile(filePath, content);
+    return true;
   });
 
   ipcMain.handle("shell:open-external", async (_event, url: string) => {

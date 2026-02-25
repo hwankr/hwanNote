@@ -12,6 +12,8 @@ export interface NoteTab {
   createdAt: number;
   updatedAt: number;
   lastSavedAt: number;
+  sourceFilePath?: string;
+  fileFormat: "md" | "txt";
 }
 
 interface NoteStore {
@@ -20,6 +22,7 @@ interface NoteStore {
   sidebarVisible: boolean;
   hydrateTabs: (tabs: NoteTab[]) => void;
   createTab: () => void;
+  addImportedTab: (title: string, content: string, plainText: string, sourceFilePath?: string) => void;
   setActiveTab: (id: string) => void;
   closeTab: (id: string) => void;
   closeOtherTabs: (id: string) => void;
@@ -33,6 +36,7 @@ interface NoteStore {
   setActiveTitle: (title: string) => void;
   updateActiveContent: (content: string, plainText: string) => void;
   markTabSaved: (id: string) => void;
+  toggleFileFormat: (id: string) => void;
   toggleSidebar: () => void;
 }
 
@@ -68,7 +72,8 @@ function createEmptyTab(): NoteTab {
     folderPath: "inbox",
     createdAt: now,
     updatedAt: now,
-    lastSavedAt: 0
+    lastSavedAt: 0,
+    fileFormat: "md"
   };
 }
 
@@ -93,6 +98,29 @@ export const useNoteStore = create<NoteStore>((set, get) => {
     },
     createTab: () => {
       const tab = createEmptyTab();
+      set((state) => ({
+        tabs: [...state.tabs, tab],
+        activeTabId: tab.id
+      }));
+    },
+    addImportedTab: (title, content, plainText, sourceFilePath) => {
+      const now = Date.now();
+      const tab: NoteTab = {
+        id: createId(),
+        title: title.trim().slice(0, 50) || "제목 없음",
+        isTitleManual: true,
+        content,
+        plainText,
+        isDirty: true,
+        isPinned: false,
+        folderPath: "inbox",
+        createdAt: now,
+        updatedAt: now,
+        lastSavedAt: 0,
+        sourceFilePath,
+        fileFormat: sourceFilePath ? ("txt" as const) : ("md" as const)
+      };
+
       set((state) => ({
         tabs: [...state.tabs, tab],
         activeTabId: tab.id
@@ -326,6 +354,15 @@ export const useNoteStore = create<NoteStore>((set, get) => {
     markTabSaved: (id) => {
       set((state) => ({
         tabs: state.tabs.map((tab) => (tab.id === id ? { ...tab, isDirty: false, lastSavedAt: Date.now() } : tab))
+      }));
+    },
+    toggleFileFormat: (id) => {
+      set((state) => ({
+        tabs: state.tabs.map((tab) =>
+          tab.id === id
+            ? { ...tab, fileFormat: tab.fileFormat === "md" ? "txt" : "md", isDirty: true, updatedAt: Date.now() }
+            : tab
+        )
       }));
     },
     toggleSidebar: () => {
