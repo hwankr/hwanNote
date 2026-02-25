@@ -33,7 +33,9 @@ const api = {
         Array<{ title: string; content: string; filePath: string }> | null
       >,
     saveTxt: (filePath: string, content: string) =>
-      ipcRenderer.invoke("note:save-txt", filePath, content) as Promise<boolean>
+      ipcRenderer.invoke("note:save-txt", filePath, content) as Promise<boolean>,
+    delete: (noteId: string) =>
+      ipcRenderer.invoke("note:delete", noteId) as Promise<boolean>
   },
   settings: {
     browseAutoSaveDir: () => ipcRenderer.invoke("settings:browse-autosave-dir") as Promise<string | null>,

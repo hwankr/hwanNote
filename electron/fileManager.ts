@@ -521,6 +521,28 @@ export async function loadMarkdownNotes(autoSaveDir: string): Promise<LoadedNote
   return notes.sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
+export async function removeNoteFromIndex(
+  autoSaveDir: string,
+  noteId: string
+): Promise<string | null> {
+  const safeId = sanitizeNoteId(noteId);
+  if (!safeId) {
+    return null;
+  }
+
+  const index = await readIndex(autoSaveDir);
+  const entry = index.entries[safeId];
+  if (!entry) {
+    return null;
+  }
+
+  const filePath = join(autoSaveDir, entry.relativePath);
+  delete index.entries[safeId];
+  await writeIndex(autoSaveDir, index);
+
+  return filePath;
+}
+
 export async function readTextFile(filePath: string): Promise<string> {
   return readFile(filePath, "utf8");
 }

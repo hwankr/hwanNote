@@ -1001,6 +1001,15 @@ export default function App() {
           onSelectTag={setSelectedTag}
           onSortModeChange={setSortMode}
           onSelectNote={setActiveTab}
+          onTogglePinNote={togglePinTab}
+          onDeleteNote={(id) => {
+            const tab = tabs.find((t) => t.id === id);
+            if (!tab) return;
+            closeTab(id);
+            if (tab.lastSavedAt > 0) {
+              void window.hwanNote?.note.delete(id);
+            }
+          }}
           onMoveNoteToFolder={(id, folderPath) => {
             moveTabToFolder(id, normalizeFolderPath(folderPath));
           }}

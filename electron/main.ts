@@ -9,6 +9,7 @@ import {
   loadMarkdownNotes,
   readMarkdownFile,
   readTextFile,
+  removeNoteFromIndex,
   saveMarkdownFile,
   saveTextFile,
   titleFromFilename
@@ -98,6 +99,22 @@ function setupIpcHandlers() {
   ipcMain.handle("note:load-all", async () => {
     const effectiveDir = await resolveEffectiveAutoSaveDir();
     return loadMarkdownNotes(effectiveDir);
+  });
+
+  ipcMain.handle("note:delete", async (_event, noteId: string) => {
+    const effectiveDir = await resolveEffectiveAutoSaveDir();
+    const filePath = await removeNoteFromIndex(effectiveDir, noteId);
+    if (!filePath) {
+      return false;
+    }
+
+    try {
+      await shell.trashItem(filePath);
+    } catch {
+      // File may already be missing; index entry was already removed
+    }
+
+    return true;
   });
 
   ipcMain.handle("settings:browse-autosave-dir", async () => {

@@ -1,5 +1,7 @@
+import { useMemo, useState } from "react";
 import { useI18n } from "../i18n/context";
 import type { NoteTab } from "../stores/noteStore";
+import ContextMenu, { type ContextMenuEntry } from "./ContextMenu";
 import FolderTree from "./FolderTree";
 
 export interface SidebarTag {
@@ -29,6 +31,8 @@ interface SidebarProps {
   onSortModeChange: (mode: SortMode) => void;
   onSelectNote: (id: string) => void;
   onMoveNoteToFolder: (id: string, folderPath: string) => void;
+  onTogglePinNote: (id: string) => void;
+  onDeleteNote: (id: string) => void;
   onCreateFolder: (folderPath: string) => void;
   onRenameFolder: (from: string, to: string) => void;
   onDeleteFolder: (folderPath: string) => void;
@@ -79,11 +83,64 @@ export default function Sidebar({
   onSortModeChange,
   onSelectNote,
   onMoveNoteToFolder,
+  onTogglePinNote,
+  onDeleteNote,
   onCreateFolder,
   onRenameFolder,
   onDeleteFolder
 }: SidebarProps) {
   const { t, localeTag } = useI18n();
+  const [noteMenu, setNoteMenu] = useState<{ noteId: string; x: number; y: number } | null>(null);
+
+  const noteMenuTarget = useMemo(
+    () => notes.find((n) => n.id === noteMenu?.noteId),
+    [notes, noteMenu]
+  );
+
+  const noteMenuItems = useMemo<ContextMenuEntry[]>(() => {
+    if (!noteMenu || !noteMenuTarget) return [];
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- new i18n keys are valid but ts needs rebuild
+    const tt = t as (key: string, vars?: Record<string, string | number>) => string;
+
+    const items: ContextMenuEntry[] = [
+      {
+        key: "pin",
+        label: noteMenuTarget.isPinned ? tt("sidebar.noteUnpin") : tt("sidebar.notePin"),
+        onClick: () => { onTogglePinNote(noteMenu.noteId); setNoteMenu(null); }
+      },
+    ];
+
+    const otherFolders = folders.filter((f) => f !== noteMenuTarget.folderPath);
+    if (otherFolders.length > 0) {
+      items.push({ key: "sep-folder", separator: true });
+      for (const folder of otherFolders) {
+        items.push({
+          key: `move-${folder}`,
+          label: `/${folder}`,
+          onClick: () => { onMoveNoteToFolder(noteMenu.noteId, folder); setNoteMenu(null); }
+        });
+      }
+    }
+
+    items.push({ key: "sep-delete", separator: true });
+    items.push({
+      key: "delete",
+      label: tt("sidebar.noteDelete"),
+      danger: true,
+      onClick: () => {
+        setNoteMenu(null);
+        const confirmed = window.confirm(
+          tt("sidebar.noteDeleteConfirm", { title: noteMenuTarget.title })
+        );
+        if (confirmed) {
+          onDeleteNote(noteMenu.noteId);
+        }
+      }
+    });
+
+    return items;
+  }, [noteMenu, noteMenuTarget, folders, t, onTogglePinNote, onMoveNoteToFolder, onDeleteNote]);
 
   return (
     <aside className={`sidebar ${visible ? "visible" : "hidden"}`}>
@@ -172,6 +229,10 @@ export default function Sidebar({
               key={note.id}
               className={`note-list-item ${note.id === activeTabId ? "active" : ""}`}
               onClick={() => onSelectNote(note.id)}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                setNoteMenu({ noteId: note.id, x: event.clientX, y: event.clientY });
+              }}
               draggable
               onDragStart={(event) => {
                 event.dataTransfer.effectAllowed = "move";
@@ -179,7 +240,10 @@ export default function Sidebar({
               }}
             >
               <div className="note-item-head">
-                <span className="note-item-title">{note.title}</span>
+                <span className="note-item-title">
+                  {note.isPinned ? <span className="note-item-pin" aria-label="pinned">&#128204;</span> : null}
+                  {note.title}
+                </span>
                 <span className="note-item-date">{formatUpdatedTime(note.updatedAt, localeTag)}</span>
               </div>
               <span className="note-item-preview">{buildPreview(note, t("sidebar.emptyPreview"))}</span>
@@ -187,6 +251,15 @@ export default function Sidebar({
             </button>
           ))}
         </div>
+
+        {noteMenu && noteMenuTarget ? (
+          <ContextMenu
+            x={noteMenu.x}
+            y={noteMenu.y}
+            items={noteMenuItems}
+            onClose={() => setNoteMenu(null)}
+          />
+        ) : null}
       </div>
     </aside>
   );

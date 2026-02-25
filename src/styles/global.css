@@ -835,6 +835,11 @@ select {
   flex: 1;
 }
 
+.note-item-pin {
+  font-size: 11px;
+  margin-right: 3px;
+}
+
 .note-item-date {
   font-size: 11px;
   color: var(--text-muted);
