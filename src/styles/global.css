@@ -460,6 +460,7 @@ select {
     transform 200ms ease,
     opacity 200ms ease;
   overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .sidebar.hidden {
@@ -571,7 +572,8 @@ select {
 .note-list {
   display: grid;
   gap: 6px;
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
   margin-top: 8px;
 }
 
@@ -582,6 +584,8 @@ select {
   text-align: left;
   padding: 8px;
   cursor: pointer;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .note-list-item:hover {
@@ -606,11 +610,15 @@ select {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  min-width: 0;
+  flex: 1;
 }
 
 .note-item-date {
   font-size: 11px;
   color: var(--text-muted);
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .note-item-preview {
