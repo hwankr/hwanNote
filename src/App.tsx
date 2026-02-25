@@ -24,10 +24,14 @@ import { applyTheme, type ThemeName } from "./styles/themes";
 import { useNoteStore } from "./stores/noteStore";
 
 const CUSTOM_FOLDERS_KEY = "hwan-note:custom-folders";
+const EDITOR_FONT_SIZE_KEY = "hwan-note:editor-font-size";
 const EDITOR_LINE_HEIGHT_KEY = "hwan-note:editor-line-height";
 const SHORTCUTS_KEY = "hwan-note:shortcuts";
 const TAB_SIZE_KEY = "hwan-note:tab-size";
 const THEME_MODE_KEY = "hwan-note:theme-mode";
+const MIN_EDITOR_FONT_SIZE = 10;
+const MAX_EDITOR_FONT_SIZE = 24;
+const DEFAULT_EDITOR_FONT_SIZE = 14;
 const MIN_EDITOR_LINE_HEIGHT = 1.2;
 const MAX_EDITOR_LINE_HEIGHT = 2.2;
 const DEFAULT_EDITOR_LINE_HEIGHT = 1.55;
@@ -224,6 +228,14 @@ function resolveTheme(mode: ThemeMode, prefersDark: boolean): ThemeName {
   return mode;
 }
 
+function normalizeEditorFontSize(value: number) {
+  if (!Number.isFinite(value)) {
+    return DEFAULT_EDITOR_FONT_SIZE;
+  }
+
+  return Math.round(Math.min(MAX_EDITOR_FONT_SIZE, Math.max(MIN_EDITOR_FONT_SIZE, value)));
+}
+
 function normalizeEditorLineHeight(value: number) {
   if (!Number.isFinite(value)) {
     return DEFAULT_EDITOR_LINE_HEIGHT;
@@ -274,6 +286,7 @@ export default function App() {
   const [customFolders, setCustomFolders] = useState<string[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [themeMode, setThemeMode] = useState<ThemeMode>("light");
+  const [editorFontSize, setEditorFontSize] = useState(DEFAULT_EDITOR_FONT_SIZE);
   const [editorLineHeight, setEditorLineHeight] = useState(DEFAULT_EDITOR_LINE_HEIGHT);
   const [autoSaveDir, setAutoSaveDir] = useState("");
   const [autoSaveDirIsDefault, setAutoSaveDirIsDefault] = useState(true);
@@ -408,6 +421,16 @@ export default function App() {
     }
 
     try {
+      const rawFontSize = window.localStorage.getItem(EDITOR_FONT_SIZE_KEY);
+      if (rawFontSize) {
+        const parsed = Number.parseInt(rawFontSize, 10);
+        setEditorFontSize(normalizeEditorFontSize(parsed));
+      }
+    } catch (error) {
+      console.warn("Failed to load editor font-size", error);
+    }
+
+    try {
       const rawLineHeight = window.localStorage.getItem(EDITOR_LINE_HEIGHT_KEY);
       if (rawLineHeight) {
         const parsed = Number.parseFloat(rawLineHeight);
@@ -445,6 +468,11 @@ export default function App() {
   useEffect(() => {
     window.localStorage.setItem(TAB_SIZE_KEY, String(tabSize));
   }, [tabSize]);
+
+  useEffect(() => {
+    window.localStorage.setItem(EDITOR_FONT_SIZE_KEY, String(editorFontSize));
+    document.documentElement.style.setProperty("--editor-font-size", `${editorFontSize}px`);
+  }, [editorFontSize]);
 
   useEffect(() => {
     window.localStorage.setItem(EDITOR_LINE_HEIGHT_KEY, String(editorLineHeight));
@@ -825,6 +853,34 @@ export default function App() {
     return () => window.removeEventListener("keydown", onEsc);
   }, [editor, settingsOpen]);
 
+  useEffect(() => {
+    const onWheel = (event: WheelEvent) => {
+      if (!event.ctrlKey) {
+        return;
+      }
+
+      event.preventDefault();
+      setEditorFontSize((prev) => {
+        const delta = event.deltaY < 0 ? 1 : -1;
+        return normalizeEditorFontSize(prev + delta);
+      });
+    };
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.ctrlKey && !event.shiftKey && !event.altKey && event.key === "0") {
+        event.preventDefault();
+        setEditorFontSize(DEFAULT_EDITOR_FONT_SIZE);
+      }
+    };
+
+    window.addEventListener("wheel", onWheel, { passive: false });
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("wheel", onWheel);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, []);
+
   const handleToggleMaximize = useCallback(async () => {
     const winApi = window.hwanNote?.window;
     if (!winApi) {
@@ -834,6 +890,11 @@ export default function App() {
     const nextState = await winApi.toggleMaximize();
     setIsMaximized(nextState);
   }, []);
+
+  const zoomPercent = useMemo(
+    () => Math.round((editorFontSize / DEFAULT_EDITOR_FONT_SIZE) * 100),
+    [editorFontSize]
+  );
 
   const themeLabel = useMemo(() => {
     if (themeMode === "system") {
@@ -944,12 +1005,13 @@ export default function App() {
         </main>
       </div>
 
-      <StatusBar line={cursor.line} column={cursor.column} chars={cursor.chars} themeLabel={themeLabel} />
+      <StatusBar line={cursor.line} column={cursor.column} chars={cursor.chars} themeLabel={themeLabel} zoomPercent={zoomPercent} />
 
       <SettingsPanel
         open={settingsOpen}
         themeMode={themeMode}
         editorLineHeight={editorLineHeight}
+        editorFontSize={editorFontSize}
         tabSize={tabSize}
         autoSaveDir={autoSaveDir}
         autoSaveDirIsDefault={autoSaveDirIsDefault}
@@ -958,6 +1020,7 @@ export default function App() {
         shortcuts={shortcuts}
         onThemeModeChange={setThemeMode}
         onEditorLineHeightChange={(value) => setEditorLineHeight(normalizeEditorLineHeight(value))}
+        onEditorFontSizeChange={(value) => setEditorFontSize(normalizeEditorFontSize(value))}
         onTabSizeChange={(size) => setTabSize(VALID_TAB_SIZES.includes(size) ? size : DEFAULT_TAB_SIZE)}
         onShortcutChange={handleShortcutChange}
         onResetShortcuts={handleShortcutReset}

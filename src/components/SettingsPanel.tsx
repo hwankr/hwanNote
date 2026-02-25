@@ -18,6 +18,7 @@ interface SettingsPanelProps {
   open: boolean;
   themeMode: ThemeMode;
   editorLineHeight: number;
+  editorFontSize: number;
   tabSize: number;
   autoSaveDir: string;
   autoSaveDirIsDefault: boolean;
@@ -26,6 +27,7 @@ interface SettingsPanelProps {
   shortcuts: ShortcutMap;
   onThemeModeChange: (mode: ThemeMode) => void;
   onEditorLineHeightChange: (value: number) => void;
+  onEditorFontSizeChange: (value: number) => void;
   onTabSizeChange: (size: number) => void;
   onShortcutChange: (action: ShortcutAction, combo: ShortcutCombo) => ShortcutValidationResult;
   onResetShortcuts: () => void;
@@ -36,6 +38,7 @@ export default function SettingsPanel({
   open,
   themeMode,
   editorLineHeight,
+  editorFontSize,
   tabSize,
   autoSaveDir,
   autoSaveDirIsDefault,
@@ -44,6 +47,7 @@ export default function SettingsPanel({
   shortcuts,
   onThemeModeChange,
   onEditorLineHeightChange,
+  onEditorFontSizeChange,
   onTabSizeChange,
   onShortcutChange,
   onResetShortcuts,
@@ -163,6 +167,25 @@ export default function SettingsPanel({
               </span>
             </div>
             <div className="settings-subtext">{t("settings.lineSpacingHelp")}</div>
+          </div>
+
+          <div className="settings-item">
+            <label htmlFor="editor-font-size">{t("settings.fontSize")}</label>
+            <div className="settings-range-row">
+              <input
+                id="editor-font-size"
+                type="range"
+                min={10}
+                max={24}
+                step={1}
+                value={editorFontSize}
+                onChange={(event) => onEditorFontSizeChange(Number.parseInt(event.target.value, 10))}
+              />
+              <span className="settings-range-value">
+                {t("settings.fontSizeValue", { size: editorFontSize })}
+              </span>
+            </div>
+            <div className="settings-subtext">{t("settings.fontSizeHelp")}</div>
           </div>
 
           <div className="settings-item">

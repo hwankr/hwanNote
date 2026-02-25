@@ -728,7 +728,7 @@ select {
   padding: 24px 28px;
   outline: none;
   font-family: "맑은 고딕", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
-  font-size: 14px;
+  font-size: var(--editor-font-size, 14px);
   line-height: var(--editor-line-height, 1.55);
   color: var(--text-primary);
 }
