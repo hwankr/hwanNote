@@ -11,7 +11,7 @@ import Italic from "@tiptap/extension-italic";
 import StarterKit from "@tiptap/starter-kit";
 import { getMarkRange } from "@tiptap/core";
 import { Editor as TiptapEditor, EditorContent, useEditor } from "@tiptap/react";
-import { type MouseEvent as ReactMouseEvent, useCallback, useEffect, useState } from "react";
+import { type MouseEvent as ReactMouseEvent, useCallback, useEffect, useRef, useState } from "react";
 import { TabIndent } from "../extensions/tabIndent";
 import { ToggleBlock, ToggleContent, ToggleSummary } from "../extensions/toggleBlock";
 import { useI18n } from "../i18n/context";
@@ -77,6 +77,12 @@ export default function Editor({ content, tabSize, onChange, onCursorChange, onE
   const { t } = useI18n();
   const placeholderText = t("editor.placeholder");
   const [linkBubble, setLinkBubble] = useState<LinkBubbleState | null>(null);
+
+  const onCursorChangeRef = useRef(onCursorChange);
+  onCursorChangeRef.current = onCursorChange;
+
+  const isLocalUpdateRef = useRef(false);
+
   const editor = useEditor({
     extensions: [
       StarterKit.configure({
@@ -121,6 +127,7 @@ export default function Editor({ content, tabSize, onChange, onCursorChange, onE
       }
     },
     onUpdate: ({ editor }) => {
+      isLocalUpdateRef.current = true;
       const plainText = collectPlainText(editor);
       const cursor = collectCursor(editor, plainText);
       onChange(editor.getHTML(), plainText);
@@ -160,12 +167,17 @@ export default function Editor({ content, tabSize, onChange, onCursorChange, onE
       return;
     }
 
+    if (isLocalUpdateRef.current) {
+      isLocalUpdateRef.current = false;
+      return;
+    }
+
     if (editor.getHTML() !== content) {
       editor.commands.setContent(content, false);
       const cursor = collectCursor(editor);
-      onCursorChange(cursor.line, cursor.column, cursor.chars);
+      onCursorChangeRef.current(cursor.line, cursor.column, cursor.chars);
     }
-  }, [content, editor, onCursorChange]);
+  }, [content, editor]);
 
   const handleShellMouseDown = useCallback((event: ReactMouseEvent<HTMLElement>) => {
     if (!editor) {
@@ -181,7 +193,7 @@ export default function Editor({ content, tabSize, onChange, onCursorChange, onE
       return;
     }
 
-    editor.chain().focus("end").run();
+    editor.chain().focus().run();
   }, [editor]);
 
   const handleEditorClick = useCallback((event: ReactMouseEvent<HTMLElement>) => {

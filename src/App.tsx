@@ -280,6 +280,14 @@ export default function App() {
   const [cursor, setCursor] = useState({ line: 1, column: 1, chars: 0 });
   const [isMaximized, setIsMaximized] = useState(false);
 
+  const handleCursorChange = useCallback((line: number, column: number, chars: number) => {
+    setCursor({ line, column, chars });
+  }, []);
+
+  const handleEditorChange = useCallback((content: string, plainText: string) => {
+    updateActiveContent(content, plainText);
+  }, [updateActiveContent]);
+
   const [searchQuery, setSearchQuery] = useState("");
   const [searchMode, setSearchMode] = useState<"all" | "title" | "content">("all");
   const [selectedFolder, setSelectedFolder] = useState<string | null>(null);
@@ -1039,8 +1047,8 @@ export default function App() {
               content={activeTab.content}
               tabSize={tabSize}
               onEditorReady={setEditor}
-              onChange={(content, plainText) => updateActiveContent(content, plainText)}
-              onCursorChange={(line, column, chars) => setCursor({ line, column, chars })}
+              onChange={handleEditorChange}
+              onCursorChange={handleCursorChange}
             />
           ) : null}
         </main>
