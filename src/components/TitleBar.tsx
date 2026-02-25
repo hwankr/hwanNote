@@ -1,6 +1,7 @@
-﻿import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../i18n/context";
 import type { NoteTab } from "../stores/noteStore";
+import ContextMenu, { type ContextMenuEntry } from "./ContextMenu";
 
 const MenuIcon = (
   <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -67,12 +68,6 @@ interface TitleBarProps {
   onCloseWindow: () => void;
 }
 
-interface ContextMenuState {
-  tabId: string;
-  x: number;
-  y: number;
-}
-
 export default function TitleBar({
   tabs,
   activeTabId,
@@ -91,29 +86,11 @@ export default function TitleBar({
   const { t } = useI18n();
   const [draggingTabId, setDraggingTabId] = useState<string | null>(null);
   const [dragOverTabId, setDragOverTabId] = useState<string | null>(null);
-  const [menu, setMenu] = useState<ContextMenuState | null>(null);
+  const [menu, setMenu] = useState<{ tabId: string; x: number; y: number } | null>(null);
   const [tabsOverflowing, setTabsOverflowing] = useState(false);
   const tabsRef = useRef<HTMLDivElement | null>(null);
 
   const menuTarget = useMemo(() => tabs.find((tab) => tab.id === menu?.tabId), [tabs, menu]);
-
-  useEffect(() => {
-    if (!menu) {
-      return;
-    }
-
-    const closeMenu = () => setMenu(null);
-
-    window.addEventListener("mousedown", closeMenu);
-    window.addEventListener("scroll", closeMenu, true);
-    window.addEventListener("resize", closeMenu);
-
-    return () => {
-      window.removeEventListener("mousedown", closeMenu);
-      window.removeEventListener("scroll", closeMenu, true);
-      window.removeEventListener("resize", closeMenu);
-    };
-  }, [menu]);
 
   useEffect(() => {
     const tabsElement = tabsRef.current;
@@ -137,6 +114,15 @@ export default function TitleBar({
       window.removeEventListener("resize", updateOverflowState);
     };
   }, [tabs]);
+
+  const menuItems = useMemo<ContextMenuEntry[]>(() => {
+    if (!menu || !menuTarget) return [];
+    return [
+      { key: "close", label: t("titlebar.context.close"), onClick: () => { onCloseTab(menu.tabId); setMenu(null); } },
+      { key: "closeOthers", label: t("titlebar.context.closeOthers"), onClick: () => { onCloseOtherTabs(menu.tabId); setMenu(null); } },
+      { key: "pin", label: menuTarget.isPinned ? t("titlebar.context.unpin") : t("titlebar.context.pin"), onClick: () => { onTogglePinTab(menu.tabId); setMenu(null); } },
+    ];
+  }, [menu, menuTarget, t, onCloseTab, onCloseOtherTabs, onTogglePinTab]);
 
   return (
     <header className="titlebar">
@@ -248,39 +234,13 @@ export default function TitleBar({
       </div>
 
       {menu && menuTarget ? (
-        <div
-          className="tab-context-menu no-drag"
-          style={{ left: `${menu.x}px`, top: `${menu.y}px` }}
-          onMouseDown={(event) => event.stopPropagation()}
-        >
-          <button
-            type="button"
-            onClick={() => {
-              onCloseTab(menu.tabId);
-              setMenu(null);
-            }}
-          >
-            {t("titlebar.context.close")}
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              onCloseOtherTabs(menu.tabId);
-              setMenu(null);
-            }}
-          >
-            {t("titlebar.context.closeOthers")}
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              onTogglePinTab(menu.tabId);
-              setMenu(null);
-            }}
-          >
-            {menuTarget.isPinned ? t("titlebar.context.unpin") : t("titlebar.context.pin")}
-          </button>
-        </div>
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          items={menuItems}
+          onClose={() => setMenu(null)}
+          className="no-drag"
+        />
       ) : null}
     </header>
   );

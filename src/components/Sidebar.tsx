@@ -1,6 +1,6 @@
-﻿import { useEffect, useMemo, useState } from "react";
 import { useI18n } from "../i18n/context";
 import type { NoteTab } from "../stores/noteStore";
+import FolderTree from "./FolderTree";
 
 export interface SidebarTag {
   name: string;
@@ -32,48 +32,6 @@ interface SidebarProps {
   onCreateFolder: (folderPath: string) => void;
   onRenameFolder: (from: string, to: string) => void;
   onDeleteFolder: (folderPath: string) => void;
-}
-
-interface FolderRow {
-  path: string;
-  label: string;
-  depth: number;
-}
-
-interface FolderMenuState {
-  folderPath: string;
-  x: number;
-  y: number;
-}
-
-function buildFolderRows(folderPaths: string[], localeTag: string) {
-  const normalizedSet = new Set<string>(["inbox"]);
-
-  folderPaths
-    .map((path) => path.trim().replace(/\\/g, "/"))
-    .filter(Boolean)
-    .forEach((path) => {
-      const segments = path.split("/").filter(Boolean);
-      let current = "";
-
-      segments.forEach((segment) => {
-        current = current ? `${current}/${segment}` : segment;
-        normalizedSet.add(current);
-      });
-    });
-
-  const rows: FolderRow[] = Array.from(normalizedSet)
-    .sort((a, b) => a.localeCompare(b, localeTag))
-    .map((path) => {
-      const segments = path.split("/");
-      return {
-        path,
-        label: segments[segments.length - 1],
-        depth: segments.length - 1
-      };
-    });
-
-  return rows;
 }
 
 function formatUpdatedTime(timestamp: number, localeTag: string) {
@@ -126,25 +84,6 @@ export default function Sidebar({
   onDeleteFolder
 }: SidebarProps) {
   const { t, localeTag } = useI18n();
-  const [folderMenu, setFolderMenu] = useState<FolderMenuState | null>(null);
-  const folderRows = useMemo(() => buildFolderRows(folders, localeTag), [folders, localeTag]);
-
-  useEffect(() => {
-    if (!folderMenu) {
-      return;
-    }
-
-    const closeMenu = () => setFolderMenu(null);
-    window.addEventListener("mousedown", closeMenu);
-    window.addEventListener("scroll", closeMenu, true);
-    window.addEventListener("resize", closeMenu);
-
-    return () => {
-      window.removeEventListener("mousedown", closeMenu);
-      window.removeEventListener("scroll", closeMenu, true);
-      window.removeEventListener("resize", closeMenu);
-    };
-  }, [folderMenu]);
 
   return (
     <aside className={`sidebar ${visible ? "visible" : "hidden"}`}>
@@ -171,61 +110,18 @@ export default function Sidebar({
       </div>
 
       <div className="sidebar-section">
-        <div className="sidebar-section-head">
-          <h3>{t("sidebar.folders")}</h3>
-          <button
-            type="button"
-            className="sidebar-mini-btn"
-            onClick={() => {
-              const nextPath = window.prompt(t("sidebar.newFolderPrompt"));
-              if (!nextPath?.trim()) {
-                return;
-              }
-
-              onCreateFolder(nextPath.trim());
-            }}
-          >
-            +
-          </button>
-        </div>
-
-        <div className="folder-tree">
-          <button
-            type="button"
-            className={`folder-item ${selectedFolder === null ? "active" : ""}`}
-            onClick={() => onSelectFolder(null)}
-          >
-            {t("sidebar.allNotes")}
-          </button>
-
-          {folderRows.map((folder) => (
-            <button
-              key={folder.path}
-              type="button"
-              className={`folder-item ${selectedFolder === folder.path ? "active" : ""}`}
-              style={{ paddingLeft: `${10 + folder.depth * 14}px` }}
-              onClick={() => onSelectFolder(folder.path)}
-              onContextMenu={(event) => {
-                event.preventDefault();
-                if (folder.path === "inbox") {
-                  return;
-                }
-                setFolderMenu({ folderPath: folder.path, x: event.clientX, y: event.clientY });
-              }}
-              onDragOver={(event) => event.preventDefault()}
-              onDrop={(event) => {
-                event.preventDefault();
-                const noteId = event.dataTransfer.getData("text/note-id");
-                if (noteId) {
-                  onMoveNoteToFolder(noteId, folder.path);
-                }
-              }}
-              title={folder.path}
-            >
-              {folder.label}
-            </button>
-          ))}
-        </div>
+        <FolderTree
+          folders={folders}
+          selectedFolder={selectedFolder}
+          searchQuery={searchQuery}
+          actions={{
+            onSelectFolder,
+            onCreateFolder,
+            onRenameFolder,
+            onDeleteFolder,
+            onMoveNoteToFolder,
+          }}
+        />
       </div>
 
       <div className="sidebar-section">
@@ -292,42 +188,6 @@ export default function Sidebar({
           ))}
         </div>
       </div>
-
-      {folderMenu ? (
-        <div
-          className="sidebar-context-menu"
-          style={{ left: `${folderMenu.x}px`, top: `${folderMenu.y}px` }}
-          onMouseDown={(event) => event.stopPropagation()}
-        >
-          <button
-            type="button"
-            onClick={() => {
-              const renamed = window.prompt(t("sidebar.renameFolderPrompt"), folderMenu.folderPath);
-              if (!renamed || !renamed.trim()) {
-                setFolderMenu(null);
-                return;
-              }
-
-              onRenameFolder(folderMenu.folderPath, renamed.trim());
-              setFolderMenu(null);
-            }}
-          >
-            {t("sidebar.renameFolder")}
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              const ok = window.confirm(t("sidebar.deleteFolderConfirm", { path: folderMenu.folderPath }));
-              if (ok) {
-                onDeleteFolder(folderMenu.folderPath);
-              }
-              setFolderMenu(null);
-            }}
-          >
-            {t("sidebar.deleteFolder")}
-          </button>
-        </div>
-      ) : null}
     </aside>
   );
 }

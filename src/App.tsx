@@ -283,7 +283,20 @@ export default function App() {
   const [selectedFolder, setSelectedFolder] = useState<string | null>(null);
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
   const [sortMode, setSortMode] = useState<SortMode>("updated");
-  const [customFolders, setCustomFolders] = useState<string[]>([]);
+  const [customFolders, setCustomFolders] = useState<string[]>(() => {
+    try {
+      const raw = window.localStorage.getItem(CUSTOM_FOLDERS_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as unknown;
+        if (Array.isArray(parsed)) {
+          return Array.from(new Set(
+            parsed.filter((e): e is string => typeof e === "string").map(normalizeFolderPath)
+          ));
+        }
+      }
+    } catch { /* ignore */ }
+    return [];
+  });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [themeMode, setThemeMode] = useState<ThemeMode>("light");
   const [editorFontSize, setEditorFontSize] = useState(DEFAULT_EDITOR_FONT_SIZE);
@@ -389,22 +402,6 @@ export default function App() {
   }, [tabs, selectedFolder, selectedTag, searchQuery, searchMode, noteTags, sortMode, localeTag]);
 
   useEffect(() => {
-    try {
-      const raw = window.localStorage.getItem(CUSTOM_FOLDERS_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw) as unknown;
-        if (Array.isArray(parsed)) {
-          const normalized = parsed
-            .filter((entry): entry is string => typeof entry === "string")
-            .map((path) => normalizeFolderPath(path));
-
-          setCustomFolders(Array.from(new Set(normalized)));
-        }
-      }
-    } catch (error) {
-      console.warn("Failed to load custom folders", error);
-    }
-
     const savedThemeMode = window.localStorage.getItem(THEME_MODE_KEY);
     if (savedThemeMode === "light" || savedThemeMode === "dark" || savedThemeMode === "system") {
       setThemeMode(savedThemeMode);
