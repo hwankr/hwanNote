@@ -283,6 +283,7 @@ pub async fn check_for_updates(app: AppHandle) {
             });
         }
         Err(e) => {
+            tracing::warn!("Update check failed: {}", e);
             emit(UpdateStatusPayload {
                 status: "error".to_string(),
                 version: None,
