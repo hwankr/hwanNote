@@ -124,7 +124,14 @@ const messages = {
     "status.rightInfo": "{{theme}} | {{zoom}}% | Windows (CRLF) | UTF-8",
     "theme.light": "테마: 라이트",
     "theme.dark": "테마: 다크",
-    "theme.system": "테마: 시스템"
+    "theme.system": "테마: 시스템",
+    "update.available": "새 버전 {{version}}을 사용할 수 있습니다",
+    "update.downloading": "업데이트 다운로드 중... {{progress}}%",
+    "update.downloaded": "업데이트 설치 준비 완료",
+    "update.install": "설치 후 재시작",
+    "update.download": "다운로드",
+    "update.dismiss": "나중에",
+    "update.error": "업데이트 확인 실패"
   },
   en: {
     "common.untitled": "Untitled",
@@ -243,7 +250,14 @@ const messages = {
     "status.rightInfo": "{{theme}} | {{zoom}}% | Windows (CRLF) | UTF-8",
     "theme.light": "Theme: Light",
     "theme.dark": "Theme: Dark",
-    "theme.system": "Theme: System"
+    "theme.system": "Theme: System",
+    "update.available": "New version {{version}} is available",
+    "update.downloading": "Downloading update... {{progress}}%",
+    "update.downloaded": "Update ready to install",
+    "update.install": "Install & Restart",
+    "update.download": "Download",
+    "update.dismiss": "Later",
+    "update.error": "Update check failed"
   }
 } as const satisfies Record<AppLanguage, MessageDictionary>;
 

@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
 
 const api = {
   window: {
@@ -36,6 +36,15 @@ const api = {
       ipcRenderer.invoke("note:save-txt", filePath, content) as Promise<boolean>,
     delete: (noteId: string) =>
       ipcRenderer.invoke("note:delete", noteId) as Promise<boolean>
+  },
+  updater: {
+    download: () => ipcRenderer.invoke("updater:download"),
+    install: () => ipcRenderer.invoke("updater:install"),
+    onStatus: (callback: (data: { status: "checking" | "available" | "not-available" | "downloading" | "downloaded" | "error"; version?: string; progress?: number; error?: string }) => void) => {
+      const handler = (_event: IpcRendererEvent, data: { status: "checking" | "available" | "not-available" | "downloading" | "downloaded" | "error"; version?: string; progress?: number; error?: string }) => callback(data);
+      ipcRenderer.on("updater:status", handler);
+      return () => { ipcRenderer.removeListener("updater:status", handler); };
+    }
   },
   settings: {
     browseAutoSaveDir: () => ipcRenderer.invoke("settings:browse-autosave-dir") as Promise<string | null>,

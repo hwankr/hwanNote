@@ -1,6 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import path from "node:path";
 import { getCustomAutoSaveDir, getEffectiveAutoSaveDir, setCustomAutoSaveDir } from "./configManager";
+import { initAutoUpdater, startDownload, installUpdate } from "./updater";
 import {
   type AutoSavePayload,
   autoSaveMarkdownNote,
@@ -173,6 +174,14 @@ function setupIpcHandlers() {
     return true;
   });
 
+  ipcMain.handle("updater:download", () => {
+    startDownload();
+  });
+
+  ipcMain.handle("updater:install", () => {
+    installUpdate();
+  });
+
   ipcMain.handle("shell:open-external", async (_event, url: string) => {
     let parsed: URL;
     try {
@@ -190,7 +199,8 @@ function setupIpcHandlers() {
 
 app.whenReady().then(() => {
   setupIpcHandlers();
-  createMainWindow();
+  const mainWindow = createMainWindow();
+  initAutoUpdater(mainWindow);
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {

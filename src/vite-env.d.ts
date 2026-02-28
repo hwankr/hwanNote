@@ -41,6 +41,16 @@ declare global {
         saveTxt: (filePath: string, content: string) => Promise<boolean>;
         delete: (noteId: string) => Promise<boolean>;
       };
+      updater: {
+        download: () => Promise<void>;
+        install: () => Promise<void>;
+        onStatus: (callback: (data: {
+          status: "checking" | "available" | "not-available" | "downloading" | "downloaded" | "error";
+          version?: string;
+          progress?: number;
+          error?: string;
+        }) => void) => () => void;
+      };
       settings: {
         browseAutoSaveDir: () => Promise<string | null>;
         setAutoSaveDir: (dir: string | null) => Promise<{

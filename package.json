@@ -5,6 +5,10 @@
   "license": "MIT",
   "author": "HwanKR",
   "description": "Windows 11 Notepad-style desktop markdown note app with Electron + React + TypeScript.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hwankr/hwanNote.git"
+  },
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "concurrently -k \"npm:dev:main\" \"npm:dev:renderer\" \"npm:dev:electron\"",
@@ -20,7 +24,8 @@
     "dist:all": "cross-env CSC_IDENTITY_AUTO_DISCOVERY=false npm run build && electron-builder --win nsis portable --x64",
     "preview": "vite preview",
     "start": "npm run build && electron dist-electron/main.js",
-    "typecheck": "tsc --noEmit && tsc -p tsconfig.electron.json --noEmit"
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.electron.json --noEmit",
+    "release": "cross-env CSC_IDENTITY_AUTO_DISCOVERY=false npm run build && electron-builder --win nsis --x64 --publish always"
   },
   "dependencies": {
     "@tiptap/extension-link": "^2.14.0",
@@ -33,6 +38,7 @@
     "@tiptap/extension-task-list": "^2.14.0",
     "@tiptap/react": "^2.14.0",
     "@tiptap/starter-kit": "^2.14.0",
+    "electron-updater": "^6.8.3",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "zustand": "^5.0.2"
@@ -96,6 +102,11 @@
         }
       ],
       "artifactName": "${productName}-${version}-${arch}.${ext}"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "hwankr",
+      "repo": "hwanNote"
     },
     "nsis": {
       "oneClick": false,

@@ -6,6 +6,7 @@ import Sidebar, { type SidebarTag } from "./components/Sidebar";
 import StatusBar from "./components/StatusBar";
 import TitleBar from "./components/TitleBar";
 import Toolbar from "./components/Toolbar";
+import UpdateToast from "./components/UpdateToast";
 import { useAutoSave } from "./hooks/useAutoSave";
 import { useI18n } from "./i18n/context";
 import {
@@ -253,7 +254,7 @@ function normalizeEditorLineHeight(value: number) {
 }
 
 export default function App() {
-  const { t, localeTag } = useI18n();
+  const { t, localeTag, language } = useI18n();
   const tabs = useNoteStore((state) => state.tabs);
   const activeTabId = useNoteStore((state) => state.activeTabId);
   const sidebarVisible = useNoteStore((state) => state.sidebarVisible);
@@ -1111,6 +1112,8 @@ export default function App() {
           restoreEditorFocus(editor);
         }}
       />
+
+      <UpdateToast language={language} />
     </div>
   );
 }
