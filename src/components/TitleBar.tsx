@@ -87,33 +87,60 @@ export default function TitleBar({
   const [draggingTabId, setDraggingTabId] = useState<string | null>(null);
   const [dragOverTabId, setDragOverTabId] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ tabId: string; x: number; y: number } | null>(null);
-  const [tabsOverflowing, setTabsOverflowing] = useState(false);
   const tabsRef = useRef<HTMLDivElement | null>(null);
+  const dragRef = useRef<{ tabId: string; startX: number; active: boolean } | null>(null);
+  const dragOverIdRef = useRef<string | null>(null);
+  const didDragRef = useRef(false);
 
   const menuTarget = useMemo(() => tabs.find((tab) => tab.id === menu?.tabId), [tabs, menu]);
 
   useEffect(() => {
-    const tabsElement = tabsRef.current;
-    if (!tabsElement) {
-      return;
-    }
+    const handlePointerMove = (e: PointerEvent) => {
+      const drag = dragRef.current;
+      if (!drag) return;
 
-    const updateOverflowState = () => {
-      const isOverflowing = tabsElement.scrollWidth > tabsElement.clientWidth + 1;
-      setTabsOverflowing((prev) => (prev === isOverflowing ? prev : isOverflowing));
+      if (!drag.active) {
+        if (Math.abs(e.clientX - drag.startX) > 5) {
+          drag.active = true;
+          setDraggingTabId(drag.tabId);
+          document.body.classList.add("tab-dragging");
+        }
+        return;
+      }
+
+      const el = document.elementFromPoint(e.clientX, e.clientY);
+      const tabEl = (el as HTMLElement | null)?.closest?.("[data-tab-id]") as HTMLElement | null;
+      const targetId = tabEl?.dataset.tabId ?? null;
+      const over = targetId && targetId !== drag.tabId ? targetId : null;
+
+      if (over !== dragOverIdRef.current) {
+        dragOverIdRef.current = over;
+        setDragOverTabId(over);
+      }
     };
 
-    updateOverflowState();
+    const handlePointerUp = () => {
+      const drag = dragRef.current;
+      if (drag?.active && dragOverIdRef.current) {
+        onReorderTabs(drag.tabId, dragOverIdRef.current);
+        didDragRef.current = true;
+      }
 
-    const resizeObserver = new ResizeObserver(updateOverflowState);
-    resizeObserver.observe(tabsElement);
-    window.addEventListener("resize", updateOverflowState);
+      dragRef.current = null;
+      dragOverIdRef.current = null;
+      setDraggingTabId(null);
+      setDragOverTabId(null);
+      document.body.classList.remove("tab-dragging");
+    };
 
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
     return () => {
-      resizeObserver.disconnect();
-      window.removeEventListener("resize", updateOverflowState);
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+      document.body.classList.remove("tab-dragging");
     };
-  }, [tabs]);
+  }, [onReorderTabs]);
 
   const menuItems = useMemo<ContextMenuEntry[]>(() => {
     if (!menu || !menuTarget) return [];
@@ -138,50 +165,31 @@ export default function TitleBar({
       </div>
 
       <div className="titlebar-center">
-        <div ref={tabsRef} className={`tabs ${tabsOverflowing ? "no-drag" : ""}`}>
+        <div ref={tabsRef} className="tabs no-drag">
           {tabs.map((tab) => (
             <button
               type="button"
               key={tab.id}
               className={`tab no-drag ${tab.id === activeTabId ? "active" : ""} ${
-                tab.id === dragOverTabId ? "drag-over" : ""
-              }`}
-              onClick={() => onSelectTab(tab.id)}
+                tab.id === draggingTabId ? "dragging" : ""
+              } ${tab.id === dragOverTabId ? "drag-over" : ""}`}
+              data-tab-id={tab.id}
+              onClick={() => {
+                if (didDragRef.current) {
+                  didDragRef.current = false;
+                  return;
+                }
+                onSelectTab(tab.id);
+              }}
               onContextMenu={(event) => {
                 event.preventDefault();
                 setMenu({ tabId: tab.id, x: event.clientX, y: event.clientY });
               }}
-              onDragStart={(event) => {
-                setDraggingTabId(tab.id);
-                event.dataTransfer.effectAllowed = "move";
-                event.dataTransfer.setData("text/plain", tab.id);
-              }}
-              onDragOver={(event) => {
-                event.preventDefault();
-                if (draggingTabId && draggingTabId !== tab.id) {
-                  setDragOverTabId(tab.id);
-                }
-              }}
-              onDragLeave={() => {
-                if (dragOverTabId === tab.id) {
-                  setDragOverTabId(null);
-                }
-              }}
-              onDrop={(event) => {
-                event.preventDefault();
-                const sourceId = draggingTabId ?? event.dataTransfer.getData("text/plain");
-                if (sourceId && sourceId !== tab.id) {
-                  onReorderTabs(sourceId, tab.id);
-                }
-                setDraggingTabId(null);
-                setDragOverTabId(null);
-              }}
-              onDragEnd={() => {
-                setDraggingTabId(null);
-                setDragOverTabId(null);
+              onPointerDown={(event) => {
+                if (event.button !== 0) return;
+                dragRef.current = { tabId: tab.id, startX: event.clientX, active: false };
               }}
               title={tab.title}
-              draggable
             >
               {tab.isPinned ? <span className="tab-pin">{PinIcon}</span> : null}
               <span className="tab-title">{tab.title}</span>

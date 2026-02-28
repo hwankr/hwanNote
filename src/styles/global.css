@@ -127,7 +127,7 @@ select {
 }
 
 .titlebar-tab-drag-space {
-  flex: 0 0 44px;
+  flex: 1 0 44px;
   height: 100%;
 }
 
@@ -140,7 +140,7 @@ select {
   border: 1px solid transparent;
   border-radius: 6px;
   background: transparent;
-  cursor: pointer;
+  cursor: grab;
   user-select: none;
   font-size: 13px;
   color: var(--text-muted);
@@ -157,6 +157,17 @@ select {
 .tab:hover {
   background: var(--bg-hover);
   color: var(--text-primary);
+}
+
+/* Drag feedback: source opacity + grabbing cursor, target accent border */
+.tab.dragging {
+  opacity: 0.5;
+  cursor: grabbing;
+}
+
+body.tab-dragging,
+body.tab-dragging button {
+  cursor: grabbing;
 }
 
 .tab.drag-over {
