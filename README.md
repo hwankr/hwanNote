@@ -90,6 +90,14 @@ HwanNote는 Windows 11 메모장에서 영감을 받은 데스크톱 마크다�
 - 설치 후 앱 내 자동 업데이트를 통해 최신 버전을 유지할 수 있습니다.
 - Windows 10/11 (64-bit) 환경에서 사용할 수 있습니다.
 
+### Windows SmartScreen 경고
+
+설치 파일에 코드 서명이 되어 있지 않아, 실행 시 아래와 같은 Windows Defender SmartScreen 경고가 표시될 수 있습니다.
+
+<p align="center"><img src="./warning.png" alt="Windows SmartScreen 경고" width="360"></p>
+
+**"추가 정보"** 를 클릭한 뒤 **"실행"** 버튼을 누르면 정상적으로 설치가 진행됩니다.
+
 ---
 
 ## 개발 환경 설정 (소스에서 빌드)
