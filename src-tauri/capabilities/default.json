@@ -1,0 +1,11 @@
+{
+  "identifier": "default",
+  "description": "Default capabilities for HwanNote",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "dialog:default",
+    "opener:default",
+    "updater:default"
+  ]
+}

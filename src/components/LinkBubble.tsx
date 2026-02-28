@@ -1,3 +1,4 @@
+import { hwanShell } from "../lib/tauriApi";
 import { getMarkRange } from "@tiptap/core";
 import { Editor as TiptapEditor } from "@tiptap/react";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -93,11 +94,7 @@ export default function LinkBubble({
   }, [onClose]);
 
   const openExternal = useCallback(() => {
-    if (window.hwanShell) {
-      window.hwanShell.openExternal(href);
-    } else {
-      window.open(href, "_blank");
-    }
+    hwanShell.openExternal(href);
     onClose();
   }, [href, onClose]);
 

@@ -1,4 +1,5 @@
-﻿import Bold from "@tiptap/extension-bold";
+﻿import { hwanShell } from "../lib/tauriApi";
+import Bold from "@tiptap/extension-bold";
 import Link from "@tiptap/extension-link";
 import Placeholder from "@tiptap/extension-placeholder";
 import Table from "@tiptap/extension-table";
@@ -213,11 +214,7 @@ export default function Editor({ content, tabSize, onChange, onCursorChange, onE
     // Ctrl+click (or Cmd+click on Mac) -> open in browser
     if (event.ctrlKey || event.metaKey) {
       event.preventDefault();
-      if (window.hwanShell) {
-        window.hwanShell.openExternal(href);
-      } else {
-        window.open(href, "_blank");
-      }
+      hwanShell.openExternal(href);
       return;
     }
 

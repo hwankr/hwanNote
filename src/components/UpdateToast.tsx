@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
+import { hwanNote } from "../lib/tauriApi";
 import { translate, type AppLanguage, type TranslationKey } from "../i18n/messages";
 
 type UpdateStatus = "checking" | "available" | "not-available" | "downloading" | "downloaded" | "error";
@@ -19,7 +20,7 @@ export default function UpdateToast({ language }: Props) {
   );
 
   useEffect(() => {
-    const unsubscribe = window.hwanNote?.updater?.onStatus((data) => {
+    const unsubscribe = hwanNote.updater.onStatus((data) => {
       setStatus(data.status);
       if (data.version) setVersion(data.version);
       if (data.progress !== undefined) setProgress(data.progress);
@@ -50,7 +51,7 @@ export default function UpdateToast({ language }: Props) {
         <>
           <span className="update-toast-text">{t("update.available", { version })}</span>
           <div className="update-toast-actions">
-            <button className="update-toast-btn update-toast-btn-primary" onClick={() => void window.hwanNote?.updater?.download()}>
+            <button className="update-toast-btn update-toast-btn-primary" onClick={() => void hwanNote.updater.download()}>
               {t("update.download")}
             </button>
             <button className="update-toast-btn" onClick={() => setDismissed(true)}>
@@ -73,7 +74,7 @@ export default function UpdateToast({ language }: Props) {
         <>
           <span className="update-toast-text">{t("update.downloaded")}</span>
           <div className="update-toast-actions">
-            <button className="update-toast-btn update-toast-btn-primary" onClick={() => void window.hwanNote?.updater?.install()}>
+            <button className="update-toast-btn update-toast-btn-primary" onClick={() => void hwanNote.updater.install()}>
               {t("update.install")}
             </button>
             <button className="update-toast-btn" onClick={() => setDismissed(true)}>

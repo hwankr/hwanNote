@@ -1,6 +1,5 @@
 node_modules
 dist
-dist-electron
 release
 *.log
 npm-debug.log*
@@ -12,3 +11,10 @@ Thumbs.db
 .omc/
 .omx/
 AGENTS.md
+.env
+
+# Tauri
+src-tauri/target/
+
+# Signing keys
+~/.tauri/

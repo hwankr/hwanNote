@@ -1,5 +1,6 @@
 ﻿import { Editor as TiptapEditor } from "@tiptap/react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { hwanNote } from "./lib/tauriApi";
 import Editor, { restoreEditorFocus } from "./components/Editor";
 import SettingsPanel, { type ThemeMode } from "./components/SettingsPanel";
 import Sidebar, { type SidebarTag } from "./components/Sidebar";
@@ -488,7 +489,7 @@ export default function App() {
   }, [editorLineHeight]);
 
   useEffect(() => {
-    const noteApi = window.hwanNote?.note;
+    const noteApi = hwanNote.note;
     if (!noteApi?.loadAll) {
       return;
     }
@@ -549,7 +550,7 @@ export default function App() {
   }, [selectedTag, tags]);
 
   const handleImportTxt = useCallback(async () => {
-    const noteApi = window.hwanNote?.note;
+    const noteApi = hwanNote.note;
     if (!noteApi?.importTxt) return;
 
     const imported = await noteApi.importTxt();
@@ -576,7 +577,7 @@ export default function App() {
 
     // 외부 .txt 파일인 경우: 원본 위치에 plain text로 저장
     if (activeTab.fileFormat === "txt" && activeTab.sourceFilePath) {
-      const noteApi = window.hwanNote?.note;
+      const noteApi = hwanNote.note;
       if (!noteApi?.saveTxt) return;
 
       try {
@@ -588,7 +589,7 @@ export default function App() {
       return;
     }
 
-    const noteApi = window.hwanNote?.note;
+    const noteApi = hwanNote.note;
 
     if (!noteApi?.autoSave) {
       window.localStorage.setItem(getDraftKey(activeTab.id), activeTab.content);
@@ -621,7 +622,7 @@ export default function App() {
 
   const handleBrowseAutoSaveDir = useCallback(async () => {
     await handleManualSave();
-    const settingsApi = window.hwanNote?.settings;
+    const settingsApi = hwanNote.settings;
     if (!settingsApi) return;
 
     const selected = await settingsApi.browseAutoSaveDir();
@@ -632,7 +633,7 @@ export default function App() {
       setAutoSaveDir(result.effectiveDir);
       setAutoSaveDirIsDefault(result.isDefault);
 
-      const noteApi = window.hwanNote?.note;
+      const noteApi = hwanNote.note;
       if (noteApi?.loadAll) {
         const loaded = await noteApi.loadAll();
         hydrateTabs(
@@ -659,7 +660,7 @@ export default function App() {
 
   const handleResetAutoSaveDir = useCallback(async () => {
     await handleManualSave();
-    const settingsApi = window.hwanNote?.settings;
+    const settingsApi = hwanNote.settings;
     if (!settingsApi) return;
 
     try {
@@ -667,7 +668,7 @@ export default function App() {
       setAutoSaveDir(result.effectiveDir);
       setAutoSaveDirIsDefault(result.isDefault);
 
-      const noteApi = window.hwanNote?.note;
+      const noteApi = hwanNote.note;
       if (noteApi?.loadAll) {
         const loaded = await noteApi.loadAll();
         hydrateTabs(
@@ -700,7 +701,7 @@ export default function App() {
   });
 
   useEffect(() => {
-    const settingsApi = window.hwanNote?.settings;
+    const settingsApi = hwanNote.settings;
     if (!settingsApi?.getAutoSaveDir) {
       return;
     }
@@ -931,7 +932,7 @@ export default function App() {
   }, []);
 
   const handleToggleMaximize = useCallback(async () => {
-    const winApi = window.hwanNote?.window;
+    const winApi = hwanNote.window;
     if (!winApi) {
       return;
     }
@@ -968,9 +969,9 @@ export default function App() {
         onTogglePinTab={togglePinTab}
         onReorderTabs={reorderTabs}
         onCreateTab={createTab}
-        onMinimize={() => void window.hwanNote?.window.minimize()}
+        onMinimize={() => void hwanNote.window.minimize()}
         onToggleMaximize={() => void handleToggleMaximize()}
-        onCloseWindow={() => void window.hwanNote?.window.close()}
+        onCloseWindow={() => void hwanNote.window.close()}
       />
 
       <Toolbar
@@ -1008,7 +1009,7 @@ export default function App() {
             if (!tab) return;
             closeTab(id);
             if (tab.lastSavedAt > 0) {
-              void window.hwanNote?.note.delete(id);
+              void hwanNote.note.delete(id);
             }
           }}
           onMoveNoteToFolder={(id, folderPath) => {

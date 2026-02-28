@@ -4,30 +4,24 @@
   "private": true,
   "license": "MIT",
   "author": "HwanKR",
-  "description": "Windows 11 Notepad-style desktop markdown note app with Electron + React + TypeScript.",
+  "description": "Windows 11 Notepad-style desktop markdown note app with Tauri + React + TypeScript.",
   "repository": {
     "type": "git",
     "url": "https://github.com/hwankr/hwanNote.git"
   },
-  "main": "dist-electron/main.js",
   "scripts": {
-    "dev": "concurrently -k \"npm:dev:main\" \"npm:dev:renderer\" \"npm:dev:electron\"",
-    "dev:main": "tsc -p tsconfig.electron.json --watch --preserveWatchOutput",
-    "dev:renderer": "vite",
-    "dev:electron": "wait-on dist-electron/main.js tcp:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electronmon dist-electron/main.js",
-    "build:main": "tsc -p tsconfig.electron.json",
-    "build:renderer": "vite build",
-    "build": "npm run build:main && npm run build:renderer",
-    "pack:win": "cross-env CSC_IDENTITY_AUTO_DISCOVERY=false npm run build && electron-builder --win portable --x64",
-    "dist:win": "cross-env CSC_IDENTITY_AUTO_DISCOVERY=false npm run build && electron-builder --win portable --x64",
-    "dist:installer": "cross-env CSC_IDENTITY_AUTO_DISCOVERY=false npm run build && electron-builder --win nsis --x64",
-    "dist:all": "cross-env CSC_IDENTITY_AUTO_DISCOVERY=false npm run build && electron-builder --win nsis portable --x64",
+    "dev": "tauri dev",
+    "dev:frontend": "vite",
+    "build": "tauri build",
+    "build:frontend": "vite build",
     "preview": "vite preview",
-    "start": "npm run build && electron dist-electron/main.js",
-    "typecheck": "tsc --noEmit && tsc -p tsconfig.electron.json --noEmit",
-    "release": "cross-env CSC_IDENTITY_AUTO_DISCOVERY=false npm run build && electron-builder --win nsis --x64 --publish always"
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@tauri-apps/api": "^2.10.1",
+    "@tauri-apps/plugin-dialog": "^2.6.0",
+    "@tauri-apps/plugin-opener": "^2.0.0",
+    "@tauri-apps/plugin-updater": "^2.10.0",
     "@tiptap/extension-link": "^2.14.0",
     "@tiptap/extension-placeholder": "^2.14.0",
     "@tiptap/extension-table": "^2.14.0",
@@ -38,84 +32,17 @@
     "@tiptap/extension-task-list": "^2.14.0",
     "@tiptap/react": "^2.14.0",
     "@tiptap/starter-kit": "^2.14.0",
-    "electron-updater": "^6.8.3",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "zustand": "^5.0.2"
   },
   "devDependencies": {
-    "@types/node": "^22.10.10",
+    "@tauri-apps/cli": "^2.10.0",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
     "@vitejs/plugin-react": "^4.3.4",
-    "concurrently": "^9.1.2",
-    "cross-env": "^7.0.3",
-    "electron": "^33.3.1",
-    "electron-builder": "^25.1.8",
-    "electronmon": "^2.0.3",
     "typescript": "^5.7.3",
-    "vite": "^6.0.7",
-    "wait-on": "^8.0.1"
-  },
-  "build": {
-    "appId": "com.hwankr.hwannote",
-    "productName": "HwanNote",
-    "asar": true,
-    "directories": {
-      "output": "release",
-      "buildResources": "resources"
-    },
-    "files": [
-      "dist/**",
-      "dist-electron/**",
-      "package.json"
-    ],
-    "extraResources": [
-      {
-        "from": "resources/icon.ico",
-        "to": "icon.ico"
-      }
-    ],
-    "fileAssociations": [
-      {
-        "ext": "md",
-        "name": "Markdown Document",
-        "description": "Markdown note file",
-        "role": "Editor"
-      }
-    ],
-    "win": {
-      "icon": "resources/icon.ico",
-      "signAndEditExecutable": false,
-      "target": [
-        {
-          "target": "nsis",
-          "arch": [
-            "x64"
-          ]
-        },
-        {
-          "target": "portable",
-          "arch": [
-            "x64"
-          ]
-        }
-      ],
-      "artifactName": "${productName}-${version}-${arch}.${ext}"
-    },
-    "publish": {
-      "provider": "github",
-      "owner": "hwankr",
-      "repo": "hwanNote"
-    },
-    "nsis": {
-      "oneClick": false,
-      "perMachine": false,
-      "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": "always",
-      "createStartMenuShortcut": true,
-      "shortcutName": "HwanNote"
-    }
+    "vite": "^6.0.7"
   },
   "engines": {
     "node": ">=20"
