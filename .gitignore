@@ -10,6 +10,8 @@ pnpm-debug.log*
 Thumbs.db
 .omc/
 .omx/
+.claude/
+.vscode/
 AGENTS.md
 .env
 
