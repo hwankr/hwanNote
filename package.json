@@ -1,6 +1,6 @@
 {
   "name": "hwan-note",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "license": "MIT",
   "author": "HwanKR",
@@ -15,7 +15,8 @@
     "build": "tauri build",
     "build:frontend": "vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "tauri": "tauri"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.10.1",
