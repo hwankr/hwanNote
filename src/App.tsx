@@ -1008,9 +1008,8 @@ export default function App() {
             const tab = tabs.find((t) => t.id === id);
             if (!tab) return;
             closeTab(id);
-            if (tab.lastSavedAt > 0) {
-              void hwanNote.note.delete(id);
-            }
+            // Backend gracefully handles missing notes (returns Ok(false))
+            void hwanNote.note.delete(id);
           }}
           onMoveNoteToFolder={(id, folderPath) => {
             moveTabToFolder(id, normalizeFolderPath(folderPath));
