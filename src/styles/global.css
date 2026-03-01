@@ -71,6 +71,7 @@ select {
 .titlebar-center {
   gap: 8px;
   min-width: 0;
+  overflow: hidden;
 }
 
 .titlebar-right {
@@ -126,8 +127,9 @@ select {
   display: none;
 }
 
-.titlebar-tab-drag-space {
-  flex: 1 0 44px;
+.titlebar-drag-handle {
+  flex: 0 0 clamp(64px, 12vw, 120px);
+  min-width: 64px;
   height: 100%;
 }
 
@@ -270,7 +272,11 @@ body.tab-dragging .tab:not(.dragging):hover {
 
 .add-tab-btn {
   color: var(--text-muted);
-  flex-shrink: 0;
+  flex: 0 0 auto;
+  position: sticky;
+  right: 0;
+  z-index: 1;
+  background: var(--bg-surface);
 }
 
 .window-control {

@@ -248,7 +248,7 @@ export default function TitleBar({
       </div>
 
       <div className="titlebar-center">
-        <div ref={tabsRef} className="tabs no-drag">
+        <div ref={tabsRef} className="tabs">
           {tabs.map((tab) => (
             <button
               type="button"
@@ -301,7 +301,7 @@ export default function TitleBar({
               </span>
             </button>
           ))}
-          <button type="button" className="titlebar-btn no-drag add-tab-btn" onClick={onCreateTab}>
+          <button type="button" className="titlebar-btn add-tab-btn no-drag" onClick={onCreateTab}>
             {AddTabIcon}
           </button>
         </div>
@@ -321,7 +321,7 @@ export default function TitleBar({
             {draggingTab.isDirty ? <span className="tab-dirty">*</span> : null}
           </div>
         ) : null}
-        <div className="titlebar-tab-drag-space" aria-hidden="true" />
+        <div className="titlebar-drag-handle" aria-hidden="true" />
       </div>
 
       <div className="titlebar-right no-drag">
