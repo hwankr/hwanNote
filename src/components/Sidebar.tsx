@@ -247,7 +247,9 @@ export default function Sidebar({
                 <span className="note-item-date">{formatUpdatedTime(note.updatedAt, localeTag)}</span>
               </div>
               <span className="note-item-preview">{buildPreview(note, t("sidebar.emptyPreview"))}</span>
-              <span className="note-item-folder">/{note.folderPath}</span>
+              {note.folderPath && (
+                <span className="note-item-folder">/{note.folderPath}</span>
+              )}
             </button>
           ))}
         </div>

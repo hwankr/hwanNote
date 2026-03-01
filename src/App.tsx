@@ -54,7 +54,8 @@ function normalizeFolderPath(path: string) {
     .filter(Boolean)
     .join("/");
 
-  return normalized || "inbox";
+  if (normalized === "inbox") return "";
+  return normalized;
 }
 
 function htmlToMarkdownWithBlocks(contentHtml: string) {
@@ -350,7 +351,7 @@ export default function App() {
   }, [localeTag, noteTags]);
 
   const folderPaths = useMemo(() => {
-    const merged = new Set<string>(["inbox"]);
+    const merged = new Set<string>();
 
     customFolders.forEach((path) => merged.add(normalizeFolderPath(path)));
     tabs.forEach((tab) => merged.add(normalizeFolderPath(tab.folderPath)));
@@ -522,7 +523,7 @@ export default function App() {
 
         const loadedFolders = loaded
           .map((note) => normalizeFolderPath(note.folderPath))
-          .filter((folderPath) => folderPath !== "inbox");
+          .filter(Boolean);
 
         setCustomFolders((prev) => Array.from(new Set([...prev, ...loadedFolders])));
       } catch (error) {
@@ -1035,9 +1036,6 @@ export default function App() {
           }}
           onDeleteFolder={(folderPath) => {
             const normalized = normalizeFolderPath(folderPath);
-            if (normalized === "inbox") {
-              return;
-            }
 
             setCustomFolders((prev) =>
               prev.filter((path) => path !== normalized && !path.startsWith(`${normalized}/`))

@@ -69,7 +69,7 @@ function createEmptyTab(): NoteTab {
     plainText: "",
     isDirty: false,
     isPinned: false,
-    folderPath: "inbox",
+    folderPath: "",
     createdAt: now,
     updatedAt: now,
     lastSavedAt: 0,
@@ -113,7 +113,7 @@ export const useNoteStore = create<NoteStore>((set, get) => {
         plainText,
         isDirty: true,
         isPinned: false,
-        folderPath: "inbox",
+        folderPath: "",
         createdAt: now,
         updatedAt: now,
         lastSavedAt: 0,
@@ -211,7 +211,7 @@ export const useNoteStore = create<NoteStore>((set, get) => {
       }));
     },
     moveTabToFolder: (id, folderPath) => {
-      const normalized = folderPath.trim() || "inbox";
+      const normalized = folderPath.trim();
 
       set((state) => ({
         tabs: state.tabs.map((tab) =>
@@ -221,7 +221,7 @@ export const useNoteStore = create<NoteStore>((set, get) => {
     },
     renameFolderPath: (from, to) => {
       const fromPath = from.trim();
-      const toPath = to.trim() || "inbox";
+      const toPath = to.trim();
       if (!fromPath || fromPath === toPath) {
         return;
       }
@@ -253,7 +253,7 @@ export const useNoteStore = create<NoteStore>((set, get) => {
           if (tab.folderPath === normalized || tab.folderPath.startsWith(`${normalized}/`)) {
             return {
               ...tab,
-              folderPath: "inbox",
+              folderPath: "",
               updatedAt: Date.now(),
               isDirty: true
             };

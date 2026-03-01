@@ -45,13 +45,6 @@ const FolderOpenIcon = (
   </svg>
 );
 
-const InboxIcon = (
-  <svg className="folder-icon" width="15" height="15" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-    <path d="M2.5 2.5H13.5V10.5H10.5L9.5 12.5H6.5L5.5 10.5H2.5V2.5Z" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round"/>
-    <path d="M2.5 10.5H5.5L6.5 12.5H9.5L10.5 10.5H13.5" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round"/>
-  </svg>
-);
-
 const AllNotesIcon = (
   <svg className="folder-icon" width="15" height="15" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
     <rect x="3" y="1.5" width="10" height="13" rx="1.5" stroke="currentColor" strokeWidth="1.1"/>
@@ -60,7 +53,7 @@ const AllNotesIcon = (
 );
 
 function buildFolderRows(folderPaths: string[], localeTag: string): FolderRow[] {
-  const normalizedSet = new Set<string>(["inbox"]);
+  const normalizedSet = new Set<string>();
 
   folderPaths
     .map((path) => path.trim().replace(/\\/g, "/"))
@@ -149,7 +142,7 @@ export default function FolderTree({
   const noteCounts = useMemo(() => {
     const counts = new Map<string, number>();
     for (const tab of tabs) {
-      const fp = tab.folderPath || "inbox";
+      const fp = tab.folderPath;
       // Count for exact folder
       counts.set(fp, (counts.get(fp) ?? 0) + 1);
       // Count for ancestor folders (so parent shows total of descendants)
@@ -264,12 +257,6 @@ export default function FolderTree({
   const contextMenuItems = useMemo<ContextMenuEntry[]>(() => {
     if (!folderMenu) return [];
 
-    if (folderMenu.folderPath === "inbox") {
-      return [
-        { key: "newSub", label: t("sidebar.newSubfolder"), onClick: handleNewSubfolder },
-      ];
-    }
-
     return [
       { key: "newSub", label: t("sidebar.newSubfolder"), onClick: handleNewSubfolder },
       { key: "sep1", separator: true },
@@ -303,7 +290,6 @@ export default function FolderTree({
   }, [actions]);
 
   const getFolderIcon = (folder: FolderRow) => {
-    if (folder.path === "inbox") return InboxIcon;
     const isExpanded = !collapsedFolders.has(folder.path) && hasChildren.has(folder.path);
     return isExpanded ? FolderOpenIcon : FolderClosedIcon;
   };

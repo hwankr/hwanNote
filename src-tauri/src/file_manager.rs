@@ -739,7 +739,7 @@ pub fn load_markdown_notes(auto_save_dir: &Path) -> Result<Vec<LoadedNote>, Stri
             None => ".".to_string(),
         };
         let folder_path = if rel_dir == "." {
-            "inbox".to_string()
+            String::new()
         } else {
             rel_dir
         };
