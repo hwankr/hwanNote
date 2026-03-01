@@ -28,6 +28,7 @@ import { useNoteStore } from "./stores/noteStore";
 const CUSTOM_FOLDERS_KEY = "hwan-note:custom-folders";
 const EDITOR_FONT_SIZE_KEY = "hwan-note:editor-font-size";
 const EDITOR_LINE_HEIGHT_KEY = "hwan-note:editor-line-height";
+const EDITOR_SPELLCHECK_KEY = "hwan-note:editor-spellcheck";
 const SHORTCUTS_KEY = "hwan-note:shortcuts";
 const TAB_SIZE_KEY = "hwan-note:tab-size";
 const THEME_MODE_KEY = "hwan-note:theme-mode";
@@ -316,6 +317,7 @@ export default function App() {
   const [themeMode, setThemeMode] = useState<ThemeMode>("light");
   const [editorFontSize, setEditorFontSize] = useState(DEFAULT_EDITOR_FONT_SIZE);
   const [editorLineHeight, setEditorLineHeight] = useState(DEFAULT_EDITOR_LINE_HEIGHT);
+  const [editorSpellcheck, setEditorSpellcheck] = useState(true);
   const [autoSaveDir, setAutoSaveDir] = useState("");
   const [autoSaveDirIsDefault, setAutoSaveDirIsDefault] = useState(true);
   const [shortcuts, setShortcuts] = useState<ShortcutMap>(() => createDefaultShortcuts());
@@ -463,6 +465,15 @@ export default function App() {
     } catch (error) {
       console.warn("Failed to load tab size", error);
     }
+
+    try {
+      const rawSpellcheck = window.localStorage.getItem(EDITOR_SPELLCHECK_KEY);
+      if (rawSpellcheck === "true" || rawSpellcheck === "false") {
+        setEditorSpellcheck(rawSpellcheck === "true");
+      }
+    } catch (error) {
+      console.warn("Failed to load editor spellcheck", error);
+    }
   }, []);
 
   useEffect(() => {
@@ -490,6 +501,10 @@ export default function App() {
     window.localStorage.setItem(EDITOR_LINE_HEIGHT_KEY, String(editorLineHeight));
     document.documentElement.style.setProperty("--editor-line-height", String(editorLineHeight));
   }, [editorLineHeight]);
+
+  useEffect(() => {
+    window.localStorage.setItem(EDITOR_SPELLCHECK_KEY, String(editorSpellcheck));
+  }, [editorSpellcheck]);
 
   useEffect(() => {
     const noteApi = hwanNote.note;
@@ -1056,6 +1071,7 @@ export default function App() {
               key={activeTab.id}
               content={activeTab.content}
               tabSize={tabSize}
+              spellcheck={editorSpellcheck}
               onEditorReady={setEditor}
               onChange={handleEditorChange}
               onCursorChange={handleCursorChange}
@@ -1095,6 +1111,7 @@ export default function App() {
         themeMode={themeMode}
         editorLineHeight={editorLineHeight}
         editorFontSize={editorFontSize}
+        editorSpellcheck={editorSpellcheck}
         tabSize={tabSize}
         autoSaveDir={autoSaveDir}
         autoSaveDirIsDefault={autoSaveDirIsDefault}
@@ -1104,6 +1121,7 @@ export default function App() {
         onThemeModeChange={setThemeMode}
         onEditorLineHeightChange={(value) => setEditorLineHeight(normalizeEditorLineHeight(value))}
         onEditorFontSizeChange={(value) => setEditorFontSize(normalizeEditorFontSize(value))}
+        onEditorSpellcheckChange={setEditorSpellcheck}
         onTabSizeChange={(size) => setTabSize(VALID_TAB_SIZES.includes(size) ? size : DEFAULT_TAB_SIZE)}
         onShortcutChange={handleShortcutChange}
         onResetShortcuts={handleShortcutReset}

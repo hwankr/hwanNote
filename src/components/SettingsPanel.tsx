@@ -19,6 +19,7 @@ interface SettingsPanelProps {
   themeMode: ThemeMode;
   editorLineHeight: number;
   editorFontSize: number;
+  editorSpellcheck: boolean;
   tabSize: number;
   autoSaveDir: string;
   autoSaveDirIsDefault: boolean;
@@ -28,6 +29,7 @@ interface SettingsPanelProps {
   onThemeModeChange: (mode: ThemeMode) => void;
   onEditorLineHeightChange: (value: number) => void;
   onEditorFontSizeChange: (value: number) => void;
+  onEditorSpellcheckChange: (value: boolean) => void;
   onTabSizeChange: (size: number) => void;
   onShortcutChange: (action: ShortcutAction, combo: ShortcutCombo) => ShortcutValidationResult;
   onResetShortcuts: () => void;
@@ -39,6 +41,7 @@ export default function SettingsPanel({
   themeMode,
   editorLineHeight,
   editorFontSize,
+  editorSpellcheck,
   tabSize,
   autoSaveDir,
   autoSaveDirIsDefault,
@@ -48,6 +51,7 @@ export default function SettingsPanel({
   onThemeModeChange,
   onEditorLineHeightChange,
   onEditorFontSizeChange,
+  onEditorSpellcheckChange,
   onTabSizeChange,
   onShortcutChange,
   onResetShortcuts,
@@ -186,6 +190,19 @@ export default function SettingsPanel({
               </span>
             </div>
             <div className="settings-subtext">{t("settings.fontSizeHelp")}</div>
+          </div>
+
+          <div className="settings-item">
+            <div className="settings-inline-toggle">
+              <label htmlFor="editor-spellcheck">{t("settings.spellcheck")}</label>
+              <input
+                id="editor-spellcheck"
+                type="checkbox"
+                checked={editorSpellcheck}
+                onChange={(event) => onEditorSpellcheckChange(event.target.checked)}
+              />
+            </div>
+            <div className="settings-subtext">{t("settings.spellcheckHelp")}</div>
           </div>
 
           <div className="settings-item">

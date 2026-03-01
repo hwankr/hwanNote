@@ -21,6 +21,7 @@ import LinkBubble from "./LinkBubble";
 interface EditorProps {
   content: string;
   tabSize: number;
+  spellcheck: boolean;
   onChange: (content: string, plainText: string) => void;
   onCursorChange: (line: number, column: number, chars: number) => void;
   onEditorReady: (editor: TiptapEditor | null) => void;
@@ -74,7 +75,7 @@ export function restoreEditorFocus(editor: TiptapEditor | null) {
   });
 }
 
-export default function Editor({ content, tabSize, onChange, onCursorChange, onEditorReady }: EditorProps) {
+export default function Editor({ content, tabSize, spellcheck, onChange, onCursorChange, onEditorReady }: EditorProps) {
   const { t } = useI18n();
   const placeholderText = t("editor.placeholder");
   const [linkBubble, setLinkBubble] = useState<LinkBubbleState | null>(null);
@@ -124,7 +125,8 @@ export default function Editor({ content, tabSize, onChange, onCursorChange, onE
     autofocus: "end",
     editorProps: {
       attributes: {
-        class: "note-editor"
+        class: "note-editor",
+        spellcheck: spellcheck ? "true" : "false"
       }
     },
     onUpdate: ({ editor }) => {
@@ -162,6 +164,14 @@ export default function Editor({ content, tabSize, onChange, onCursorChange, onE
       tabIndentExt.options.tabSize = tabSize;
     }
   }, [editor, tabSize]);
+
+  useEffect(() => {
+    if (!editor) {
+      return;
+    }
+
+    editor.view.dom.setAttribute("spellcheck", spellcheck ? "true" : "false");
+  }, [editor, spellcheck]);
 
   useEffect(() => {
     if (!editor) {
