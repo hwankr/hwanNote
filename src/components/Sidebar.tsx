@@ -15,7 +15,7 @@ type SearchMode = "all" | "title" | "content";
 
 interface SidebarProps {
   visible: boolean;
-  activeTabId: string;
+  activeTabId: string | null;
   folders: string[];
   tags: SidebarTag[];
   notes: NoteTab[];

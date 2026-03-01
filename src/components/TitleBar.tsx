@@ -54,7 +54,7 @@ const CloseWindowIcon = (
 
 interface TitleBarProps {
   tabs: NoteTab[];
-  activeTabId: string;
+  activeTabId: string | null;
   isMaximized: boolean;
   onToggleSidebar: () => void;
   onSelectTab: (id: string) => void;

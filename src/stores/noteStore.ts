@@ -1,4 +1,7 @@
-﻿import { create } from "zustand";
+import { create } from "zustand";
+
+export const OPEN_TAB_IDS_KEY = "hwan-note:open-tab-ids";
+export const ACTIVE_TAB_ID_KEY = "hwan-note:active-tab-id";
 
 export interface NoteTab {
   id: string;
@@ -16,17 +19,29 @@ export interface NoteTab {
   fileFormat: "md" | "txt";
 }
 
+export interface PersistedTabSession {
+  openTabIds: string[];
+  activeTabId: string | null;
+}
+
 interface NoteStore {
-  tabs: NoteTab[];
-  activeTabId: string;
+  notesById: Record<string, NoteTab>;
+  noteIds: string[];
+  openTabIds: string[];
+  activeTabId: string | null;
+  allNotes: NoteTab[];
+  openTabs: NoteTab[];
+  activeOpenTab: NoteTab | null;
   sidebarVisible: boolean;
-  hydrateTabs: (tabs: NoteTab[]) => void;
+  hydrateTabs: (tabs: NoteTab[], persistedSession?: PersistedTabSession) => void;
   createTab: () => void;
   addImportedTab: (title: string, content: string, plainText: string, sourceFilePath?: string) => void;
+  openNote: (id: string) => void;
   setActiveTab: (id: string) => void;
   closeTab: (id: string) => void;
   closeOtherTabs: (id: string) => void;
   reorderTabs: (sourceId: string, targetId: string) => void;
+  removeNote: (id: string) => void;
   togglePinTab: (id: string) => void;
   moveTabToFolder: (id: string, folderPath: string) => void;
   renameFolderPath: (from: string, to: string) => void;
@@ -51,11 +66,11 @@ function deriveTitle(plainText: string) {
     .find(Boolean);
 
   if (!firstLine) {
-    return "\uC81C\uBAA9 \uC5C6\uC74C";
+    return "제목 없음";
   }
 
   const stripped = firstLine.replace(/^#{1,3}\s+/, "");
-  return stripped.slice(0, 50) || "\uC81C\uBAA9 \uC5C6\uC74C";
+  return stripped.slice(0, 50) || "제목 없음";
 }
 
 function createEmptyTab(): NoteTab {
@@ -63,7 +78,7 @@ function createEmptyTab(): NoteTab {
 
   return {
     id: createId(),
-    title: "\uC81C\uBAA9 \uC5C6\uC74C",
+    title: "제목 없음",
     isTitleManual: false,
     content: "<p></p>",
     plainText: "",
@@ -77,31 +92,147 @@ function createEmptyTab(): NoteTab {
   };
 }
 
-export const useNoteStore = create<NoteStore>((set, get) => {
-  const firstTab = createEmptyTab();
+function dedupeIds(ids: string[]) {
+  return Array.from(new Set(ids));
+}
+
+function buildCollections(
+  notesById: Record<string, NoteTab>,
+  noteIds: string[],
+  openTabIds: string[],
+  activeTabId: string | null
+) {
+  const normalizedOpenTabIds = dedupeIds(openTabIds.filter((id) => Boolean(notesById[id])));
+  const normalizedActiveTabId =
+    activeTabId && normalizedOpenTabIds.includes(activeTabId) ? activeTabId : (normalizedOpenTabIds[0] ?? null);
+  const allNotes = noteIds.map((id) => notesById[id]).filter(Boolean);
+  const openTabs = normalizedOpenTabIds.map((id) => notesById[id]).filter(Boolean);
 
   return {
-    tabs: [firstTab],
-    activeTabId: firstTab.id,
+    openTabIds: normalizedOpenTabIds,
+    activeTabId: normalizedActiveTabId,
+    allNotes,
+    openTabs,
+    activeOpenTab: normalizedActiveTabId ? (notesById[normalizedActiveTabId] ?? null) : null
+  };
+}
+
+function canUseStorage() {
+  return typeof window !== "undefined" && typeof window.localStorage !== "undefined";
+}
+
+function persistSession(openTabIds: string[], activeTabId: string | null) {
+  if (!canUseStorage()) {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(OPEN_TAB_IDS_KEY, JSON.stringify(openTabIds));
+    window.localStorage.setItem(ACTIVE_TAB_ID_KEY, activeTabId ?? "");
+  } catch {
+    // ignore localStorage failures
+  }
+}
+
+export function readTabSessionFromStorage(): PersistedTabSession {
+  if (!canUseStorage()) {
+    return { openTabIds: [], activeTabId: null };
+  }
+
+  let openTabIds: string[] = [];
+  let activeTabId: string | null = null;
+
+  try {
+    const rawOpenTabIds = window.localStorage.getItem(OPEN_TAB_IDS_KEY);
+    if (rawOpenTabIds) {
+      const parsed = JSON.parse(rawOpenTabIds) as unknown;
+      if (Array.isArray(parsed)) {
+        openTabIds = parsed.filter((entry): entry is string => typeof entry === "string");
+      }
+    }
+  } catch {
+    openTabIds = [];
+  }
+
+  try {
+    const rawActiveTabId = window.localStorage.getItem(ACTIVE_TAB_ID_KEY) ?? "";
+    activeTabId = rawActiveTabId.trim() ? rawActiveTabId : null;
+  } catch {
+    activeTabId = null;
+  }
+
+  return { openTabIds, activeTabId };
+}
+
+export const useNoteStore = create<NoteStore>((set, get) => {
+  const firstTab = createEmptyTab();
+  const notesById: Record<string, NoteTab> = { [firstTab.id]: firstTab };
+  const noteIds = [firstTab.id];
+  const openTabIds = [firstTab.id];
+  const baseCollections = buildCollections(notesById, noteIds, openTabIds, firstTab.id);
+
+  return {
+    notesById,
+    noteIds,
+    openTabIds: baseCollections.openTabIds,
+    activeTabId: baseCollections.activeTabId,
+    allNotes: baseCollections.allNotes,
+    openTabs: baseCollections.openTabs,
+    activeOpenTab: baseCollections.activeOpenTab,
     sidebarVisible: false,
-    hydrateTabs: (tabs) => {
-      const normalizedTabs = tabs.length > 0 ? tabs : [createEmptyTab()];
-      const currentActiveId = get().activeTabId;
-      const nextActiveId = normalizedTabs.some((tab) => tab.id === currentActiveId)
-        ? currentActiveId
-        : normalizedTabs[0].id;
+    hydrateTabs: (tabs, persistedSession) => {
+      const loadedTabs = tabs.length > 0 ? tabs : [createEmptyTab()];
+      const nextNotesById: Record<string, NoteTab> = {};
+      const nextNoteIds: string[] = [];
+
+      loadedTabs.forEach((tab) => {
+        nextNotesById[tab.id] = tab;
+        nextNoteIds.push(tab.id);
+      });
+
+      const session = persistedSession ?? readTabSessionFromStorage();
+      let nextOpenTabIds = session.openTabIds.filter((id) => Boolean(nextNotesById[id]));
+      if (nextOpenTabIds.length === 0) {
+        nextOpenTabIds = [nextNoteIds[0]];
+      }
+
+      const nextActiveTabId =
+        session.activeTabId && nextOpenTabIds.includes(session.activeTabId)
+          ? session.activeTabId
+          : nextOpenTabIds[0];
+
+      const nextCollections = buildCollections(nextNotesById, nextNoteIds, nextOpenTabIds, nextActiveTabId);
+      persistSession(nextCollections.openTabIds, nextCollections.activeTabId);
 
       set({
-        tabs: normalizedTabs,
-        activeTabId: nextActiveId
+        notesById: nextNotesById,
+        noteIds: nextNoteIds,
+        openTabIds: nextCollections.openTabIds,
+        activeTabId: nextCollections.activeTabId,
+        allNotes: nextCollections.allNotes,
+        openTabs: nextCollections.openTabs,
+        activeOpenTab: nextCollections.activeOpenTab
       });
     },
     createTab: () => {
       const tab = createEmptyTab();
-      set((state) => ({
-        tabs: [...state.tabs, tab],
-        activeTabId: tab.id
-      }));
+      set((state) => {
+        const nextNotesById = { ...state.notesById, [tab.id]: tab };
+        const nextNoteIds = [...state.noteIds, tab.id];
+        const nextOpenTabIds = [...state.openTabIds, tab.id];
+        const nextCollections = buildCollections(nextNotesById, nextNoteIds, nextOpenTabIds, tab.id);
+        persistSession(nextCollections.openTabIds, nextCollections.activeTabId);
+
+        return {
+          notesById: nextNotesById,
+          noteIds: nextNoteIds,
+          openTabIds: nextCollections.openTabIds,
+          activeTabId: nextCollections.activeTabId,
+          allNotes: nextCollections.allNotes,
+          openTabs: nextCollections.openTabs,
+          activeOpenTab: nextCollections.activeOpenTab
+        };
+      });
     },
     addImportedTab: (title, content, plainText, sourceFilePath) => {
       const now = Date.now();
@@ -121,63 +252,129 @@ export const useNoteStore = create<NoteStore>((set, get) => {
         fileFormat: sourceFilePath ? ("txt" as const) : ("md" as const)
       };
 
-      set((state) => ({
-        tabs: [...state.tabs, tab],
-        activeTabId: tab.id
-      }));
+      set((state) => {
+        const nextNotesById = { ...state.notesById, [tab.id]: tab };
+        const nextNoteIds = [...state.noteIds, tab.id];
+        const nextOpenTabIds = [...state.openTabIds, tab.id];
+        const nextCollections = buildCollections(nextNotesById, nextNoteIds, nextOpenTabIds, tab.id);
+        persistSession(nextCollections.openTabIds, nextCollections.activeTabId);
+
+        return {
+          notesById: nextNotesById,
+          noteIds: nextNoteIds,
+          openTabIds: nextCollections.openTabIds,
+          activeTabId: nextCollections.activeTabId,
+          allNotes: nextCollections.allNotes,
+          openTabs: nextCollections.openTabs,
+          activeOpenTab: nextCollections.activeOpenTab
+        };
+      });
+    },
+    openNote: (id) => {
+      set((state) => {
+        if (!state.notesById[id]) {
+          return state;
+        }
+
+        const nextOpenTabIds = state.openTabIds.includes(id) ? state.openTabIds : [...state.openTabIds, id];
+        const nextCollections = buildCollections(state.notesById, state.noteIds, nextOpenTabIds, id);
+        if (
+          nextCollections.activeTabId === state.activeTabId &&
+          nextCollections.openTabIds.length === state.openTabIds.length
+        ) {
+          return state;
+        }
+
+        persistSession(nextCollections.openTabIds, nextCollections.activeTabId);
+        return {
+          openTabIds: nextCollections.openTabIds,
+          activeTabId: nextCollections.activeTabId,
+          allNotes: nextCollections.allNotes,
+          openTabs: nextCollections.openTabs,
+          activeOpenTab: nextCollections.activeOpenTab
+        };
+      });
     },
     setActiveTab: (id) => {
-      if (get().tabs.some((tab) => tab.id === id)) {
-        set({ activeTabId: id });
-      }
+      set((state) => {
+        if (!state.openTabIds.includes(id) || state.activeTabId === id) {
+          return state;
+        }
+
+        const nextCollections = buildCollections(state.notesById, state.noteIds, state.openTabIds, id);
+        persistSession(nextCollections.openTabIds, nextCollections.activeTabId);
+        return {
+          activeTabId: nextCollections.activeTabId,
+          allNotes: nextCollections.allNotes,
+          openTabs: nextCollections.openTabs,
+          activeOpenTab: nextCollections.activeOpenTab
+        };
+      });
     },
     closeTab: (id) => {
       set((state) => {
-        const targetIndex = state.tabs.findIndex((tab) => tab.id === id);
-
+        const targetIndex = state.openTabIds.findIndex((openId) => openId === id);
         if (targetIndex === -1) {
           return state;
         }
 
-        if (state.tabs.length === 1) {
-          const freshTab = createEmptyTab();
-          return {
-            tabs: [freshTab],
-            activeTabId: freshTab.id
-          };
+        let nextOpenTabIds = state.openTabIds.filter((openId) => openId !== id);
+        if (nextOpenTabIds.length === 0) {
+          if (state.noteIds.length === 0) {
+            const freshTab = createEmptyTab();
+            const nextNotesById = { [freshTab.id]: freshTab };
+            const nextNoteIds = [freshTab.id];
+            const freshCollections = buildCollections(nextNotesById, nextNoteIds, nextNoteIds, freshTab.id);
+            persistSession(freshCollections.openTabIds, freshCollections.activeTabId);
+
+            return {
+              notesById: nextNotesById,
+              noteIds: nextNoteIds,
+              openTabIds: freshCollections.openTabIds,
+              activeTabId: freshCollections.activeTabId,
+              allNotes: freshCollections.allNotes,
+              openTabs: freshCollections.openTabs,
+              activeOpenTab: freshCollections.activeOpenTab
+            };
+          }
+
+          const fallbackOpenId = state.noteIds.find((noteId) => noteId !== id) ?? state.noteIds[0];
+          nextOpenTabIds = [fallbackOpenId];
         }
 
-        const nextTabs = state.tabs.filter((tab) => tab.id !== id);
         const fallbackIndex = Math.max(0, targetIndex - 1);
-        const nextActiveId =
-          state.activeTabId === id
-            ? (nextTabs[fallbackIndex]?.id ?? nextTabs[0].id)
-            : state.activeTabId;
+        const nextActiveTabId =
+          state.activeTabId === id ? (nextOpenTabIds[fallbackIndex] ?? nextOpenTabIds[0]) : state.activeTabId;
+        const nextCollections = buildCollections(state.notesById, state.noteIds, nextOpenTabIds, nextActiveTabId);
+        persistSession(nextCollections.openTabIds, nextCollections.activeTabId);
 
         return {
-          tabs: nextTabs,
-          activeTabId: nextActiveId
+          openTabIds: nextCollections.openTabIds,
+          activeTabId: nextCollections.activeTabId,
+          allNotes: nextCollections.allNotes,
+          openTabs: nextCollections.openTabs,
+          activeOpenTab: nextCollections.activeOpenTab
         };
       });
     },
     closeOtherTabs: (id) => {
       set((state) => {
-        const target = state.tabs.find((tab) => tab.id === id);
-        if (!target) {
+        if (!state.openTabIds.includes(id)) {
           return state;
         }
 
-        const keptTabs = state.tabs.filter((tab) => tab.id === id || tab.isPinned);
-        const dedupedTabs = keptTabs.filter(
-          (tab, index, array) => array.findIndex((candidate) => candidate.id === tab.id) === index
+        const nextOpenTabIds = state.openTabIds.filter(
+          (openId) => openId === id || state.notesById[openId]?.isPinned === true
         );
-
-        const nextTabs = dedupedTabs.length > 0 ? dedupedTabs : [createEmptyTab()];
-        const nextActiveId = nextTabs.some((tab) => tab.id === id) ? id : nextTabs[0].id;
+        const nextCollections = buildCollections(state.notesById, state.noteIds, nextOpenTabIds, id);
+        persistSession(nextCollections.openTabIds, nextCollections.activeTabId);
 
         return {
-          tabs: nextTabs,
-          activeTabId: nextActiveId
+          openTabIds: nextCollections.openTabIds,
+          activeTabId: nextCollections.activeTabId,
+          allNotes: nextCollections.allNotes,
+          openTabs: nextCollections.openTabs,
+          activeOpenTab: nextCollections.activeOpenTab
         };
       });
     },
@@ -187,37 +384,108 @@ export const useNoteStore = create<NoteStore>((set, get) => {
       }
 
       set((state) => {
-        const sourceIndex = state.tabs.findIndex((tab) => tab.id === sourceId);
-        const targetIndex = state.tabs.findIndex((tab) => tab.id === targetId);
-
+        const sourceIndex = state.openTabIds.findIndex((tabId) => tabId === sourceId);
+        const targetIndex = state.openTabIds.findIndex((tabId) => tabId === targetId);
         if (sourceIndex === -1 || targetIndex === -1) {
           return state;
         }
 
-        const nextTabs = [...state.tabs];
-        const [movedTab] = nextTabs.splice(sourceIndex, 1);
-        nextTabs.splice(targetIndex, 0, movedTab);
+        const nextOpenTabIds = [...state.openTabIds];
+        const [movedId] = nextOpenTabIds.splice(sourceIndex, 1);
+        nextOpenTabIds.splice(targetIndex, 0, movedId);
+
+        const nextCollections = buildCollections(state.notesById, state.noteIds, nextOpenTabIds, state.activeTabId);
+        persistSession(nextCollections.openTabIds, nextCollections.activeTabId);
 
         return {
-          tabs: nextTabs
+          openTabIds: nextCollections.openTabIds,
+          activeTabId: nextCollections.activeTabId,
+          allNotes: nextCollections.allNotes,
+          openTabs: nextCollections.openTabs,
+          activeOpenTab: nextCollections.activeOpenTab
+        };
+      });
+    },
+    removeNote: (id) => {
+      set((state) => {
+        if (!state.notesById[id]) {
+          return state;
+        }
+
+        const nextNotesById = { ...state.notesById };
+        delete nextNotesById[id];
+        let nextNoteIds = state.noteIds.filter((noteId) => noteId !== id);
+        let nextOpenTabIds = state.openTabIds.filter((openId) => openId !== id);
+
+        if (nextNoteIds.length === 0) {
+          const freshTab = createEmptyTab();
+          nextNotesById[freshTab.id] = freshTab;
+          nextNoteIds = [freshTab.id];
+          nextOpenTabIds = [freshTab.id];
+        } else if (nextOpenTabIds.length === 0) {
+          nextOpenTabIds = [nextNoteIds[0]];
+        }
+
+        const nextActiveTabId = state.activeTabId === id ? nextOpenTabIds[0] : state.activeTabId;
+        const nextCollections = buildCollections(nextNotesById, nextNoteIds, nextOpenTabIds, nextActiveTabId);
+        persistSession(nextCollections.openTabIds, nextCollections.activeTabId);
+
+        return {
+          notesById: nextNotesById,
+          noteIds: nextNoteIds,
+          openTabIds: nextCollections.openTabIds,
+          activeTabId: nextCollections.activeTabId,
+          allNotes: nextCollections.allNotes,
+          openTabs: nextCollections.openTabs,
+          activeOpenTab: nextCollections.activeOpenTab
         };
       });
     },
     togglePinTab: (id) => {
-      set((state) => ({
-        tabs: state.tabs.map((tab) =>
-          tab.id === id ? { ...tab, isPinned: !tab.isPinned, updatedAt: Date.now() } : tab
-        )
-      }));
+      set((state) => {
+        if (!state.notesById[id]) {
+          return state;
+        }
+
+        const nextNotesById = {
+          ...state.notesById,
+          [id]: {
+            ...state.notesById[id],
+            isPinned: !state.notesById[id].isPinned,
+            updatedAt: Date.now()
+          }
+        };
+
+        const nextCollections = buildCollections(nextNotesById, state.noteIds, state.openTabIds, state.activeTabId);
+        return {
+          notesById: nextNotesById,
+          allNotes: nextCollections.allNotes,
+          openTabs: nextCollections.openTabs,
+          activeOpenTab: nextCollections.activeOpenTab
+        };
+      });
     },
     moveTabToFolder: (id, folderPath) => {
       const normalized = folderPath.trim();
 
-      set((state) => ({
-        tabs: state.tabs.map((tab) =>
-          tab.id === id ? { ...tab, folderPath: normalized, updatedAt: Date.now(), isDirty: true } : tab
-        )
-      }));
+      set((state) => {
+        const target = state.notesById[id];
+        if (!target) {
+          return state;
+        }
+
+        const nextNotesById = {
+          ...state.notesById,
+          [id]: { ...target, folderPath: normalized, updatedAt: Date.now(), isDirty: true }
+        };
+        const nextCollections = buildCollections(nextNotesById, state.noteIds, state.openTabIds, state.activeTabId);
+        return {
+          notesById: nextNotesById,
+          allNotes: nextCollections.allNotes,
+          openTabs: nextCollections.openTabs,
+          activeOpenTab: nextCollections.activeOpenTab
+        };
+      });
     },
     renameFolderPath: (from, to) => {
       const fromPath = from.trim();
@@ -226,21 +494,39 @@ export const useNoteStore = create<NoteStore>((set, get) => {
         return;
       }
 
-      set((state) => ({
-        tabs: state.tabs.map((tab) => {
-          if (tab.folderPath === fromPath || tab.folderPath.startsWith(`${fromPath}/`)) {
-            const nextFolderPath = tab.folderPath.replace(fromPath, toPath);
-            return {
-              ...tab,
-              folderPath: nextFolderPath,
+      set((state) => {
+        const nextNotesById = { ...state.notesById };
+        let changed = false;
+
+        state.noteIds.forEach((noteId) => {
+          const note = nextNotesById[noteId];
+          if (!note) {
+            return;
+          }
+
+          if (note.folderPath === fromPath || note.folderPath.startsWith(`${fromPath}/`)) {
+            nextNotesById[noteId] = {
+              ...note,
+              folderPath: note.folderPath.replace(fromPath, toPath),
               updatedAt: Date.now(),
               isDirty: true
             };
+            changed = true;
           }
+        });
 
-          return tab;
-        })
-      }));
+        if (!changed) {
+          return state;
+        }
+
+        const nextCollections = buildCollections(nextNotesById, state.noteIds, state.openTabIds, state.activeTabId);
+        return {
+          notesById: nextNotesById,
+          allNotes: nextCollections.allNotes,
+          openTabs: nextCollections.openTabs,
+          activeOpenTab: nextCollections.activeOpenTab
+        };
+      });
     },
     clearFolderPath: (folderPath) => {
       const normalized = folderPath.trim();
@@ -248,122 +534,229 @@ export const useNoteStore = create<NoteStore>((set, get) => {
         return;
       }
 
-      set((state) => ({
-        tabs: state.tabs.map((tab) => {
-          if (tab.folderPath === normalized || tab.folderPath.startsWith(`${normalized}/`)) {
-            return {
-              ...tab,
+      set((state) => {
+        const nextNotesById = { ...state.notesById };
+        let changed = false;
+
+        state.noteIds.forEach((noteId) => {
+          const note = nextNotesById[noteId];
+          if (!note) {
+            return;
+          }
+
+          if (note.folderPath === normalized || note.folderPath.startsWith(`${normalized}/`)) {
+            nextNotesById[noteId] = {
+              ...note,
               folderPath: "",
               updatedAt: Date.now(),
               isDirty: true
             };
+            changed = true;
           }
+        });
 
-          return tab;
-        })
-      }));
+        if (!changed) {
+          return state;
+        }
+
+        const nextCollections = buildCollections(nextNotesById, state.noteIds, state.openTabIds, state.activeTabId);
+        return {
+          notesById: nextNotesById,
+          allNotes: nextCollections.allNotes,
+          openTabs: nextCollections.openTabs,
+          activeOpenTab: nextCollections.activeOpenTab
+        };
+      });
     },
     activateNextTab: () => {
-      const { tabs, activeTabId } = get();
-      if (tabs.length <= 1) {
+      const { openTabIds, activeTabId, notesById, noteIds } = get();
+      if (openTabIds.length <= 1) {
         return;
       }
 
-      const currentIndex = tabs.findIndex((tab) => tab.id === activeTabId);
+      const currentIndex = openTabIds.findIndex((tabId) => tabId === activeTabId);
       if (currentIndex === -1) {
-        set({ activeTabId: tabs[0].id });
+        const nextCollections = buildCollections(notesById, noteIds, openTabIds, openTabIds[0]);
+        persistSession(nextCollections.openTabIds, nextCollections.activeTabId);
+        set({
+          activeTabId: nextCollections.activeTabId,
+          allNotes: nextCollections.allNotes,
+          openTabs: nextCollections.openTabs,
+          activeOpenTab: nextCollections.activeOpenTab
+        });
         return;
       }
 
-      const nextIndex = (currentIndex + 1) % tabs.length;
-      set({ activeTabId: tabs[nextIndex].id });
+      const nextIndex = (currentIndex + 1) % openTabIds.length;
+      const nextCollections = buildCollections(notesById, noteIds, openTabIds, openTabIds[nextIndex]);
+      persistSession(nextCollections.openTabIds, nextCollections.activeTabId);
+      set({
+        activeTabId: nextCollections.activeTabId,
+        allNotes: nextCollections.allNotes,
+        openTabs: nextCollections.openTabs,
+        activeOpenTab: nextCollections.activeOpenTab
+      });
     },
     activatePrevTab: () => {
-      const { tabs, activeTabId } = get();
-      if (tabs.length <= 1) {
+      const { openTabIds, activeTabId, notesById, noteIds } = get();
+      if (openTabIds.length <= 1) {
         return;
       }
 
-      const currentIndex = tabs.findIndex((tab) => tab.id === activeTabId);
+      const currentIndex = openTabIds.findIndex((tabId) => tabId === activeTabId);
       if (currentIndex === -1) {
-        set({ activeTabId: tabs[0].id });
+        const nextCollections = buildCollections(notesById, noteIds, openTabIds, openTabIds[0]);
+        persistSession(nextCollections.openTabIds, nextCollections.activeTabId);
+        set({
+          activeTabId: nextCollections.activeTabId,
+          allNotes: nextCollections.allNotes,
+          openTabs: nextCollections.openTabs,
+          activeOpenTab: nextCollections.activeOpenTab
+        });
         return;
       }
 
-      const prevIndex = (currentIndex - 1 + tabs.length) % tabs.length;
-      set({ activeTabId: tabs[prevIndex].id });
+      const prevIndex = (currentIndex - 1 + openTabIds.length) % openTabIds.length;
+      const nextCollections = buildCollections(notesById, noteIds, openTabIds, openTabIds[prevIndex]);
+      persistSession(nextCollections.openTabIds, nextCollections.activeTabId);
+      set({
+        activeTabId: nextCollections.activeTabId,
+        allNotes: nextCollections.allNotes,
+        openTabs: nextCollections.openTabs,
+        activeOpenTab: nextCollections.activeOpenTab
+      });
     },
     setActiveTitle: (title) => {
-      set((state) => ({
-        tabs: state.tabs.map((tab) => {
-          if (tab.id !== state.activeTabId) {
-            return tab;
-          }
+      set((state) => {
+        if (!state.activeTabId) {
+          return state;
+        }
 
-          const manualTitle = title.trim().slice(0, 50);
-          const currentTitle = tab.title.trim().slice(0, 50);
-          if (manualTitle && manualTitle === currentTitle) {
-            return tab;
-          }
+        const active = state.notesById[state.activeTabId];
+        if (!active) {
+          return state;
+        }
 
-          if (!manualTitle) {
-            const derived = deriveTitle(tab.plainText);
-            if (!tab.isTitleManual && tab.title === derived) {
-              return tab;
-            }
+        const manualTitle = title.trim().slice(0, 50);
+        const currentTitle = active.title.trim().slice(0, 50);
 
-            return {
-              ...tab,
+        let nextActive = active;
+        if (manualTitle && manualTitle !== currentTitle) {
+          nextActive = {
+            ...active,
+            title: manualTitle,
+            isTitleManual: true,
+            isDirty: true,
+            updatedAt: Date.now()
+          };
+        } else if (!manualTitle) {
+          const derived = deriveTitle(active.plainText);
+          if (active.isTitleManual || active.title !== derived) {
+            nextActive = {
+              ...active,
               title: derived,
               isTitleManual: false,
               isDirty: true,
               updatedAt: Date.now()
             };
           }
+        } else {
+          return state;
+        }
 
-          if (tab.isTitleManual && tab.title === manualTitle) {
-            return tab;
-          }
-
-          return {
-            ...tab,
-            title: manualTitle,
-            isTitleManual: true,
-            isDirty: true,
-            updatedAt: Date.now()
-          };
-        })
-      }));
+        const nextNotesById = { ...state.notesById, [active.id]: nextActive };
+        const nextCollections = buildCollections(nextNotesById, state.noteIds, state.openTabIds, state.activeTabId);
+        return {
+          notesById: nextNotesById,
+          allNotes: nextCollections.allNotes,
+          openTabs: nextCollections.openTabs,
+          activeOpenTab: nextCollections.activeOpenTab
+        };
+      });
     },
     updateActiveContent: (content, plainText) => {
-      set((state) => ({
-        tabs: state.tabs.map((tab) =>
-          tab.id === state.activeTabId
-            ? {
-                ...tab,
-                content,
-                plainText,
-                title: tab.isTitleManual ? tab.title : deriveTitle(plainText),
-                isDirty: true,
-                updatedAt: Date.now()
-              }
-            : tab
-        )
-      }));
+      set((state) => {
+        if (!state.activeTabId) {
+          return state;
+        }
+
+        const active = state.notesById[state.activeTabId];
+        if (!active) {
+          return state;
+        }
+
+        const nextNotesById = {
+          ...state.notesById,
+          [active.id]: {
+            ...active,
+            content,
+            plainText,
+            title: active.isTitleManual ? active.title : deriveTitle(plainText),
+            isDirty: true,
+            updatedAt: Date.now()
+          }
+        };
+
+        const nextCollections = buildCollections(nextNotesById, state.noteIds, state.openTabIds, state.activeTabId);
+        return {
+          notesById: nextNotesById,
+          allNotes: nextCollections.allNotes,
+          openTabs: nextCollections.openTabs,
+          activeOpenTab: nextCollections.activeOpenTab
+        };
+      });
     },
     markTabSaved: (id) => {
-      set((state) => ({
-        tabs: state.tabs.map((tab) => (tab.id === id ? { ...tab, isDirty: false, lastSavedAt: Date.now() } : tab))
-      }));
+      set((state) => {
+        const target = state.notesById[id];
+        if (!target) {
+          return state;
+        }
+
+        const nextNotesById = {
+          ...state.notesById,
+          [id]: {
+            ...target,
+            isDirty: false,
+            lastSavedAt: Date.now()
+          }
+        };
+
+        const nextCollections = buildCollections(nextNotesById, state.noteIds, state.openTabIds, state.activeTabId);
+        return {
+          notesById: nextNotesById,
+          allNotes: nextCollections.allNotes,
+          openTabs: nextCollections.openTabs,
+          activeOpenTab: nextCollections.activeOpenTab
+        };
+      });
     },
     toggleFileFormat: (id) => {
-      set((state) => ({
-        tabs: state.tabs.map((tab) =>
-          tab.id === id
-            ? { ...tab, fileFormat: tab.fileFormat === "md" ? "txt" : "md", isDirty: true, updatedAt: Date.now() }
-            : tab
-        )
-      }));
+      set((state) => {
+        const target = state.notesById[id];
+        if (!target) {
+          return state;
+        }
+
+        const nextFileFormat: NoteTab["fileFormat"] = target.fileFormat === "md" ? "txt" : "md";
+        const nextNotesById: Record<string, NoteTab> = {
+          ...state.notesById,
+          [id]: {
+            ...target,
+            fileFormat: nextFileFormat,
+            isDirty: true,
+            updatedAt: Date.now()
+          }
+        };
+
+        const nextCollections = buildCollections(nextNotesById, state.noteIds, state.openTabIds, state.activeTabId);
+        return {
+          notesById: nextNotesById,
+          allNotes: nextCollections.allNotes,
+          openTabs: nextCollections.openTabs,
+          activeOpenTab: nextCollections.activeOpenTab
+        };
+      });
     },
     toggleSidebar: () => {
       set((state) => ({ sidebarVisible: !state.sidebarVisible }));

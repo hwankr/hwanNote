@@ -1,6 +1,6 @@
 ﻿import { Editor as TiptapEditor } from "@tiptap/react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { hwanNote } from "./lib/tauriApi";
+import { hwanNote, type LoadedNote } from "./lib/tauriApi";
 import Editor, { restoreEditorFocus } from "./components/Editor";
 import SettingsPanel, { type ThemeMode } from "./components/SettingsPanel";
 import Sidebar, { type SidebarTag } from "./components/Sidebar";
@@ -23,7 +23,7 @@ import {
   type ShortcutMap
 } from "./lib/shortcuts";
 import { applyTheme, type ThemeName } from "./styles/themes";
-import { useNoteStore } from "./stores/noteStore";
+import { readTabSessionFromStorage, useNoteStore } from "./stores/noteStore";
 
 const CUSTOM_FOLDERS_KEY = "hwan-note:custom-folders";
 const EDITOR_FONT_SIZE_KEY = "hwan-note:editor-font-size";
@@ -260,15 +260,18 @@ function normalizeEditorLineHeight(value: number) {
 
 export default function App() {
   const { t, localeTag, language } = useI18n();
-  const tabs = useNoteStore((state) => state.tabs);
+  const allNotes = useNoteStore((state) => state.allNotes);
+  const openTabs = useNoteStore((state) => state.openTabs);
   const activeTabId = useNoteStore((state) => state.activeTabId);
   const sidebarVisible = useNoteStore((state) => state.sidebarVisible);
   const createTab = useNoteStore((state) => state.createTab);
   const hydrateTabs = useNoteStore((state) => state.hydrateTabs);
+  const openNote = useNoteStore((state) => state.openNote);
   const setActiveTab = useNoteStore((state) => state.setActiveTab);
   const closeTab = useNoteStore((state) => state.closeTab);
   const closeOtherTabs = useNoteStore((state) => state.closeOtherTabs);
   const reorderTabs = useNoteStore((state) => state.reorderTabs);
+  const removeNote = useNoteStore((state) => state.removeNote);
   const togglePinTab = useNoteStore((state) => state.togglePinTab);
   const moveTabToFolder = useNoteStore((state) => state.moveTabToFolder);
   const renameFolderPath = useNoteStore((state) => state.renameFolderPath);
@@ -324,17 +327,17 @@ export default function App() {
   const [tabSize, setTabSize] = useState(DEFAULT_TAB_SIZE);
 
   const activeTab = useMemo(
-    () => tabs.find((tab) => tab.id === activeTabId) ?? tabs[0],
-    [tabs, activeTabId]
+    () => openTabs.find((tab) => tab.id === activeTabId) ?? openTabs[0],
+    [openTabs, activeTabId]
   );
 
   const noteTags = useMemo(() => {
     const map = new Map<string, string[]>();
-    tabs.forEach((tab) => {
+    allNotes.forEach((tab) => {
       map.set(tab.id, extractTags(tab.plainText));
     });
     return map;
-  }, [tabs]);
+  }, [allNotes]);
 
   const tags = useMemo<SidebarTag[]>(() => {
     const count = new Map<string, number>();
@@ -358,15 +361,15 @@ export default function App() {
     const merged = new Set<string>();
 
     customFolders.forEach((path) => merged.add(normalizeFolderPath(path)));
-    tabs.forEach((tab) => merged.add(normalizeFolderPath(tab.folderPath)));
+    allNotes.forEach((tab) => merged.add(normalizeFolderPath(tab.folderPath)));
 
     return Array.from(merged).sort((a, b) => a.localeCompare(b, localeTag));
-  }, [customFolders, localeTag, tabs]);
+  }, [customFolders, localeTag, allNotes]);
 
   const filteredNotes = useMemo(() => {
     const normalizedQuery = searchQuery.trim().toLowerCase();
 
-    const filtered = tabs.filter((tab) => {
+    const filtered = allNotes.filter((tab) => {
       if (selectedFolder) {
         const folderPath = normalizeFolderPath(tab.folderPath);
         if (!(folderPath === selectedFolder || folderPath.startsWith(`${selectedFolder}/`))) {
@@ -416,7 +419,35 @@ export default function App() {
           return b.updatedAt - a.updatedAt;
       }
     });
-  }, [tabs, selectedFolder, selectedTag, searchQuery, searchMode, noteTags, sortMode, localeTag]);
+  }, [allNotes, selectedFolder, selectedTag, searchQuery, searchMode, noteTags, sortMode, localeTag]);
+
+  const mapLoadedNoteToTab = useCallback(
+    (note: LoadedNote) => ({
+      id: note.noteId,
+      title: note.title,
+      isTitleManual: note.isTitleManual,
+      content: note.content,
+      plainText: note.plainText,
+      isDirty: false,
+      isPinned: false,
+      folderPath: normalizeFolderPath(note.folderPath),
+      createdAt: note.createdAt,
+      updatedAt: note.updatedAt,
+      lastSavedAt: 0,
+      fileFormat: "md" as const
+    }),
+    []
+  );
+
+  const hydrateLoadedNotes = useCallback(
+    (loaded: LoadedNote[]) => {
+      hydrateTabs(loaded.map(mapLoadedNoteToTab), readTabSessionFromStorage());
+
+      const loadedFolders = loaded.map((note) => normalizeFolderPath(note.folderPath)).filter(Boolean);
+      setCustomFolders((prev) => Array.from(new Set([...prev, ...loadedFolders])));
+    },
+    [hydrateTabs, mapLoadedNoteToTab]
+  );
 
   useEffect(() => {
     const savedThemeMode = window.localStorage.getItem(THEME_MODE_KEY);
@@ -517,32 +548,11 @@ export default function App() {
     const run = async () => {
       try {
         const loaded = await noteApi.loadAll();
-        if (disposed || loaded.length === 0) {
+        if (disposed) {
           return;
         }
 
-        hydrateTabs(
-          loaded.map((note) => ({
-            id: note.noteId,
-            title: note.title,
-            isTitleManual: note.isTitleManual,
-            content: note.content,
-            plainText: note.plainText,
-            isDirty: false,
-            isPinned: false,
-            folderPath: normalizeFolderPath(note.folderPath),
-            createdAt: note.createdAt,
-            updatedAt: note.updatedAt,
-            lastSavedAt: 0,
-            fileFormat: "md" as const
-          }))
-        );
-
-        const loadedFolders = loaded
-          .map((note) => normalizeFolderPath(note.folderPath))
-          .filter(Boolean);
-
-        setCustomFolders((prev) => Array.from(new Set([...prev, ...loadedFolders])));
+        hydrateLoadedNotes(loaded);
       } catch (error) {
         console.error("Failed to load notes from file system:", error);
       }
@@ -553,7 +563,7 @@ export default function App() {
     return () => {
       disposed = true;
     };
-  }, [hydrateTabs]);
+  }, [hydrateLoadedNotes]);
 
   useEffect(() => {
     if (selectedFolder && !folderPaths.includes(selectedFolder)) {
@@ -654,27 +664,12 @@ export default function App() {
       const noteApi = hwanNote.note;
       if (noteApi?.loadAll) {
         const loaded = await noteApi.loadAll();
-        hydrateTabs(
-          loaded.map((note) => ({
-            id: note.noteId,
-            title: note.title,
-            isTitleManual: note.isTitleManual,
-            content: note.content,
-            plainText: note.plainText,
-            isDirty: false,
-            isPinned: false,
-            folderPath: normalizeFolderPath(note.folderPath),
-            createdAt: note.createdAt,
-            updatedAt: note.updatedAt,
-            lastSavedAt: 0,
-            fileFormat: "md" as const
-          }))
-        );
+        hydrateLoadedNotes(loaded);
       }
     } catch (error) {
       console.error("Failed to set auto-save directory:", error);
     }
-  }, [handleManualSave, hydrateTabs]);
+  }, [handleManualSave, hydrateLoadedNotes]);
 
   const handleResetAutoSaveDir = useCallback(async () => {
     await handleManualSave();
@@ -689,27 +684,12 @@ export default function App() {
       const noteApi = hwanNote.note;
       if (noteApi?.loadAll) {
         const loaded = await noteApi.loadAll();
-        hydrateTabs(
-          loaded.map((note) => ({
-            id: note.noteId,
-            title: note.title,
-            isTitleManual: note.isTitleManual,
-            content: note.content,
-            plainText: note.plainText,
-            isDirty: false,
-            isPinned: false,
-            folderPath: normalizeFolderPath(note.folderPath),
-            createdAt: note.createdAt,
-            updatedAt: note.updatedAt,
-            lastSavedAt: 0,
-            fileFormat: "md" as const
-          }))
-        );
+        hydrateLoadedNotes(loaded);
       }
     } catch (error) {
       console.error("Failed to reset auto-save directory:", error);
     }
-  }, [handleManualSave, hydrateTabs]);
+  }, [handleManualSave, hydrateLoadedNotes]);
 
   useAutoSave({
     value: activeTab?.content ?? "",
@@ -977,7 +957,7 @@ export default function App() {
   return (
     <div className="app-shell">
       <TitleBar
-        tabs={tabs}
+        tabs={openTabs}
         activeTabId={activeTabId}
         isMaximized={isMaximized}
         onToggleSidebar={toggleSidebar}
@@ -1020,14 +1000,17 @@ export default function App() {
           onSelectFolder={setSelectedFolder}
           onSelectTag={setSelectedTag}
           onSortModeChange={setSortMode}
-          onSelectNote={setActiveTab}
+          onSelectNote={openNote}
           onTogglePinNote={togglePinTab}
           onDeleteNote={(id) => {
-            const tab = tabs.find((t) => t.id === id);
-            if (!tab) return;
-            closeTab(id);
-            // Backend gracefully handles missing notes (returns Ok(false))
-            void hwanNote.note.delete(id);
+            void (async () => {
+              try {
+                await hwanNote.note.delete(id);
+                removeNote(id);
+              } catch (error) {
+                console.error("Failed to delete note:", error);
+              }
+            })();
           }}
           onMoveNoteToFolder={(id, folderPath) => {
             moveTabToFolder(id, normalizeFolderPath(folderPath));

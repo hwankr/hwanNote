@@ -137,11 +137,11 @@ export default function FolderTree({
   actions,
 }: FolderTreeProps) {
   const { t, localeTag } = useI18n();
-  const tabs = useNoteStore((state) => state.tabs);
+  const allNotes = useNoteStore((state) => state.allNotes);
 
   const noteCounts = useMemo(() => {
     const counts = new Map<string, number>();
-    for (const tab of tabs) {
+    for (const tab of allNotes) {
       const fp = tab.folderPath;
       // Count for exact folder
       counts.set(fp, (counts.get(fp) ?? 0) + 1);
@@ -154,9 +154,9 @@ export default function FolderTree({
       }
     }
     return counts;
-  }, [tabs]);
+  }, [allNotes]);
 
-  const totalNoteCount = tabs.length;
+  const totalNoteCount = allNotes.length;
 
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(() => {
     try {
