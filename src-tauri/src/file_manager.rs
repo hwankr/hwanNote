@@ -111,13 +111,30 @@ pub fn sanitize_note_id(note_id: &str) -> String {
         .collect()
 }
 
+fn strip_inbox_root_alias(path: &str) -> String {
+    let mut segments: Vec<String> = path
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+
+    if segments
+        .first()
+        .map_or(false, |segment| segment.eq_ignore_ascii_case("inbox"))
+    {
+        segments.remove(0);
+    }
+
+    segments.join("/")
+}
+
 pub fn sanitize_folder_path(folder_path: Option<&str>) -> String {
     let folder_path = match folder_path {
         Some(p) if !p.is_empty() => p,
         _ => return String::new(),
     };
 
-    let normalized: String = folder_path
+    let normalized = folder_path
         .replace('\\', "/")
         .split('/')
         .map(|segment| {
@@ -129,8 +146,9 @@ pub fn sanitize_folder_path(folder_path: Option<&str>) -> String {
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join("/");
+    let normalized = strip_inbox_root_alias(&normalized);
 
-    if normalized.is_empty() || normalized == "inbox" {
+    if normalized.is_empty() {
         return String::new();
     }
 
@@ -741,7 +759,7 @@ pub fn load_markdown_notes(auto_save_dir: &Path) -> Result<Vec<LoadedNote>, Stri
         let folder_path = if rel_dir == "." {
             String::new()
         } else {
-            rel_dir
+            strip_inbox_root_alias(&rel_dir)
         };
 
         let metadata = match fs::metadata(file_path) {

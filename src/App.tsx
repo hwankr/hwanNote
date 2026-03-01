@@ -47,15 +47,17 @@ function getDraftKey(tabId: string) {
 }
 
 function normalizeFolderPath(path: string) {
-  const normalized = path
+  const segments = path
     .replace(/\\/g, "/")
     .split("/")
     .map((segment) => segment.trim())
-    .filter(Boolean)
-    .join("/");
+    .filter(Boolean);
 
-  if (normalized === "inbox") return "";
-  return normalized;
+  if (segments[0]?.toLowerCase() === "inbox") {
+    segments.shift();
+  }
+
+  return segments.join("/");
 }
 
 function htmlToMarkdownWithBlocks(contentHtml: string) {
