@@ -86,15 +86,47 @@ export default function TitleBar({
   const { t } = useI18n();
   const [draggingTabId, setDraggingTabId] = useState<string | null>(null);
   const [dragOverTabId, setDragOverTabId] = useState<string | null>(null);
+  const [dragOverPosition, setDragOverPosition] = useState<"before" | "after" | null>(null);
+  const [dragGhost, setDragGhost] = useState<{
+    tabId: string;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    offsetX: number;
+    offsetY: number;
+  } | null>(null);
   const [menu, setMenu] = useState<{ tabId: string; x: number; y: number } | null>(null);
   const tabsRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<{ tabId: string; startX: number; active: boolean } | null>(null);
   const dragOverIdRef = useRef<string | null>(null);
+  const dragOverPositionRef = useRef<"before" | "after" | null>(null);
   const didDragRef = useRef(false);
 
   const menuTarget = useMemo(() => tabs.find((tab) => tab.id === menu?.tabId), [tabs, menu]);
+  const draggingTab = useMemo(() => tabs.find((tab) => tab.id === draggingTabId) ?? null, [tabs, draggingTabId]);
 
   useEffect(() => {
+    const resetDragState = () => {
+      dragRef.current = null;
+      dragOverIdRef.current = null;
+      dragOverPositionRef.current = null;
+      setDraggingTabId(null);
+      setDragOverTabId(null);
+      setDragOverPosition(null);
+      setDragGhost(null);
+      document.body.classList.remove("tab-dragging");
+    };
+
+    const setDropTarget = (over: string | null, position: "before" | "after" | null) => {
+      if (over !== dragOverIdRef.current || position !== dragOverPositionRef.current) {
+        dragOverIdRef.current = over;
+        dragOverPositionRef.current = position;
+        setDragOverTabId(over);
+        setDragOverPosition(position);
+      }
+    };
+
     const handlePointerMove = (e: PointerEvent) => {
       const drag = dragRef.current;
       if (!drag) return;
@@ -102,45 +134,96 @@ export default function TitleBar({
       if (!drag.active) {
         if (Math.abs(e.clientX - drag.startX) > 5) {
           drag.active = true;
+          const tabNodes = tabsRef.current
+            ? Array.from(tabsRef.current.querySelectorAll<HTMLElement>("[data-tab-id]"))
+            : [];
+          const tabEl = tabNodes.find((node) => node.dataset.tabId === drag.tabId);
+          if (tabEl) {
+            const rect = tabEl.getBoundingClientRect();
+            setDragGhost({
+              tabId: drag.tabId,
+              width: rect.width,
+              height: rect.height,
+              offsetX: e.clientX - rect.left,
+              offsetY: e.clientY - rect.top,
+              x: rect.left,
+              y: rect.top
+            });
+          } else {
+            setDragGhost({
+              tabId: drag.tabId,
+              width: 140,
+              height: 32,
+              offsetX: 14,
+              offsetY: 16,
+              x: e.clientX - 14,
+              y: e.clientY - 16
+            });
+          }
           setDraggingTabId(drag.tabId);
           document.body.classList.add("tab-dragging");
         }
         return;
       }
 
+      setDragGhost((prev) => {
+        if (!prev || prev.tabId !== drag.tabId) return prev;
+        return {
+          ...prev,
+          x: e.clientX - prev.offsetX,
+          y: e.clientY - prev.offsetY
+        };
+      });
+
       const el = document.elementFromPoint(e.clientX, e.clientY);
       const tabEl = (el as HTMLElement | null)?.closest?.("[data-tab-id]") as HTMLElement | null;
       const targetId = tabEl?.dataset.tabId ?? null;
       const over = targetId && targetId !== drag.tabId ? targetId : null;
-
-      if (over !== dragOverIdRef.current) {
-        dragOverIdRef.current = over;
-        setDragOverTabId(over);
+      let position: "before" | "after" | null = null;
+      if (over) {
+        const sourceIndex = tabs.findIndex((tab) => tab.id === drag.tabId);
+        const targetIndex = tabs.findIndex((tab) => tab.id === over);
+        if (sourceIndex >= 0 && targetIndex >= 0) {
+          if (sourceIndex < targetIndex) {
+            position = "after";
+          } else if (sourceIndex > targetIndex) {
+            position = "before";
+          }
+        }
       }
+
+      setDropTarget(over, position);
+    };
+
+    const finalizeDrag = () => {
+      const drag = dragRef.current;
+      if (drag?.active) {
+        if (dragOverIdRef.current) {
+          onReorderTabs(drag.tabId, dragOverIdRef.current);
+        }
+        didDragRef.current = true;
+      }
+      resetDragState();
     };
 
     const handlePointerUp = () => {
-      const drag = dragRef.current;
-      if (drag?.active && dragOverIdRef.current) {
-        onReorderTabs(drag.tabId, dragOverIdRef.current);
-        didDragRef.current = true;
-      }
+      finalizeDrag();
+    };
 
-      dragRef.current = null;
-      dragOverIdRef.current = null;
-      setDraggingTabId(null);
-      setDragOverTabId(null);
-      document.body.classList.remove("tab-dragging");
+    const handlePointerCancel = () => {
+      finalizeDrag();
     };
 
     window.addEventListener("pointermove", handlePointerMove);
     window.addEventListener("pointerup", handlePointerUp);
+    window.addEventListener("pointercancel", handlePointerCancel);
     return () => {
       window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("pointerup", handlePointerUp);
-      document.body.classList.remove("tab-dragging");
+      window.removeEventListener("pointercancel", handlePointerCancel);
+      resetDragState();
     };
-  }, [onReorderTabs]);
+  }, [onReorderTabs, tabs]);
 
   const menuItems = useMemo<ContextMenuEntry[]>(() => {
     if (!menu || !menuTarget) return [];
@@ -172,7 +255,9 @@ export default function TitleBar({
               key={tab.id}
               className={`tab no-drag ${tab.id === activeTabId ? "active" : ""} ${
                 tab.id === draggingTabId ? "dragging" : ""
-              } ${tab.id === dragOverTabId ? "drag-over" : ""}`}
+              } ${tab.id === dragOverTabId ? "drag-over" : ""} ${
+                tab.id === dragOverTabId && dragOverPosition === "before" ? "drag-over-before" : ""
+              } ${tab.id === dragOverTabId && dragOverPosition === "after" ? "drag-over-after" : ""}`}
               data-tab-id={tab.id}
               onClick={() => {
                 if (didDragRef.current) {
@@ -187,6 +272,14 @@ export default function TitleBar({
               }}
               onPointerDown={(event) => {
                 if (event.button !== 0) return;
+                const target = event.target as HTMLElement | null;
+                if (
+                  target?.closest(
+                    ".tab-close, [data-tab-control], a, input, select, textarea, [role='button']"
+                  )
+                ) {
+                  return;
+                }
                 dragRef.current = { tabId: tab.id, startX: event.clientX, active: false };
               }}
               title={tab.title}
@@ -197,6 +290,7 @@ export default function TitleBar({
               <span
                 role="button"
                 className="tab-close"
+                data-tab-control="close"
                 aria-label={t("titlebar.closeTab", { title: tab.title })}
                 onClick={(event) => {
                   event.stopPropagation();
@@ -211,6 +305,22 @@ export default function TitleBar({
             {AddTabIcon}
           </button>
         </div>
+        {dragGhost && draggingTab ? (
+          <div
+            className={`tab tab-drag-ghost ${draggingTab.id === activeTabId ? "active" : ""}`}
+            aria-hidden="true"
+            style={{
+              width: `${dragGhost.width}px`,
+              height: `${dragGhost.height}px`,
+              left: `${dragGhost.x}px`,
+              top: `${dragGhost.y}px`
+            }}
+          >
+            {draggingTab.isPinned ? <span className="tab-pin">{PinIcon}</span> : null}
+            <span className="tab-title">{draggingTab.title}</span>
+            {draggingTab.isDirty ? <span className="tab-dirty">*</span> : null}
+          </div>
+        ) : null}
         <div className="titlebar-tab-drag-space" aria-hidden="true" />
       </div>
 
