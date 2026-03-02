@@ -1,5 +1,5 @@
 ﻿import { Editor as TiptapEditor } from "@tiptap/react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { type PointerEvent as ReactPointerEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { hwanNote, type LoadedNote } from "./lib/tauriApi";
 import Editor, { restoreEditorFocus } from "./components/Editor";
 import SettingsPanel, { type ThemeMode } from "./components/SettingsPanel";
@@ -23,13 +23,14 @@ import {
   type ShortcutMap
 } from "./lib/shortcuts";
 import { applyTheme, type ThemeName } from "./styles/themes";
-import { readTabSessionFromStorage, useNoteStore } from "./stores/noteStore";
+import { readTabSessionFromStorage, useNoteStore, type NoteTab } from "./stores/noteStore";
 
 const CUSTOM_FOLDERS_KEY = "hwan-note:custom-folders";
 const EDITOR_FONT_SIZE_KEY = "hwan-note:editor-font-size";
 const EDITOR_LINE_HEIGHT_KEY = "hwan-note:editor-line-height";
 const EDITOR_SPELLCHECK_KEY = "hwan-note:editor-spellcheck";
 const SHORTCUTS_KEY = "hwan-note:shortcuts";
+const SPLIT_RATIO_KEY = "hwan-note:split-ratio";
 const TAB_SIZE_KEY = "hwan-note:tab-size";
 const THEME_MODE_KEY = "hwan-note:theme-mode";
 const MIN_EDITOR_FONT_SIZE = 10;
@@ -40,8 +41,15 @@ const MAX_EDITOR_LINE_HEIGHT = 2.2;
 const DEFAULT_EDITOR_LINE_HEIGHT = 1.55;
 const DEFAULT_TAB_SIZE = 4;
 const VALID_TAB_SIZES = [2, 4, 8];
+const MIN_SPLIT_RATIO = 0.25;
+const MAX_SPLIT_RATIO = 0.75;
+const DEFAULT_SPLIT_RATIO = 0.5;
 
 type SortMode = "updated" | "title" | "created";
+type PaneId = "primary" | "secondary";
+type PaneEditors = Record<PaneId, TiptapEditor | null>;
+type PaneCursor = { line: number; column: number; chars: number };
+type PaneCursors = Record<PaneId, PaneCursor>;
 
 function getDraftKey(tabId: string) {
   return `hwan-note:draft:${tabId}`;
@@ -193,6 +201,20 @@ function toMarkdownDocument(title: string, plainText: string, contentHtml: strin
   return `# ${safeTitle}\n`;
 }
 
+function toTabSaveAsContent(tab: NoteTab, fallbackTitle: string) {
+  if (tab.fileFormat === "txt") {
+    return {
+      extension: "txt" as const,
+      content: tab.plainText
+    };
+  }
+
+  return {
+    extension: "md" as const,
+    content: toMarkdownDocument(tab.title, tab.plainText, tab.content, fallbackTitle)
+  };
+}
+
 function extractTags(plainText: string) {
   const matcher = /(^|\s)#([\p{L}\p{N}_-]+)/gu;
   const tags = new Set<string>();
@@ -258,6 +280,22 @@ function normalizeEditorLineHeight(value: number) {
   return Math.round(value * 100) / 100;
 }
 
+function clampSplitRatio(value: number) {
+  if (!Number.isFinite(value)) {
+    return DEFAULT_SPLIT_RATIO;
+  }
+
+  return Math.min(MAX_SPLIT_RATIO, Math.max(MIN_SPLIT_RATIO, value));
+}
+
+function pickDistinctTabId(tabIds: string[], excludedId: string, preferredId?: string | null) {
+  if (preferredId && preferredId !== excludedId && tabIds.includes(preferredId)) {
+    return preferredId;
+  }
+
+  return tabIds.find((id) => id !== excludedId) ?? null;
+}
+
 export default function App() {
   const { t, localeTag, language } = useI18n();
   const allNotes = useNoteStore((state) => state.allNotes);
@@ -276,26 +314,112 @@ export default function App() {
   const moveTabToFolder = useNoteStore((state) => state.moveTabToFolder);
   const renameFolderPath = useNoteStore((state) => state.renameFolderPath);
   const clearFolderPath = useNoteStore((state) => state.clearFolderPath);
-  const activateNextTab = useNoteStore((state) => state.activateNextTab);
-  const activatePrevTab = useNoteStore((state) => state.activatePrevTab);
-  const updateActiveContent = useNoteStore((state) => state.updateActiveContent);
-  const setActiveTitle = useNoteStore((state) => state.setActiveTitle);
+  const updateTabContent = useNoteStore((state) => state.updateTabContent);
+  const setTabTitle = useNoteStore((state) => state.setTabTitle);
   const markTabSaved = useNoteStore((state) => state.markTabSaved);
   const toggleFileFormat = useNoteStore((state) => state.toggleFileFormat);
   const toggleSidebar = useNoteStore((state) => state.toggleSidebar);
   const addImportedTab = useNoteStore((state) => state.addImportedTab);
 
-  const [editor, setEditor] = useState<TiptapEditor | null>(null);
-  const [cursor, setCursor] = useState({ line: 1, column: 1, chars: 0 });
-  const [isMaximized, setIsMaximized] = useState(false);
+  const [isSplit, setIsSplit] = useState(false);
+  const [splitRatio, setSplitRatio] = useState(() => {
+    try {
+      const raw = window.localStorage.getItem(SPLIT_RATIO_KEY);
+      if (raw) {
+        return clampSplitRatio(Number.parseFloat(raw));
+      }
+    } catch {
+      // ignore localStorage failures
+    }
 
-  const handleCursorChange = useCallback((line: number, column: number, chars: number) => {
-    setCursor({ line, column, chars });
+    return DEFAULT_SPLIT_RATIO;
+  });
+  const [primaryTabId, setPrimaryTabId] = useState<string | null>(null);
+  const [secondaryTabId, setSecondaryTabId] = useState<string | null>(null);
+  const [focusedPane, setFocusedPane] = useState<PaneId>("primary");
+  const [paneEditors, setPaneEditors] = useState<PaneEditors>({ primary: null, secondary: null });
+  const [paneCursors, setPaneCursors] = useState<PaneCursors>({
+    primary: { line: 1, column: 1, chars: 0 },
+    secondary: { line: 1, column: 1, chars: 0 }
+  });
+  const [isMaximized, setIsMaximized] = useState(false);
+  const editorWorkspaceRef = useRef<HTMLElement | null>(null);
+  const [splitDropTarget, setSplitDropTarget] = useState<PaneId | null>(null);
+  const splitResizeRef = useRef<{
+    startX: number;
+    startRatio: number;
+    workspaceWidth: number;
+  } | null>(null);
+
+  const tabById = useMemo(() => {
+    const map = new Map<string, NoteTab>();
+    openTabs.forEach((tab) => {
+      map.set(tab.id, tab);
+    });
+    return map;
+  }, [openTabs]);
+
+  const openTabIds = useMemo(() => openTabs.map((tab) => tab.id), [openTabs]);
+  const focusedTabId = useMemo(() => {
+    if (isSplit && focusedPane === "secondary") {
+      return secondaryTabId ?? primaryTabId;
+    }
+
+    return primaryTabId ?? secondaryTabId;
+  }, [focusedPane, isSplit, primaryTabId, secondaryTabId]);
+  const primaryTab = primaryTabId ? (tabById.get(primaryTabId) ?? null) : null;
+  const secondaryTab = secondaryTabId ? (tabById.get(secondaryTabId) ?? null) : null;
+  const focusedTab = focusedTabId ? (tabById.get(focusedTabId) ?? null) : null;
+  const focusedEditor = focusedPane === "secondary" ? paneEditors.secondary : paneEditors.primary;
+  const cursor = paneCursors[focusedPane];
+
+  const setPaneTab = useCallback(
+    (pane: PaneId, nextTabId: string) => {
+      if (pane === "primary") {
+        setPrimaryTabId(nextTabId);
+        if (isSplit && secondaryTabId === nextTabId) {
+          setSecondaryTabId((current) => pickDistinctTabId(openTabIds, nextTabId, current));
+        }
+      } else {
+        setSecondaryTabId(nextTabId);
+        if (primaryTabId === nextTabId) {
+          setPrimaryTabId((current) => pickDistinctTabId(openTabIds, nextTabId, current));
+        }
+      }
+    },
+    [isSplit, openTabIds, primaryTabId, secondaryTabId]
+  );
+
+  const focusPane = useCallback(
+    (pane: PaneId) => {
+      if (pane === "secondary" && !isSplit) {
+        return;
+      }
+
+      setFocusedPane(pane);
+      const paneTabId = pane === "secondary" && isSplit ? secondaryTabId : primaryTabId;
+      if (paneTabId && paneTabId !== activeTabId) {
+        setActiveTab(paneTabId);
+      }
+    },
+    [activeTabId, isSplit, primaryTabId, secondaryTabId, setActiveTab]
+  );
+
+  const handleCursorChange = useCallback((pane: PaneId, line: number, column: number, chars: number) => {
+    setPaneCursors((prev) => ({
+      ...prev,
+      [pane]: { line, column, chars }
+    }));
   }, []);
 
-  const handleEditorChange = useCallback((content: string, plainText: string) => {
-    updateActiveContent(content, plainText);
-  }, [updateActiveContent]);
+  const handleEditorChange = useCallback((pane: PaneId, content: string, plainText: string) => {
+    const targetTabId = pane === "secondary" && isSplit ? secondaryTabId : primaryTabId;
+    if (!targetTabId) {
+      return;
+    }
+
+    updateTabContent(targetTabId, content, plainText);
+  }, [isSplit, primaryTabId, secondaryTabId, updateTabContent]);
 
   const [searchQuery, setSearchQuery] = useState("");
   const [searchMode, setSearchMode] = useState<"all" | "title" | "content">("all");
@@ -325,11 +449,6 @@ export default function App() {
   const [autoSaveDirIsDefault, setAutoSaveDirIsDefault] = useState(true);
   const [shortcuts, setShortcuts] = useState<ShortcutMap>(() => createDefaultShortcuts());
   const [tabSize, setTabSize] = useState(DEFAULT_TAB_SIZE);
-
-  const activeTab = useMemo(
-    () => openTabs.find((tab) => tab.id === activeTabId) ?? openTabs[0],
-    [openTabs, activeTabId]
-  );
 
   const noteTags = useMemo(() => {
     const map = new Map<string, string[]>();
@@ -538,6 +657,58 @@ export default function App() {
   }, [editorSpellcheck]);
 
   useEffect(() => {
+    window.localStorage.setItem(SPLIT_RATIO_KEY, String(splitRatio));
+  }, [splitRatio]);
+
+  useEffect(() => {
+    if (openTabIds.length === 0) {
+      setPrimaryTabId(null);
+      setSecondaryTabId(null);
+      setIsSplit(false);
+      setFocusedPane("primary");
+      return;
+    }
+
+    const fallbackPrimary =
+      (activeTabId && openTabIds.includes(activeTabId) ? activeTabId : null) ?? openTabIds[0];
+    const nextPrimary = primaryTabId && openTabIds.includes(primaryTabId) ? primaryTabId : fallbackPrimary;
+
+    let nextIsSplit = isSplit && openTabIds.length > 1;
+    let nextSecondary =
+      nextIsSplit &&
+      secondaryTabId &&
+      openTabIds.includes(secondaryTabId) &&
+      secondaryTabId !== nextPrimary
+        ? secondaryTabId
+        : pickDistinctTabId(openTabIds, nextPrimary, secondaryTabId);
+
+    if (!nextSecondary) {
+      nextIsSplit = false;
+      nextSecondary = null;
+    }
+
+    if (nextPrimary !== primaryTabId) {
+      setPrimaryTabId(nextPrimary);
+    }
+    if (nextSecondary !== secondaryTabId) {
+      setSecondaryTabId(nextSecondary);
+    }
+    if (nextIsSplit !== isSplit) {
+      setIsSplit(nextIsSplit);
+    }
+    if (!nextIsSplit && focusedPane !== "primary") {
+      setFocusedPane("primary");
+    }
+  }, [activeTabId, focusedPane, isSplit, openTabIds, primaryTabId, secondaryTabId]);
+
+  useEffect(() => {
+    if (!focusedTabId || focusedTabId === activeTabId) {
+      return;
+    }
+    setActiveTab(focusedTabId);
+  }, [activeTabId, focusedTabId, setActiveTab]);
+
+  useEffect(() => {
     const noteApi = hwanNote.note;
     if (!noteApi?.loadAll) {
       return;
@@ -577,6 +748,147 @@ export default function App() {
     }
   }, [selectedTag, tags]);
 
+  const handleSelectTabInFocusedPane = useCallback((tabId: string) => {
+    setPaneTab(focusedPane, tabId);
+    setActiveTab(tabId);
+  }, [focusedPane, setActiveTab, setPaneTab]);
+
+  const handleSelectNoteInFocusedPane = useCallback((tabId: string) => {
+    openNote(tabId);
+    setPaneTab(focusedPane, tabId);
+    setActiveTab(tabId);
+  }, [focusedPane, openNote, setActiveTab, setPaneTab]);
+
+  const handleCreateTabInFocusedPane = useCallback(() => {
+    const prevIds = new Set(openTabIds);
+    createTab();
+
+    queueMicrotask(() => {
+      const state = useNoteStore.getState();
+      const createdId = state.openTabIds.find((id) => !prevIds.has(id));
+      if (!createdId) {
+        return;
+      }
+
+      setPaneTab(focusedPane, createdId);
+      setActiveTab(createdId);
+    });
+  }, [createTab, focusedPane, openTabIds, setActiveTab, setPaneTab]);
+
+  const resolveWorkspaceDropTarget = useCallback((clientX: number, clientY: number) => {
+    const workspace = editorWorkspaceRef.current;
+    if (!workspace) {
+      return null;
+    }
+
+    const rect = workspace.getBoundingClientRect();
+    const isInsideWorkspace =
+      clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom;
+    if (!isInsideWorkspace) {
+      return null;
+    }
+
+    return clientX < rect.left + rect.width / 2 ? "primary" : "secondary";
+  }, []);
+
+  const handleTabDragPreview = useCallback((_tabId: string, clientX: number, clientY: number) => {
+    if (openTabIds.length <= 1) {
+      setSplitDropTarget(null);
+      return;
+    }
+
+    setSplitDropTarget(resolveWorkspaceDropTarget(clientX, clientY));
+  }, [openTabIds.length, resolveWorkspaceDropTarget]);
+
+  const handleTabDragEnd = useCallback(() => {
+    setSplitDropTarget(null);
+  }, []);
+
+  const handleDropTabOutside = useCallback((tabId: string, clientX: number, clientY: number) => {
+    setSplitDropTarget(null);
+    if (openTabIds.length <= 1) {
+      return;
+    }
+
+    const targetPane = resolveWorkspaceDropTarget(clientX, clientY);
+    if (!targetPane) {
+      return;
+    }
+
+    const fallbackTabId = pickDistinctTabId(openTabIds, tabId, targetPane === "primary" ? secondaryTabId : primaryTabId);
+    if (!fallbackTabId) {
+      return;
+    }
+
+    setIsSplit(true);
+    setFocusedPane(targetPane);
+    if (targetPane === "primary") {
+      setPrimaryTabId(tabId);
+      setSecondaryTabId(fallbackTabId);
+    } else {
+      setSecondaryTabId(tabId);
+      setPrimaryTabId(fallbackTabId);
+    }
+    setActiveTab(tabId);
+  }, [openTabIds, primaryTabId, resolveWorkspaceDropTarget, secondaryTabId, setActiveTab]);
+
+  const handleCycleTabInFocusedPane = useCallback((direction: 1 | -1) => {
+    const currentTabId = focusedPane === "secondary" && isSplit ? secondaryTabId : primaryTabId;
+    if (!currentTabId || openTabIds.length <= 1) {
+      return;
+    }
+
+    const currentIndex = openTabIds.findIndex((id) => id === currentTabId);
+    if (currentIndex === -1) {
+      return;
+    }
+
+    const nextIndex = (currentIndex + direction + openTabIds.length) % openTabIds.length;
+    const nextTabId = openTabIds[nextIndex];
+    setPaneTab(focusedPane, nextTabId);
+    setActiveTab(nextTabId);
+  }, [focusedPane, isSplit, openTabIds, primaryTabId, secondaryTabId, setActiveTab, setPaneTab]);
+
+  const handleSplitDividerPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!isSplit || !editorWorkspaceRef.current) {
+      return;
+    }
+
+    const rect = editorWorkspaceRef.current.getBoundingClientRect();
+    splitResizeRef.current = {
+      startX: event.clientX,
+      startRatio: splitRatio,
+      workspaceWidth: rect.width
+    };
+    event.preventDefault();
+  }, [isSplit, splitRatio]);
+
+  useEffect(() => {
+    const handlePointerMove = (event: PointerEvent) => {
+      const resizeState = splitResizeRef.current;
+      if (!resizeState || resizeState.workspaceWidth <= 0) {
+        return;
+      }
+
+      const deltaX = event.clientX - resizeState.startX;
+      const ratioDelta = deltaX / resizeState.workspaceWidth;
+      setSplitRatio(clampSplitRatio(resizeState.startRatio + ratioDelta));
+    };
+
+    const handlePointerUp = () => {
+      splitResizeRef.current = null;
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+    window.addEventListener("pointercancel", handlePointerUp);
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+      window.removeEventListener("pointercancel", handlePointerUp);
+    };
+  }, []);
+
   const handleImportTxt = useCallback(async () => {
     const noteApi = hwanNote.note;
     if (!noteApi?.importTxt) return;
@@ -599,18 +911,18 @@ export default function App() {
   }, [addImportedTab]);
 
   const handleManualSave = useCallback(async () => {
-    if (!activeTab) {
+    if (!focusedTab) {
       return;
     }
 
     // 외부 .txt 파일인 경우: 원본 위치에 plain text로 저장
-    if (activeTab.fileFormat === "txt" && activeTab.sourceFilePath) {
+    if (focusedTab.fileFormat === "txt" && focusedTab.sourceFilePath) {
       const noteApi = hwanNote.note;
       if (!noteApi?.saveTxt) return;
 
       try {
-        await noteApi.saveTxt(activeTab.sourceFilePath, activeTab.plainText);
-        markTabSaved(activeTab.id);
+        await noteApi.saveTxt(focusedTab.sourceFilePath, focusedTab.plainText);
+        markTabSaved(focusedTab.id);
       } catch (error) {
         console.error("Save txt failed:", error);
       }
@@ -620,33 +932,72 @@ export default function App() {
     const noteApi = hwanNote.note;
 
     if (!noteApi?.autoSave) {
-      window.localStorage.setItem(getDraftKey(activeTab.id), activeTab.content);
-      markTabSaved(activeTab.id);
+      window.localStorage.setItem(getDraftKey(focusedTab.id), focusedTab.content);
+      markTabSaved(focusedTab.id);
       return;
     }
 
     try {
-      const isTxtWithoutSource = activeTab.fileFormat === "txt" && !activeTab.sourceFilePath;
+      const isTxtWithoutSource = focusedTab.fileFormat === "txt" && !focusedTab.sourceFilePath;
       const markdown = isTxtWithoutSource
-        ? activeTab.plainText.trimEnd() + "\n"
+        ? focusedTab.plainText.trimEnd() + "\n"
         : toMarkdownDocument(
-            activeTab.title,
-            activeTab.plainText,
-            activeTab.content,
+            focusedTab.title,
+            focusedTab.plainText,
+            focusedTab.content,
             t("common.untitled")
           );
       await noteApi.autoSave(
-        activeTab.id,
-        activeTab.title,
+        focusedTab.id,
+        focusedTab.title,
         markdown,
-        normalizeFolderPath(activeTab.folderPath),
-        activeTab.isTitleManual
+        normalizeFolderPath(focusedTab.folderPath),
+        focusedTab.isTitleManual
       );
-      markTabSaved(activeTab.id);
+      markTabSaved(focusedTab.id);
     } catch (error) {
       console.error("Auto-save failed:", error);
     }
-  }, [activeTab, markTabSaved, t]);
+  }, [focusedTab, markTabSaved, t]);
+
+  const handleSaveAsAndCloseTab = useCallback(async (tabId: string) => {
+    const tab = tabById.get(tabId);
+    if (!tab) {
+      return;
+    }
+
+    const noteApi = hwanNote.note;
+    if (!noteApi?.pickSavePath) {
+      return;
+    }
+
+    const { extension, content } = toTabSaveAsContent(tab, t("common.untitled"));
+    const fallbackTitle = t("common.untitled");
+    const title = tab.title.trim() || fallbackTitle;
+    const path = await noteApi.pickSavePath(
+      t("titlebar.closeDirty.saveAsClose"),
+      `${title}.${extension}`,
+      extension
+    );
+
+    if (!path) {
+      return;
+    }
+
+    try {
+      if (extension === "txt") {
+        if (!noteApi.saveTxt) {
+          return;
+        }
+        await noteApi.saveTxt(path, content);
+      } else {
+        await noteApi.save(path, content);
+      }
+      closeTab(tabId);
+    } catch (error) {
+      console.error("Save As failed:", error);
+    }
+  }, [closeTab, t, tabById]);
 
   const handleBrowseAutoSaveDir = useCallback(async () => {
     await handleManualSave();
@@ -692,8 +1043,8 @@ export default function App() {
   }, [handleManualSave, hydrateLoadedNotes]);
 
   useAutoSave({
-    value: activeTab?.content ?? "",
-    enabled: Boolean(activeTab?.isDirty),
+    value: focusedTab?.content ?? "",
+    enabled: Boolean(focusedTab?.isDirty),
     delay: 1000,
     onSave: handleManualSave
   });
@@ -757,6 +1108,12 @@ export default function App() {
       }
 
       const activeElement = document.activeElement as HTMLElement | null;
+      const paneElement = (target?.closest("[data-pane]") ?? activeElement?.closest("[data-pane]")) as HTMLElement | null;
+      const paneAttr = paneElement?.dataset.pane;
+      if (paneAttr === "primary" || paneAttr === "secondary") {
+        focusPane(paneAttr);
+      }
+
       const isEditorFocus = Boolean(
         target?.closest(".note-editor, .editor-shell") ?? activeElement?.closest(".note-editor")
       );
@@ -780,12 +1137,12 @@ export default function App() {
 
           case "nextTab":
             event.preventDefault();
-            activateNextTab();
+            handleCycleTabInFocusedPane(1);
             return;
 
           case "prevTab":
             event.preventDefault();
-            activatePrevTab();
+            handleCycleTabInFocusedPane(-1);
             return;
 
           case "saveNote":
@@ -795,56 +1152,56 @@ export default function App() {
 
           case "newNote":
             event.preventDefault();
-            createTab();
+            handleCreateTabInFocusedPane();
             return;
 
           case "closeTab":
-            if (!activeTab) {
+            if (!focusedTabId) {
               return;
             }
 
             event.preventDefault();
-            closeTab(activeTab.id);
+            closeTab(focusedTabId);
             return;
 
           case "toggleBold":
-            if (!editor) {
+            if (!focusedEditor) {
               return;
             }
 
             event.preventDefault();
-            editor.chain().focus().toggleBold().run();
+            focusedEditor.chain().focus().toggleBold().run();
             return;
 
           case "toggleItalic":
-            if (!editor) {
+            if (!focusedEditor) {
               return;
             }
 
             event.preventDefault();
-            editor.chain().focus().toggleItalic().run();
+            focusedEditor.chain().focus().toggleItalic().run();
             return;
 
           case "toggleChecklist":
-            if (!editor) {
+            if (!focusedEditor) {
               return;
             }
 
             event.preventDefault();
-            editor.chain().focus().toggleTaskList().run();
+            focusedEditor.chain().focus().toggleTaskList().run();
             return;
 
           case "insertToggleBlock":
-            if (!editor) {
+            if (!focusedEditor) {
               return;
             }
 
             event.preventDefault();
-            editor.chain().focus().insertToggleBlock().run();
+            focusedEditor.chain().focus().insertToggleBlock().run();
             return;
 
           case "insertDateTime": {
-            if (!editor) {
+            if (!focusedEditor) {
               return;
             }
 
@@ -859,7 +1216,7 @@ export default function App() {
               second: "2-digit",
               hour12: false
             });
-            editor.chain().focus().insertContent(dateTimeStr).run();
+            focusedEditor.chain().focus().insertContent(dateTimeStr).run();
             return;
           }
 
@@ -872,12 +1229,12 @@ export default function App() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [
-    activeTab,
-    activateNextTab,
-    activatePrevTab,
     closeTab,
-    createTab,
-    editor,
+    focusPane,
+    focusedEditor,
+    focusedTabId,
+    handleCreateTabInFocusedPane,
+    handleCycleTabInFocusedPane,
     handleManualSave,
     localeTag,
     settingsOpen,
@@ -893,13 +1250,13 @@ export default function App() {
     const onEsc = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         setSettingsOpen(false);
-        restoreEditorFocus(editor);
+        restoreEditorFocus(focusedEditor);
       }
     };
 
     window.addEventListener("keydown", onEsc);
     return () => window.removeEventListener("keydown", onEsc);
-  }, [editor, settingsOpen]);
+  }, [focusedEditor, settingsOpen]);
 
   useEffect(() => {
     const onWheel = (event: WheelEvent) => {
@@ -953,6 +1310,8 @@ export default function App() {
     }
     return t("theme.light");
   }, [themeMode, t]);
+  const splitDropLeftLabel = language === "ko" ? "왼쪽에 놓아 분할" : "Drop to split left";
+  const splitDropRightLabel = language === "ko" ? "오른쪽에 놓아 분할" : "Drop to split right";
 
   return (
     <div className="app-shell">
@@ -961,24 +1320,31 @@ export default function App() {
         activeTabId={activeTabId}
         isMaximized={isMaximized}
         onToggleSidebar={toggleSidebar}
-        onSelectTab={setActiveTab}
+        onSelectTab={handleSelectTabInFocusedPane}
         onCloseTab={closeTab}
+        onSaveAsAndCloseTab={(tabId) => void handleSaveAsAndCloseTab(tabId)}
         onCloseOtherTabs={closeOtherTabs}
         onTogglePinTab={togglePinTab}
         onReorderTabs={reorderTabs}
-        onCreateTab={createTab}
+        onDropTabOutside={handleDropTabOutside}
+        onTabDragPreview={handleTabDragPreview}
+        onTabDragEnd={handleTabDragEnd}
+        onCreateTab={handleCreateTabInFocusedPane}
         onMinimize={() => void hwanNote.window.minimize()}
         onToggleMaximize={() => void handleToggleMaximize()}
         onCloseWindow={() => void hwanNote.window.close()}
       />
 
       <Toolbar
-        editor={editor}
-        activeTitle={activeTab?.title ?? ""}
-        activeTabId={activeTab?.id ?? ""}
-        isTitleManual={Boolean(activeTab?.isTitleManual)}
-        onChangeTitle={setActiveTitle}
-        lastSavedAt={activeTab?.lastSavedAt ?? 0}
+        editor={focusedEditor}
+        activeTitle={focusedTab?.title ?? ""}
+        activeTabId={focusedTab?.id ?? ""}
+        isTitleManual={Boolean(focusedTab?.isTitleManual)}
+        onChangeTitle={(title) => {
+          if (!focusedTabId) return;
+          setTabTitle(focusedTabId, title);
+        }}
+        lastSavedAt={focusedTab?.lastSavedAt ?? 0}
         onOpenSettings={() => setSettingsOpen(true)}
         onImportTxt={() => void handleImportTxt()}
       />
@@ -1000,7 +1366,7 @@ export default function App() {
           onSelectFolder={setSelectedFolder}
           onSelectTag={setSelectedTag}
           onSortModeChange={setSortMode}
-          onSelectNote={openNote}
+          onSelectNote={handleSelectNoteInFocusedPane}
           onTogglePinNote={togglePinTab}
           onDeleteNote={(id) => {
             void (async () => {
@@ -1048,17 +1414,79 @@ export default function App() {
           }}
         />
 
-        <main className="editor-workspace">
-          {activeTab ? (
-            <Editor
-              key={activeTab.id}
-              content={activeTab.content}
-              tabSize={tabSize}
-              spellcheck={editorSpellcheck}
-              onEditorReady={setEditor}
-              onChange={handleEditorChange}
-              onCursorChange={handleCursorChange}
-            />
+        <main ref={editorWorkspaceRef} className={`editor-workspace ${isSplit ? "split" : ""}`}>
+          {isSplit && primaryTab && secondaryTab ? (
+            <>
+              <section
+                className={`editor-pane ${focusedPane === "primary" ? "focused" : ""}`}
+                data-pane="primary"
+                style={{ flexBasis: `${splitRatio * 100}%` }}
+                onMouseDown={() => focusPane("primary")}
+              >
+                <Editor
+                  key={`primary-${primaryTab.id}`}
+                  content={primaryTab.content}
+                  tabSize={tabSize}
+                  spellcheck={editorSpellcheck}
+                  autofocus={focusedPane === "primary"}
+                  onFocus={() => focusPane("primary")}
+                  onEditorReady={(nextEditor) => {
+                    setPaneEditors((prev) => ({ ...prev, primary: nextEditor }));
+                  }}
+                  onChange={(content, plainText) => handleEditorChange("primary", content, plainText)}
+                  onCursorChange={(line, column, chars) => handleCursorChange("primary", line, column, chars)}
+                />
+              </section>
+
+              <div className="split-divider" onPointerDown={handleSplitDividerPointerDown} />
+
+              <section
+                className={`editor-pane ${focusedPane === "secondary" ? "focused" : ""}`}
+                data-pane="secondary"
+                style={{ flexBasis: `${(1 - splitRatio) * 100}%` }}
+                onMouseDown={() => focusPane("secondary")}
+              >
+                <Editor
+                  key={`secondary-${secondaryTab.id}`}
+                  content={secondaryTab.content}
+                  tabSize={tabSize}
+                  spellcheck={editorSpellcheck}
+                  autofocus={focusedPane === "secondary"}
+                  onFocus={() => focusPane("secondary")}
+                  onEditorReady={(nextEditor) => {
+                    setPaneEditors((prev) => ({ ...prev, secondary: nextEditor }));
+                  }}
+                  onChange={(content, plainText) => handleEditorChange("secondary", content, plainText)}
+                  onCursorChange={(line, column, chars) => handleCursorChange("secondary", line, column, chars)}
+                />
+              </section>
+            </>
+          ) : primaryTab ? (
+            <section className="editor-pane focused" data-pane="primary" onMouseDown={() => focusPane("primary")}>
+              <Editor
+                key={`primary-${primaryTab.id}`}
+                content={primaryTab.content}
+                tabSize={tabSize}
+                spellcheck={editorSpellcheck}
+                autofocus
+                onFocus={() => focusPane("primary")}
+                onEditorReady={(nextEditor) => {
+                  setPaneEditors((prev) => ({ ...prev, primary: nextEditor }));
+                }}
+                onChange={(content, plainText) => handleEditorChange("primary", content, plainText)}
+                onCursorChange={(line, column, chars) => handleCursorChange("primary", line, column, chars)}
+              />
+            </section>
+          ) : null}
+          {splitDropTarget ? (
+            <div className="split-drop-preview" aria-hidden="true">
+              <div className={`split-drop-zone ${splitDropTarget === "primary" ? "active" : ""}`}>
+                <span>{splitDropLeftLabel}</span>
+              </div>
+              <div className={`split-drop-zone ${splitDropTarget === "secondary" ? "active" : ""}`}>
+                <span>{splitDropRightLabel}</span>
+              </div>
+            </div>
           ) : null}
         </main>
       </div>
@@ -1069,23 +1497,23 @@ export default function App() {
         chars={cursor.chars}
         themeLabel={themeLabel}
         zoomPercent={zoomPercent}
-        fileFormat={activeTab?.fileFormat ?? "md"}
+        fileFormat={focusedTab?.fileFormat ?? "md"}
         onToggleFileFormat={() => {
-          if (!activeTab) return;
-          if (activeTab.fileFormat === "md") {
+          if (!focusedTab) return;
+          if (focusedTab.fileFormat === "md") {
             const hasFormatting =
-              /<ul[^>]*data-type=(['"])taskList\1/i.test(activeTab.content) ||
-              /<details/i.test(activeTab.content) ||
-              /<strong/i.test(activeTab.content) ||
-              /<em>/i.test(activeTab.content) ||
-              /<s>/i.test(activeTab.content) ||
-              /<a\s/i.test(activeTab.content) ||
-              /<h[1-3]/i.test(activeTab.content);
+              /<ul[^>]*data-type=(['"])taskList\1/i.test(focusedTab.content) ||
+              /<details/i.test(focusedTab.content) ||
+              /<strong/i.test(focusedTab.content) ||
+              /<em>/i.test(focusedTab.content) ||
+              /<s>/i.test(focusedTab.content) ||
+              /<a\s/i.test(focusedTab.content) ||
+              /<h[1-3]/i.test(focusedTab.content);
             if (hasFormatting && !window.confirm(t("status.confirmSwitchToTxt"))) {
               return;
             }
           }
-          toggleFileFormat(activeTab.id);
+          toggleFileFormat(focusedTab.id);
         }}
       />
 
@@ -1110,7 +1538,7 @@ export default function App() {
         onResetShortcuts={handleShortcutReset}
         onClose={() => {
           setSettingsOpen(false);
-          restoreEditorFocus(editor);
+          restoreEditorFocus(focusedEditor);
         }}
       />
 

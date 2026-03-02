@@ -77,6 +77,17 @@ export const hwanNote = {
     importTxt: () =>
       invoke<ImportedFile[] | null>("cmd_note_import_txt"),
 
+    pickSavePath: (
+      dialogTitle: string,
+      defaultFileName: string,
+      extension: "md" | "txt"
+    ) =>
+      invoke<string | null>("cmd_note_pick_save_path", {
+        dialogTitle,
+        defaultFileName,
+        extension,
+      }),
+
     saveTxt: (filePath: string, content: string) =>
       invoke<boolean>("cmd_note_save_txt", { filePath, content }),
 

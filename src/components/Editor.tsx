@@ -22,9 +22,11 @@ interface EditorProps {
   content: string;
   tabSize: number;
   spellcheck: boolean;
+  autofocus?: boolean;
   onChange: (content: string, plainText: string) => void;
   onCursorChange: (line: number, column: number, chars: number) => void;
   onEditorReady: (editor: TiptapEditor | null) => void;
+  onFocus?: () => void;
 }
 
 function collectPlainText(editor: TiptapEditor) {
@@ -75,13 +77,33 @@ export function restoreEditorFocus(editor: TiptapEditor | null) {
   });
 }
 
-export default function Editor({ content, tabSize, spellcheck, onChange, onCursorChange, onEditorReady }: EditorProps) {
+export default function Editor({
+  content,
+  tabSize,
+  spellcheck,
+  autofocus = true,
+  onChange,
+  onCursorChange,
+  onEditorReady,
+  onFocus
+}: EditorProps) {
   const { t } = useI18n();
   const placeholderText = t("editor.placeholder");
   const [linkBubble, setLinkBubble] = useState<LinkBubbleState | null>(null);
 
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+
   const onCursorChangeRef = useRef(onCursorChange);
   onCursorChangeRef.current = onCursorChange;
+
+  const onEditorReadyRef = useRef(onEditorReady);
+  onEditorReadyRef.current = onEditorReady;
+
+  const onFocusRef = useRef(onFocus);
+  onFocusRef.current = onFocus;
+
+  const initialAutofocusRef = useRef(autofocus);
 
   const isLocalUpdateRef = useRef(false);
 
@@ -122,7 +144,7 @@ export default function Editor({ content, tabSize, spellcheck, onChange, onCurso
       })
     ],
     content,
-    autofocus: "end",
+    autofocus: initialAutofocusRef.current ? "end" : false,
     editorProps: {
       attributes: {
         class: "note-editor",
@@ -133,12 +155,15 @@ export default function Editor({ content, tabSize, spellcheck, onChange, onCurso
       isLocalUpdateRef.current = true;
       const plainText = collectPlainText(editor);
       const cursor = collectCursor(editor, plainText);
-      onChange(editor.getHTML(), plainText);
-      onCursorChange(cursor.line, cursor.column, cursor.chars);
+      onChangeRef.current(editor.getHTML(), plainText);
+      onCursorChangeRef.current(cursor.line, cursor.column, cursor.chars);
     },
     onSelectionUpdate: ({ editor }) => {
       const cursor = collectCursor(editor);
-      onCursorChange(cursor.line, cursor.column, cursor.chars);
+      onCursorChangeRef.current(cursor.line, cursor.column, cursor.chars);
+    },
+    onFocus: () => {
+      onFocusRef.current?.();
     }
   }, [placeholderText]);
 
@@ -148,11 +173,11 @@ export default function Editor({ content, tabSize, spellcheck, onChange, onCurso
   }, [editor]);
 
   useEffect(() => {
-    onEditorReady(editor);
+    onEditorReadyRef.current(editor);
     return () => {
-      onEditorReady(null);
+      onEditorReadyRef.current(null);
     };
-  }, [editor, onEditorReady]);
+  }, [editor]);
 
   useEffect(() => {
     if (!editor) {

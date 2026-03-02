@@ -23,6 +23,7 @@ pub fn run() {
             cmd_note_load_all,
             cmd_note_delete,
             cmd_note_import_txt,
+            cmd_note_pick_save_path,
             cmd_note_save_txt,
             cmd_settings_browse_autosave_dir,
             cmd_settings_set_autosave_dir,

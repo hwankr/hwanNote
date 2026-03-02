@@ -59,9 +59,13 @@ interface TitleBarProps {
   onToggleSidebar: () => void;
   onSelectTab: (id: string) => void;
   onCloseTab: (id: string) => void;
+  onSaveAsAndCloseTab: (id: string) => void;
   onCloseOtherTabs: (id: string) => void;
   onTogglePinTab: (id: string) => void;
   onReorderTabs: (sourceId: string, targetId: string) => void;
+  onDropTabOutside: (tabId: string, clientX: number, clientY: number) => void;
+  onTabDragPreview: (tabId: string, clientX: number, clientY: number) => void;
+  onTabDragEnd: () => void;
   onCreateTab: () => void;
   onMinimize: () => void;
   onToggleMaximize: () => void;
@@ -75,9 +79,13 @@ export default function TitleBar({
   onToggleSidebar,
   onSelectTab,
   onCloseTab,
+  onSaveAsAndCloseTab,
   onCloseOtherTabs,
   onTogglePinTab,
   onReorderTabs,
+  onDropTabOutside,
+  onTabDragPreview,
+  onTabDragEnd,
   onCreateTab,
   onMinimize,
   onToggleMaximize,
@@ -97,11 +105,13 @@ export default function TitleBar({
     offsetY: number;
   } | null>(null);
   const [menu, setMenu] = useState<{ tabId: string; x: number; y: number } | null>(null);
+  const [dirtyCloseMenu, setDirtyCloseMenu] = useState<{ tabId: string; x: number; y: number } | null>(null);
   const tabsRef = useRef<HTMLDivElement | null>(null);
-  const dragRef = useRef<{ tabId: string; startX: number; active: boolean } | null>(null);
+  const dragRef = useRef<{ tabId: string; startX: number; startY: number; active: boolean } | null>(null);
   const dragOverIdRef = useRef<string | null>(null);
   const dragOverPositionRef = useRef<"before" | "after" | null>(null);
   const didDragRef = useRef(false);
+  const lastPointerRef = useRef<{ x: number; y: number } | null>(null);
 
   const menuTarget = useMemo(() => tabs.find((tab) => tab.id === menu?.tabId), [tabs, menu]);
   const draggingTab = useMemo(() => tabs.find((tab) => tab.id === draggingTabId) ?? null, [tabs, draggingTabId]);
@@ -115,6 +125,7 @@ export default function TitleBar({
       setDragOverTabId(null);
       setDragOverPosition(null);
       setDragGhost(null);
+      lastPointerRef.current = null;
       document.body.classList.remove("tab-dragging");
     };
 
@@ -130,9 +141,12 @@ export default function TitleBar({
     const handlePointerMove = (e: PointerEvent) => {
       const drag = dragRef.current;
       if (!drag) return;
+      lastPointerRef.current = { x: e.clientX, y: e.clientY };
 
       if (!drag.active) {
-        if (Math.abs(e.clientX - drag.startX) > 5) {
+        const deltaX = e.clientX - drag.startX;
+        const deltaY = e.clientY - drag.startY;
+        if (Math.hypot(deltaX, deltaY) > 5) {
           drag.active = true;
           const tabNodes = tabsRef.current
             ? Array.from(tabsRef.current.querySelectorAll<HTMLElement>("[data-tab-id]"))
@@ -162,6 +176,7 @@ export default function TitleBar({
           }
           setDraggingTabId(drag.tabId);
           document.body.classList.add("tab-dragging");
+          onTabDragPreview(drag.tabId, e.clientX, e.clientY);
         }
         return;
       }
@@ -193,25 +208,34 @@ export default function TitleBar({
       }
 
       setDropTarget(over, position);
+      onTabDragPreview(drag.tabId, e.clientX, e.clientY);
     };
 
-    const finalizeDrag = () => {
+    const finalizeDrag = (event?: PointerEvent) => {
       const drag = dragRef.current;
       if (drag?.active) {
         if (dragOverIdRef.current) {
           onReorderTabs(drag.tabId, dragOverIdRef.current);
+        } else {
+          const pointer = event
+            ? { x: event.clientX, y: event.clientY }
+            : lastPointerRef.current;
+          if (pointer) {
+            onDropTabOutside(drag.tabId, pointer.x, pointer.y);
+          }
         }
         didDragRef.current = true;
       }
       resetDragState();
+      onTabDragEnd();
     };
 
-    const handlePointerUp = () => {
-      finalizeDrag();
+    const handlePointerUp = (event: PointerEvent) => {
+      finalizeDrag(event);
     };
 
-    const handlePointerCancel = () => {
-      finalizeDrag();
+    const handlePointerCancel = (event: PointerEvent) => {
+      finalizeDrag(event);
     };
 
     window.addEventListener("pointermove", handlePointerMove);
@@ -223,7 +247,7 @@ export default function TitleBar({
       window.removeEventListener("pointercancel", handlePointerCancel);
       resetDragState();
     };
-  }, [onReorderTabs, tabs]);
+  }, [onDropTabOutside, onReorderTabs, onTabDragEnd, onTabDragPreview, tabs]);
 
   const menuItems = useMemo<ContextMenuEntry[]>(() => {
     if (!menu || !menuTarget) return [];
@@ -268,6 +292,7 @@ export default function TitleBar({
               }}
               onContextMenu={(event) => {
                 event.preventDefault();
+                setDirtyCloseMenu(null);
                 setMenu({ tabId: tab.id, x: event.clientX, y: event.clientY });
               }}
               onPointerDown={(event) => {
@@ -280,7 +305,13 @@ export default function TitleBar({
                 ) {
                   return;
                 }
-                dragRef.current = { tabId: tab.id, startX: event.clientX, active: false };
+                dragRef.current = {
+                  tabId: tab.id,
+                  startX: event.clientX,
+                  startY: event.clientY,
+                  active: false
+                };
+                lastPointerRef.current = { x: event.clientX, y: event.clientY };
               }}
               title={tab.title}
             >
@@ -294,6 +325,11 @@ export default function TitleBar({
                 aria-label={t("titlebar.closeTab", { title: tab.title })}
                 onClick={(event) => {
                   event.stopPropagation();
+                  setMenu(null);
+                  if (tab.isDirty) {
+                    setDirtyCloseMenu({ tabId: tab.id, x: event.clientX, y: event.clientY });
+                    return;
+                  }
                   onCloseTab(tab.id);
                 }}
               >
@@ -357,6 +393,39 @@ export default function TitleBar({
           y={menu.y}
           items={menuItems}
           onClose={() => setMenu(null)}
+          className="no-drag"
+        />
+      ) : null}
+      {dirtyCloseMenu ? (
+        <ContextMenu
+          x={dirtyCloseMenu.x}
+          y={dirtyCloseMenu.y}
+          items={[
+            {
+              key: "saveAsAndClose",
+              label: t("titlebar.closeDirty.saveAsClose"),
+              onClick: () => {
+                onSaveAsAndCloseTab(dirtyCloseMenu.tabId);
+                setDirtyCloseMenu(null);
+              }
+            },
+            {
+              key: "temporaryClose",
+              label: t("titlebar.closeDirty.temporaryClose"),
+              onClick: () => {
+                onCloseTab(dirtyCloseMenu.tabId);
+                setDirtyCloseMenu(null);
+              }
+            },
+            {
+              key: "cancel",
+              label: t("titlebar.closeDirty.cancel"),
+              onClick: () => {
+                setDirtyCloseMenu(null);
+              }
+            }
+          ]}
+          onClose={() => setDirtyCloseMenu(null)}
           className="no-drag"
         />
       ) : null}

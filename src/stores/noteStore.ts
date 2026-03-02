@@ -48,7 +48,9 @@ interface NoteStore {
   clearFolderPath: (folderPath: string) => void;
   activateNextTab: () => void;
   activatePrevTab: () => void;
+  setTabTitle: (id: string, title: string) => void;
   setActiveTitle: (title: string) => void;
+  updateTabContent: (id: string, content: string, plainText: string) => void;
   updateActiveContent: (content: string, plainText: string) => void;
   markTabSaved: (id: string) => void;
   toggleFileFormat: (id: string) => void;
@@ -626,34 +628,30 @@ export const useNoteStore = create<NoteStore>((set, get) => {
         activeOpenTab: nextCollections.activeOpenTab
       });
     },
-    setActiveTitle: (title) => {
+    setTabTitle: (id, title) => {
       set((state) => {
-        if (!state.activeTabId) {
-          return state;
-        }
-
-        const active = state.notesById[state.activeTabId];
-        if (!active) {
+        const target = state.notesById[id];
+        if (!target) {
           return state;
         }
 
         const manualTitle = title.trim().slice(0, 50);
-        const currentTitle = active.title.trim().slice(0, 50);
+        const currentTitle = target.title.trim().slice(0, 50);
 
-        let nextActive = active;
+        let nextTab = target;
         if (manualTitle && manualTitle !== currentTitle) {
-          nextActive = {
-            ...active,
+          nextTab = {
+            ...target,
             title: manualTitle,
             isTitleManual: true,
             isDirty: true,
             updatedAt: Date.now()
           };
         } else if (!manualTitle) {
-          const derived = deriveTitle(active.plainText);
-          if (active.isTitleManual || active.title !== derived) {
-            nextActive = {
-              ...active,
+          const derived = deriveTitle(target.plainText);
+          if (target.isTitleManual || target.title !== derived) {
+            nextTab = {
+              ...target,
               title: derived,
               isTitleManual: false,
               isDirty: true,
@@ -664,7 +662,7 @@ export const useNoteStore = create<NoteStore>((set, get) => {
           return state;
         }
 
-        const nextNotesById = { ...state.notesById, [active.id]: nextActive };
+        const nextNotesById = { ...state.notesById, [id]: nextTab };
         const nextCollections = buildCollections(nextNotesById, state.noteIds, state.openTabIds, state.activeTabId);
         return {
           notesById: nextNotesById,
@@ -674,24 +672,27 @@ export const useNoteStore = create<NoteStore>((set, get) => {
         };
       });
     },
-    updateActiveContent: (content, plainText) => {
+    setActiveTitle: (title) => {
+      const activeTabId = get().activeTabId;
+      if (!activeTabId) {
+        return;
+      }
+      get().setTabTitle(activeTabId, title);
+    },
+    updateTabContent: (id, content, plainText) => {
       set((state) => {
-        if (!state.activeTabId) {
-          return state;
-        }
-
-        const active = state.notesById[state.activeTabId];
-        if (!active) {
+        const target = state.notesById[id];
+        if (!target) {
           return state;
         }
 
         const nextNotesById = {
           ...state.notesById,
-          [active.id]: {
-            ...active,
+          [id]: {
+            ...target,
             content,
             plainText,
-            title: active.isTitleManual ? active.title : deriveTitle(plainText),
+            title: target.isTitleManual ? target.title : deriveTitle(plainText),
             isDirty: true,
             updatedAt: Date.now()
           }
@@ -705,6 +706,13 @@ export const useNoteStore = create<NoteStore>((set, get) => {
           activeOpenTab: nextCollections.activeOpenTab
         };
       });
+    },
+    updateActiveContent: (content, plainText) => {
+      const activeTabId = get().activeTabId;
+      if (!activeTabId) {
+        return;
+      }
+      get().updateTabContent(activeTabId, content, plainText);
     },
     markTabSaved: (id) => {
       set((state) => {

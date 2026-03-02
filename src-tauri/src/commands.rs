@@ -164,6 +164,36 @@ pub fn cmd_note_import_txt(window: WebviewWindow) -> Result<Option<Vec<ImportedF
 }
 
 #[tauri::command]
+pub fn cmd_note_pick_save_path(
+    window: WebviewWindow,
+    dialog_title: String,
+    default_file_name: String,
+    extension: String,
+) -> Result<Option<String>, String> {
+    let mut dialog = window
+        .dialog()
+        .file()
+        .set_title(&dialog_title)
+        .set_file_name(&default_file_name);
+
+    if extension.eq_ignore_ascii_case("txt") {
+        dialog = dialog.add_filter("Text Files", &["txt"]);
+    } else {
+        dialog = dialog.add_filter("Markdown Files", &["md"]);
+    }
+    dialog = dialog.add_filter("All Files", &["*"]);
+
+    let result = dialog.blocking_save_file();
+    match result {
+        Some(path) => {
+            let path_buf = path.into_path().map_err(|e| e.to_string())?;
+            Ok(Some(path_buf.to_string_lossy().to_string()))
+        }
+        None => Ok(None),
+    }
+}
+
+#[tauri::command]
 pub fn cmd_note_save_txt(file_path: String, content: String) -> Result<bool, String> {
     file_manager::save_text_file(std::path::Path::new(&file_path), &content)?;
     Ok(true)
