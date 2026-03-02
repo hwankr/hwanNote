@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-// ── Types (matching Rust serde output) ──
+// -- Types (matching Rust serde output) --
 
 export interface AutoSaveResult {
   filePath: string;
@@ -41,8 +41,28 @@ interface UpdateStatusData {
   error?: string;
 }
 
-// ── IPC abstraction layer ──
+// -- IPC abstraction layer --
 // Replaces window.hwanNote and window.hwanShell with Tauri invoke() calls.
+
+function wrapListener<T>(eventName: string, callback: (payload: T) => void): (() => void) {
+  let unlisten: UnlistenFn | null = null;
+  let cancelled = false;
+
+  listen<T>(eventName, (event) => {
+    callback(event.payload);
+  }).then((fn_) => {
+    if (cancelled) {
+      fn_();
+    } else {
+      unlisten = fn_;
+    }
+  });
+
+  return () => {
+    cancelled = true;
+    unlisten?.();
+  };
+}
 
 export const hwanNote = {
   window: {
@@ -77,6 +97,15 @@ export const hwanNote = {
     importTxt: () =>
       invoke<ImportedFile[] | null>("cmd_note_import_txt"),
 
+    readExternalTxt: (filePath: string) =>
+      invoke<ImportedFile>("cmd_note_read_external_txt", { filePath }),
+
+    drainOpenIntents: () =>
+      invoke<string[]>("cmd_note_drain_open_intents"),
+
+    onOpenIntent: (callback: (filePath: string) => void): (() => void) =>
+      wrapListener<string>("note:open-intent", callback),
+
     pickSavePath: (
       dialogTitle: string,
       defaultFileName: string,
@@ -99,25 +128,8 @@ export const hwanNote = {
     check: () => invoke("cmd_updater_check"),
     download: () => invoke("cmd_updater_download"),
     install: () => invoke("cmd_updater_install"),
-    onStatus: (callback: (data: UpdateStatusData) => void): (() => void) => {
-      let unlisten: UnlistenFn | null = null;
-      let cancelled = false;
-
-      listen<UpdateStatusData>("updater:status", (event) => {
-        callback(event.payload);
-      }).then((fn_) => {
-        if (cancelled) {
-          fn_();
-        } else {
-          unlisten = fn_;
-        }
-      });
-
-      return () => {
-        cancelled = true;
-        unlisten?.();
-      };
-    },
+    onStatus: (callback: (data: UpdateStatusData) => void): (() => void) =>
+      wrapListener<UpdateStatusData>("updater:status", callback),
   },
 
   settings: {

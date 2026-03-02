@@ -2,7 +2,50 @@ mod commands;
 mod config_manager;
 mod file_manager;
 
+use std::collections::HashSet;
+use std::path::PathBuf;
+
 use commands::*;
+use tauri::{Emitter, Manager};
+
+fn collect_txt_open_intents(argv: &[String], cwd: Option<&str>) -> Vec<PathBuf> {
+    let base_dir = cwd.map(PathBuf::from);
+    let mut seen = HashSet::new();
+    let mut intents = Vec::new();
+
+    for arg in argv.iter().skip(1) {
+        let normalized = match file_manager::normalize_external_txt_path(arg, base_dir.as_deref()) {
+            Ok(path) => path,
+            Err(_) => continue,
+        };
+
+        let key = normalized.to_string_lossy().to_lowercase();
+        if seen.insert(key) {
+            intents.push(normalized);
+        }
+    }
+
+    intents
+}
+
+fn focus_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+fn enqueue_open_intents(app: &tauri::AppHandle, paths: Vec<PathBuf>, emit_event: bool) {
+    let state = app.state::<PendingOpenIntents>();
+
+    for path in paths {
+        let inserted = enqueue_open_intent(&state, path.as_path());
+        if inserted && emit_event {
+            let _ = app.emit(OPEN_INTENT_EVENT, path.to_string_lossy().to_string());
+        }
+    }
+}
 
 pub fn run() {
     tracing_subscriber::fmt::init();
@@ -11,7 +54,13 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
+            focus_main_window(app);
+            let intents = collect_txt_open_intents(&argv, Some(cwd.as_str()));
+            enqueue_open_intents(app, intents, true);
+        }))
         .manage(PendingUpdate::default())
+        .manage(PendingOpenIntents::default())
         .invoke_handler(tauri::generate_handler![
             cmd_window_minimize,
             cmd_window_toggle_maximize,
@@ -23,6 +72,8 @@ pub fn run() {
             cmd_note_load_all,
             cmd_note_delete,
             cmd_note_import_txt,
+            cmd_note_read_external_txt,
+            cmd_note_drain_open_intents,
             cmd_note_pick_save_path,
             cmd_note_save_txt,
             cmd_settings_browse_autosave_dir,
@@ -40,6 +91,10 @@ pub fn run() {
             if let Err(e) = config_manager::migrate_legacy_electron_config(&handle) {
                 tracing::warn!("Failed to migrate legacy config: {}", e);
             }
+
+            let startup_args: Vec<String> = std::env::args().collect();
+            let startup_intents = collect_txt_open_intents(&startup_args, None);
+            enqueue_open_intents(&handle, startup_intents, false);
 
             // Check for updates after 3-second delay (production only)
             std::thread::spawn(move || {

@@ -813,6 +813,44 @@ pub fn remove_note_from_index(
     Ok(Some(file_path))
 }
 
+pub fn normalize_external_txt_path(
+    raw_path: &str,
+    base_dir: Option<&Path>,
+) -> Result<PathBuf, String> {
+    let trimmed = raw_path.trim().trim_matches('"');
+    if trimmed.is_empty() {
+        return Err("File path is required.".to_string());
+    }
+
+    let candidate = PathBuf::from(trimmed);
+    let resolved = if candidate.is_absolute() {
+        candidate
+    } else if let Some(base) = base_dir {
+        base.join(candidate)
+    } else {
+        std::env::current_dir()
+            .map_err(|e| e.to_string())?
+            .join(candidate)
+    };
+
+    let normalized = fs::canonicalize(&resolved).map_err(|_| "Text file not found.".to_string())?;
+    let metadata = fs::metadata(&normalized).map_err(|e| e.to_string())?;
+
+    if !metadata.is_file() {
+        return Err("Only files can be opened.".to_string());
+    }
+
+    let ext = normalized
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+    if !ext.eq_ignore_ascii_case("txt") {
+        return Err("Only .txt files are supported.".to_string());
+    }
+
+    Ok(normalized)
+}
+
 pub fn read_text_file(file_path: &Path) -> Result<String, String> {
     fs::read_to_string(file_path).map_err(|e| e.to_string())
 }

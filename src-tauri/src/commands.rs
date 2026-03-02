@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use serde::Serialize;
@@ -17,6 +17,17 @@ impl Default for PendingUpdate {
         PendingUpdate(Mutex::new(None))
     }
 }
+
+
+pub struct PendingOpenIntents(pub Mutex<Vec<String>>);
+
+impl Default for PendingOpenIntents {
+    fn default() -> Self {
+        PendingOpenIntents(Mutex::new(Vec::new()))
+    }
+}
+
+pub const OPEN_INTENT_EVENT: &str = "note:open-intent";
 
 // ── Response types ──
 
@@ -161,6 +172,40 @@ pub fn cmd_note_import_txt(window: WebviewWindow) -> Result<Option<Vec<ImportedF
     }
 
     Ok(Some(imported))
+}
+
+#[tauri::command]
+pub fn cmd_note_read_external_txt(file_path: String) -> Result<ImportedFile, String> {
+    let normalized = file_manager::normalize_external_txt_path(&file_path, None)?;
+    let content = file_manager::read_text_file(&normalized)?;
+    let title = file_manager::title_from_filename(&normalized);
+
+    Ok(ImportedFile {
+        title,
+        content,
+        file_path: normalized.to_string_lossy().to_string(),
+    })
+}
+
+#[tauri::command]
+pub fn cmd_note_drain_open_intents(state: tauri::State<PendingOpenIntents>) -> Vec<String> {
+    let mut queue = state.0.lock().unwrap();
+    std::mem::take(&mut *queue)
+}
+
+pub fn enqueue_open_intent(state: &PendingOpenIntents, file_path: &Path) -> bool {
+    let normalized = file_path.to_string_lossy().to_string();
+    let mut queue = state.0.lock().unwrap();
+
+    if queue
+        .iter()
+        .any(|existing| existing.eq_ignore_ascii_case(&normalized))
+    {
+        return false;
+    }
+
+    queue.push(normalized);
+    true
 }
 
 #[tauri::command]

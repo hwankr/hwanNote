@@ -69,6 +69,21 @@ function normalizeFolderPath(path: string) {
   return segments.join("/");
 }
 
+function normalizeIntentPathKey(filePath: string) {
+  return filePath.trim().replace(/\\/g, "/").toLowerCase();
+}
+
+function textToParagraphHtml(content: string) {
+  const escapeHtml = (text: string) =>
+    text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+  return content
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => (line ? `<p>${escapeHtml(line)}</p>` : "<p><br></p>"))
+    .join("");
+}
+
 function htmlToMarkdownWithBlocks(contentHtml: string) {
   const parser = new DOMParser();
   const document = parser.parseFromString(contentHtml, "text/html");
@@ -350,6 +365,9 @@ export default function App() {
     startRatio: number;
     workspaceWidth: number;
   } | null>(null);
+  const openIntentBufferRef = useRef<string[]>([]);
+  const inFlightIntentKeysRef = useRef<Set<string>>(new Set());
+  const hydrationCompleteRef = useRef(false);
 
   const tabById = useMemo(() => {
     const map = new Map<string, NoteTab>();
@@ -568,6 +586,81 @@ export default function App() {
     [hydrateTabs, mapLoadedNoteToTab]
   );
 
+  const findExistingTxtTabIdByPath = useCallback((filePath: string) => {
+    const targetKey = normalizeIntentPathKey(filePath);
+    if (!targetKey) {
+      return null;
+    }
+
+    const state = useNoteStore.getState();
+    for (const noteId of state.noteIds) {
+      const sourcePath = state.notesById[noteId]?.sourceFilePath;
+      if (!sourcePath) {
+        continue;
+      }
+
+      if (normalizeIntentPathKey(sourcePath) === targetKey) {
+        return noteId;
+      }
+    }
+
+    return null;
+  }, []);
+
+  const ingestImportedTextFile = useCallback((title: string, content: string, filePath: string) => {
+    const html = textToParagraphHtml(content);
+    addImportedTab(title, html || "<p></p>", content.replace(/\r?\n/g, "\n"), filePath);
+  }, [addImportedTab]);
+
+  const ingestExternalTxtIntent = useCallback(async (filePath: string) => {
+    const noteApi = hwanNote.note;
+    if (!noteApi?.readExternalTxt) {
+      return;
+    }
+
+    const existingTabId = findExistingTxtTabIdByPath(filePath);
+    if (existingTabId) {
+      openNote(existingTabId);
+      return;
+    }
+
+    const dedupeKey = normalizeIntentPathKey(filePath);
+    if (!dedupeKey || inFlightIntentKeysRef.current.has(dedupeKey)) {
+      return;
+    }
+
+    inFlightIntentKeysRef.current.add(dedupeKey);
+
+    try {
+      const imported = await noteApi.readExternalTxt(filePath);
+      const existingAfterRead = findExistingTxtTabIdByPath(imported.filePath);
+      if (existingAfterRead) {
+        openNote(existingAfterRead);
+        return;
+      }
+
+      ingestImportedTextFile(imported.title, imported.content, imported.filePath);
+    } catch (error) {
+      console.error("Failed to open external .txt file:", error);
+    } finally {
+      inFlightIntentKeysRef.current.delete(dedupeKey);
+    }
+  }, [findExistingTxtTabIdByPath, ingestImportedTextFile, openNote]);
+
+  const ingestExternalTxtIntents = useCallback(async (filePaths: string[]) => {
+    const merged = new Set<string>();
+
+    for (const filePath of filePaths) {
+      const key = normalizeIntentPathKey(filePath);
+      if (!key || merged.has(key)) {
+        continue;
+      }
+
+      merged.add(key);
+      await ingestExternalTxtIntent(filePath);
+    }
+  }, [ingestExternalTxtIntent]);
+
   useEffect(() => {
     const savedThemeMode = window.localStorage.getItem(THEME_MODE_KEY);
     if (savedThemeMode === "light" || savedThemeMode === "dark" || savedThemeMode === "system") {
@@ -716,6 +809,19 @@ export default function App() {
 
     let disposed = false;
 
+    const stopListening = noteApi.onOpenIntent?.((filePath) => {
+      if (!filePath) {
+        return;
+      }
+
+      if (hydrationCompleteRef.current) {
+        void ingestExternalTxtIntent(filePath);
+        return;
+      }
+
+      openIntentBufferRef.current.push(filePath);
+    });
+
     const run = async () => {
       try {
         const loaded = await noteApi.loadAll();
@@ -724,6 +830,20 @@ export default function App() {
         }
 
         hydrateLoadedNotes(loaded);
+
+        const pendingFromBackend = noteApi.drainOpenIntents
+          ? await noteApi.drainOpenIntents()
+          : [];
+
+        if (disposed) {
+          return;
+        }
+
+        const buffered = openIntentBufferRef.current;
+        openIntentBufferRef.current = [];
+        hydrationCompleteRef.current = true;
+
+        await ingestExternalTxtIntents([...buffered, ...pendingFromBackend]);
       } catch (error) {
         console.error("Failed to load notes from file system:", error);
       }
@@ -733,8 +853,9 @@ export default function App() {
 
     return () => {
       disposed = true;
+      stopListening?.();
     };
-  }, [hydrateLoadedNotes]);
+  }, [hydrateLoadedNotes, ingestExternalTxtIntent, ingestExternalTxtIntents]);
 
   useEffect(() => {
     if (selectedFolder && !folderPaths.includes(selectedFolder)) {
@@ -897,18 +1018,9 @@ export default function App() {
     if (!imported || imported.length === 0) return;
 
     for (const { title, content, filePath } of imported) {
-      const escapeHtml = (text: string) =>
-        text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-
-      const html = content
-        .replace(/\r\n/g, "\n")
-        .split("\n")
-        .map((line) => (line ? `<p>${escapeHtml(line)}</p>` : "<p><br></p>"))
-        .join("");
-
-      addImportedTab(title, html || "<p></p>", content.replace(/\r?\n/g, "\n"), filePath);
+      ingestImportedTextFile(title, content, filePath);
     }
-  }, [addImportedTab]);
+  }, [ingestImportedTextFile]);
 
   const handleManualSave = useCallback(async () => {
     if (!focusedTab) {
