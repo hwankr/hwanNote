@@ -9,6 +9,7 @@ import TableRow from "@tiptap/extension-table-row";
 import { TaskItemExtended } from "../extensions/taskItemExtended";
 import TaskList from "@tiptap/extension-task-list";
 import Italic from "@tiptap/extension-italic";
+import History from "@tiptap/extension-history";
 import StarterKit from "@tiptap/starter-kit";
 import { getMarkRange } from "@tiptap/core";
 import { Editor as TiptapEditor, EditorContent, useEditor } from "@tiptap/react";
@@ -59,6 +60,22 @@ const ItalicWithoutShortcut = Italic.extend({
   addKeyboardShortcuts() {
     return {};
   }
+});
+
+const HistoryWithInputRuleUndo = History.extend({
+  addKeyboardShortcuts() {
+    return {
+      "Mod-z": () =>
+        this.editor.commands.undoInputRule() ||
+        this.editor.commands.undo(),
+      "Shift-Mod-z": () => this.editor.commands.redo(),
+      "Mod-y": () => this.editor.commands.redo(),
+      "Mod-\u044f": () =>
+        this.editor.commands.undoInputRule() ||
+        this.editor.commands.undo(),
+      "Shift-Mod-\u044f": () => this.editor.commands.redo(),
+    };
+  },
 });
 
 interface LinkBubbleState {
@@ -114,8 +131,10 @@ export default function Editor({
         heading: {
           levels: [1, 2, 3]
         },
-        italic: false
+        italic: false,
+        history: false
       }),
+      HistoryWithInputRuleUndo,
       BoldWithoutShortcut,
       ItalicWithoutShortcut,
       TaskList,
