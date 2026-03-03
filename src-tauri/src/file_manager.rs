@@ -862,6 +862,55 @@ pub fn save_text_file(file_path: &Path, content: &str) -> Result<(), String> {
     fs::write(file_path, to_windows_crlf(content)).map_err(|e| e.to_string())
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationResult {
+    pub files_copied: u32,
+    pub index_copied: bool,
+}
+
+/// Copy all .md files and the index from src_dir to dst_dir.
+/// Preserves relative directory structure. Does NOT delete originals.
+pub fn migrate_notes(src_dir: &Path, dst_dir: &Path) -> Result<MigrationResult, String> {
+    fs::create_dir_all(dst_dir).map_err(|e| format!("Failed to create destination: {}", e))?;
+
+    let md_files = walk_markdown_files(src_dir, src_dir);
+    let mut files_copied: u32 = 0;
+
+    for src_file in &md_files {
+        let rel = match src_file.strip_prefix(src_dir) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let dst_file = dst_dir.join(rel);
+
+        if let Some(parent) = dst_file.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create directory {:?}: {}", parent, e))?;
+        }
+
+        fs::copy(src_file, &dst_file)
+            .map_err(|e| format!("Failed to copy {:?}: {}", src_file, e))?;
+        files_copied += 1;
+    }
+
+    // Copy index file if it exists
+    let src_index = src_dir.join(INDEX_FILENAME);
+    let index_copied = if src_index.exists() {
+        let dst_index = dst_dir.join(INDEX_FILENAME);
+        fs::copy(&src_index, &dst_index)
+            .map_err(|e| format!("Failed to copy index: {}", e))?;
+        true
+    } else {
+        false
+    };
+
+    Ok(MigrationResult {
+        files_copied,
+        index_copied,
+    })
+}
+
 pub fn title_from_filename(file_path: &Path) -> String {
     let stem = file_path
         .file_stem()

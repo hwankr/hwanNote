@@ -9,6 +9,8 @@ use tauri::{AppHandle, Manager};
 struct AppConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     auto_save_dir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cloud_sync_provider: Option<String>,
 }
 
 fn get_config_path(app: &AppHandle) -> PathBuf {
@@ -41,6 +43,11 @@ pub fn get_custom_auto_save_dir(app: &AppHandle) -> Option<String> {
     if dir.is_empty() {
         return None;
     }
+    // When cloud_sync_provider is set, bypass exists() check
+    // to preserve config even if cloud folder is temporarily unavailable
+    if config.cloud_sync_provider.as_ref().is_some_and(|p| !p.is_empty()) {
+        return Some(dir);
+    }
     if Path::new(&dir).exists() {
         Some(dir)
     } else {
@@ -49,12 +56,16 @@ pub fn get_custom_auto_save_dir(app: &AppHandle) -> Option<String> {
 }
 
 pub fn set_custom_auto_save_dir(app: &AppHandle, dir: Option<&str>) -> Result<(), String> {
+    let config = read_config(app);
+    let has_cloud_provider = config.cloud_sync_provider.as_ref().is_some_and(|p| !p.is_empty());
+
     if let Some(d) = dir {
         let path = Path::new(d);
         if !path.is_absolute() {
             return Err("Path must be absolute".to_string());
         }
-        if !path.exists() {
+        // Skip exists() check when cloud provider is set (folder may not exist yet)
+        if !has_cloud_provider && !path.exists() {
             return Err("Directory does not exist".to_string());
         }
     }
@@ -63,11 +74,107 @@ pub fn set_custom_auto_save_dir(app: &AppHandle, dir: Option<&str>) -> Result<()
     write_config(app, &config)
 }
 
+pub fn get_cloud_sync_provider(app: &AppHandle) -> Option<String> {
+    let config = read_config(app);
+    config.cloud_sync_provider.filter(|p| !p.is_empty())
+}
+
+pub fn set_cloud_sync_provider(app: &AppHandle, provider: Option<&str>) -> Result<(), String> {
+    let mut config = read_config(app);
+    config.cloud_sync_provider = provider.map(String::from);
+    write_config(app, &config)
+}
+
 pub fn get_effective_auto_save_dir(app: &AppHandle, default_dir: &Path) -> PathBuf {
     match get_custom_auto_save_dir(app) {
         Some(custom) => PathBuf::from(custom),
         None => default_dir.to_path_buf(),
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudProviderInfo {
+    pub id: String,
+    pub name: String,
+    pub available: bool,
+    pub sync_folder: Option<String>,
+}
+
+fn detect_onedrive() -> Option<String> {
+    // 1st: %OneDrive% environment variable
+    if let Ok(path) = std::env::var("OneDrive") {
+        if !path.is_empty() && Path::new(&path).exists() {
+            return Some(path);
+        }
+    }
+    // 2nd: %OneDriveConsumer% environment variable
+    if let Ok(path) = std::env::var("OneDriveConsumer") {
+        if !path.is_empty() && Path::new(&path).exists() {
+            return Some(path);
+        }
+    }
+    // 3rd: Default path ~/OneDrive
+    if let Some(home) = dirs::home_dir() {
+        let default = home.join("OneDrive");
+        if default.exists() {
+            return Some(default.to_string_lossy().to_string());
+        }
+    }
+    None
+}
+
+fn detect_google_drive() -> Option<String> {
+    if let Some(home) = dirs::home_dir() {
+        // Legacy "Backup and Sync": ~/Google Drive/My Drive
+        let my_drive = home.join("Google Drive").join("My Drive");
+        if my_drive.exists() {
+            return Some(my_drive.to_string_lossy().to_string());
+        }
+        let default = home.join("Google Drive");
+        if default.exists() {
+            return Some(default.to_string_lossy().to_string());
+        }
+    }
+
+    // Modern "Google Drive Desktop" (DriveFS): virtual drive letter (e.g. G:\내 드라이브)
+    // Only scan drive letters when DriveFS installation is confirmed
+    if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+        let drivefs = Path::new(&local_app_data).join("Google").join("DriveFS");
+        if drivefs.exists() {
+            for letter in b'D'..=b'Z' {
+                let root = format!("{}:\\", letter as char);
+                for subfolder in &["My Drive", "내 드라이브"] {
+                    let candidate = PathBuf::from(&root).join(subfolder);
+                    if candidate.exists() {
+                        return Some(candidate.to_string_lossy().to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+pub fn detect_cloud_providers() -> Vec<CloudProviderInfo> {
+    let onedrive = detect_onedrive();
+    let google_drive = detect_google_drive();
+
+    vec![
+        CloudProviderInfo {
+            id: "onedrive".to_string(),
+            name: "OneDrive".to_string(),
+            available: onedrive.is_some(),
+            sync_folder: onedrive,
+        },
+        CloudProviderInfo {
+            id: "google_drive".to_string(),
+            name: "Google Drive".to_string(),
+            available: google_drive.is_some(),
+            sync_folder: google_drive,
+        },
+    ]
 }
 
 /// One-time migration: copy legacy Electron config to Tauri config directory.

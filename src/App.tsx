@@ -1,6 +1,6 @@
 ﻿import { Editor as TiptapEditor } from "@tiptap/react";
 import { type PointerEvent as ReactPointerEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { hwanNote, type LoadedNote } from "./lib/tauriApi";
+import { hwanNote, type CloudProviderInfo, type LoadedNote } from "./lib/tauriApi";
 import Editor, { restoreEditorFocus } from "./components/Editor";
 import SettingsPanel, { type ThemeMode } from "./components/SettingsPanel";
 import Sidebar, { type SidebarTag } from "./components/Sidebar";
@@ -467,6 +467,8 @@ export default function App() {
   const [autoSaveDirIsDefault, setAutoSaveDirIsDefault] = useState(true);
   const [shortcuts, setShortcuts] = useState<ShortcutMap>(() => createDefaultShortcuts());
   const [tabSize, setTabSize] = useState(DEFAULT_TAB_SIZE);
+  const [cloudSyncProvider, setCloudSyncProvider] = useState<string | null>(null);
+  const [cloudProviders, setCloudProviders] = useState<CloudProviderInfo[]>([]);
 
   const noteTags = useMemo(() => {
     const map = new Map<string, string[]>();
@@ -1154,6 +1156,29 @@ export default function App() {
     }
   }, [handleManualSave, hydrateLoadedNotes]);
 
+  const handleCloudSyncChange = useCallback(async (provider: string | null) => {
+    await handleManualSave();
+    try {
+      if (provider) {
+        const result = await hwanNote.cloud.enable(provider);
+        setCloudSyncProvider(result.provider);
+        setAutoSaveDir(result.effectiveDir);
+        setAutoSaveDirIsDefault(false);
+      } else {
+        const result = await hwanNote.cloud.disable();
+        setCloudSyncProvider(null);
+        setAutoSaveDir(result.effectiveDir);
+        setAutoSaveDirIsDefault(true);
+      }
+      const loaded = await hwanNote.note.loadAll();
+      hydrateLoadedNotes(loaded);
+      const providers = await hwanNote.cloud.detectProviders();
+      setCloudProviders(providers);
+    } catch (error) {
+      console.error("Failed to change cloud sync:", error);
+    }
+  }, [handleManualSave, hydrateLoadedNotes]);
+
   useAutoSave({
     value: focusedTab?.content ?? "",
     enabled: Boolean(focusedTab?.isDirty),
@@ -1174,6 +1199,24 @@ export default function App() {
       setAutoSaveDir("");
     });
   }, []);
+
+  useEffect(() => {
+    void hwanNote.cloud.status().then((s) => {
+      setCloudSyncProvider(s.provider);
+    }).catch(() => { /* ignore */ });
+    void hwanNote.cloud.detectProviders().then((providers) => {
+      setCloudProviders(providers);
+    }).catch(() => { /* ignore */ });
+  }, []);
+
+  useEffect(() => {
+    const unlisten = hwanNote.cloud.onFolderMissing((data) => {
+      window.alert(
+        `${t("settings.cloudSyncFolderMissing")}\n${t("settings.cloudSyncFolderMissingDetail", { path: data.expectedPath })}`
+      );
+    });
+    return () => unlisten();
+  }, [t]);
 
   useEffect(() => {
     const media = window.matchMedia("(prefers-color-scheme: dark)");
@@ -1627,6 +1670,7 @@ export default function App() {
           }
           toggleFileFormat(focusedTab.id);
         }}
+        cloudSyncProvider={cloudSyncProvider}
       />
 
       <SettingsPanel
@@ -1640,6 +1684,10 @@ export default function App() {
         autoSaveDirIsDefault={autoSaveDirIsDefault}
         onBrowseAutoSaveDir={() => void handleBrowseAutoSaveDir()}
         onResetAutoSaveDir={() => void handleResetAutoSaveDir()}
+        cloudSyncProvider={cloudSyncProvider}
+        cloudProviders={cloudProviders}
+        noteCount={allNotes.length}
+        onCloudSyncChange={handleCloudSyncChange}
         shortcuts={shortcuts}
         onThemeModeChange={setThemeMode}
         onEditorLineHeightChange={(value) => setEditorLineHeight(normalizeEditorLineHeight(value))}

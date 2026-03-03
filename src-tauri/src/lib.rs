@@ -83,6 +83,10 @@ pub fn run() {
             cmd_updater_download,
             cmd_updater_install,
             cmd_shell_open_external,
+            cmd_cloud_detect_providers,
+            cmd_cloud_sync_enable,
+            cmd_cloud_sync_disable,
+            cmd_cloud_sync_status,
         ])
         .setup(|app| {
             let handle = app.handle().clone();

@@ -8,10 +8,18 @@ interface StatusBarProps {
   zoomPercent: number;
   fileFormat: "md" | "txt";
   onToggleFileFormat: () => void;
+  cloudSyncProvider: string | null;
 }
 
-export default function StatusBar({ line, column, chars, themeLabel, zoomPercent, fileFormat, onToggleFileFormat }: StatusBarProps) {
+const PROVIDER_LABELS: Record<string, string> = {
+  onedrive: "OneDrive",
+  google_drive: "Google Drive",
+};
+
+export default function StatusBar({ line, column, chars, themeLabel, zoomPercent, fileFormat, onToggleFileFormat, cloudSyncProvider }: StatusBarProps) {
   const { t } = useI18n();
+
+  const cloudLabel = cloudSyncProvider ? PROVIDER_LABELS[cloudSyncProvider] ?? cloudSyncProvider : null;
 
   return (
     <footer className="statusbar">
@@ -26,7 +34,10 @@ export default function StatusBar({ line, column, chars, themeLabel, zoomPercent
           {fileFormat === "md" ? t("status.markdown") : t("status.plainText")}
         </button>
       </div>
-      <div className="statusbar-right">{t("status.rightInfo", { theme: themeLabel, zoom: zoomPercent })}</div>
+      <div className="statusbar-right">
+        {cloudLabel && <span className="statusbar-cloud">{cloudLabel} | </span>}
+        {t("status.rightInfo", { theme: themeLabel, zoom: zoomPercent })}
+      </div>
     </footer>
   );
 }

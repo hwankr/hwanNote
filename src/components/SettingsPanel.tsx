@@ -1,6 +1,7 @@
 import { type KeyboardEvent, useState } from "react";
 import { useI18n } from "../i18n/context";
 import type { AppLanguage } from "../i18n/messages";
+import type { CloudProviderInfo } from "../lib/tauriApi";
 import {
   SHORTCUT_DEFINITIONS,
   SHORTCUT_GROUPS,
@@ -25,6 +26,10 @@ interface SettingsPanelProps {
   autoSaveDirIsDefault: boolean;
   onBrowseAutoSaveDir: () => void;
   onResetAutoSaveDir: () => void;
+  cloudSyncProvider: string | null;
+  cloudProviders: CloudProviderInfo[];
+  noteCount: number;
+  onCloudSyncChange: (provider: string | null) => Promise<void>;
   shortcuts: ShortcutMap;
   onThemeModeChange: (mode: ThemeMode) => void;
   onEditorLineHeightChange: (value: number) => void;
@@ -47,6 +52,10 @@ export default function SettingsPanel({
   autoSaveDirIsDefault,
   onBrowseAutoSaveDir,
   onResetAutoSaveDir,
+  cloudSyncProvider,
+  cloudProviders,
+  noteCount,
+  onCloudSyncChange,
   shortcuts,
   onThemeModeChange,
   onEditorLineHeightChange,
@@ -225,7 +234,12 @@ export default function SettingsPanel({
               <div className="settings-readonly settings-autosave-path">
                 {autoSaveDir || t("settings.autoSaveLoading")}
               </div>
-              <button type="button" className="settings-autosave-btn" onClick={onBrowseAutoSaveDir}>
+              <button
+                type="button"
+                className="settings-autosave-btn"
+                onClick={onBrowseAutoSaveDir}
+                disabled={cloudSyncProvider != null}
+              >
                 {t("settings.autoSaveBrowse")}
               </button>
               {!autoSaveDirIsDefault && (
@@ -239,6 +253,54 @@ export default function SettingsPanel({
               )}
             </div>
             <div className="settings-subtext">{t("settings.autoSaveDirHelp")}</div>
+          </div>
+
+          <div className="settings-item">
+            <label htmlFor="cloud-sync">{t("settings.cloudSync")}</label>
+            <select
+              id="cloud-sync"
+              value={cloudSyncProvider ?? ""}
+              onChange={(event) => {
+                const value = event.target.value || null;
+                if (value === cloudSyncProvider) return;
+
+                if (value) {
+                  const provider = cloudProviders.find((p) => p.id === value);
+                  if (!provider?.available) return;
+                  const msg = t("settings.cloudSyncConfirmEnable", {
+                    count: noteCount,
+                    provider: provider.name,
+                  });
+                  if (!window.confirm(msg)) {
+                    event.target.value = cloudSyncProvider ?? "";
+                    return;
+                  }
+                  void onCloudSyncChange(value);
+                } else {
+                  if (!window.confirm(t("settings.cloudSyncConfirmDisable"))) {
+                    event.target.value = cloudSyncProvider ?? "";
+                    return;
+                  }
+                  void onCloudSyncChange(null);
+                }
+              }}
+            >
+              <option value="">{t("settings.cloudSyncOff")}</option>
+              {cloudProviders.map((provider) => (
+                <option key={provider.id} value={provider.id} disabled={!provider.available}>
+                  {provider.available ? provider.name : t("settings.cloudSyncNotInstalled", { provider: provider.name })}
+                </option>
+              ))}
+            </select>
+            {cloudSyncProvider && (() => {
+              const active = cloudProviders.find((p) => p.id === cloudSyncProvider);
+              return active?.syncFolder ? (
+                <div className="settings-subtext">
+                  {t("settings.cloudSyncFolder", { path: `${active.syncFolder}/HwanNote/Notes` })}
+                </div>
+              ) : null;
+            })()}
+            <div className="settings-subtext">{t("settings.cloudSyncHelp")}</div>
           </div>
 
           <div className="settings-item">

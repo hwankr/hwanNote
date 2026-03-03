@@ -41,6 +41,30 @@ interface UpdateStatusData {
   error?: string;
 }
 
+export interface CloudProviderInfo {
+  id: string;
+  name: string;
+  available: boolean;
+  syncFolder: string | null;
+}
+
+export interface CloudSyncResult {
+  provider: string | null;
+  effectiveDir: string;
+  filesCopied: number;
+}
+
+export interface CloudSyncStatus {
+  enabled: boolean;
+  provider: string | null;
+  syncFolder: string | null;
+}
+
+export interface CloudFolderMissingData {
+  expectedPath: string;
+  fallbackPath: string;
+}
+
 // -- IPC abstraction layer --
 // Replaces window.hwanNote and window.hwanShell with Tauri invoke() calls.
 
@@ -141,6 +165,23 @@ export const hwanNote = {
 
     getAutoSaveDir: () =>
       invoke<AutoSaveDirInfo>("cmd_settings_get_autosave_dir"),
+  },
+
+  cloud: {
+    detectProviders: () =>
+      invoke<CloudProviderInfo[]>("cmd_cloud_detect_providers"),
+
+    enable: (provider: string) =>
+      invoke<CloudSyncResult>("cmd_cloud_sync_enable", { provider }),
+
+    disable: () =>
+      invoke<CloudSyncResult>("cmd_cloud_sync_disable"),
+
+    status: () =>
+      invoke<CloudSyncStatus>("cmd_cloud_sync_status"),
+
+    onFolderMissing: (callback: (data: CloudFolderMissingData) => void): (() => void) =>
+      wrapListener<CloudFolderMissingData>("cloud:folder-missing", callback),
   },
 };
 

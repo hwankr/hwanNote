@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -59,12 +60,55 @@ struct UpdateStatusPayload {
     error: Option<String>,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudSyncResult {
+    provider: Option<String>,
+    effective_dir: String,
+    files_copied: u32,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudSyncStatus {
+    enabled: bool,
+    provider: Option<String>,
+    sync_folder: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CloudFolderMissingPayload {
+    expected_path: String,
+    fallback_path: String,
+}
+
 // ── Helpers ──
 
 fn resolve_effective_dir(app: &AppHandle) -> PathBuf {
     let documents = dirs::document_dir().unwrap_or_else(|| PathBuf::from("."));
     let default_dir = file_manager::get_auto_save_dir(&documents);
-    config_manager::get_effective_auto_save_dir(app, &default_dir)
+    let effective = config_manager::get_effective_auto_save_dir(app, &default_dir);
+
+    // Detect cloud folder missing at runtime
+    if config_manager::get_cloud_sync_provider(app).is_some() && !effective.exists() {
+        tracing::warn!(
+            "Cloud sync folder missing: {:?}, falling back to local: {:?}",
+            effective, default_dir
+        );
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.emit(
+                "cloud:folder-missing",
+                CloudFolderMissingPayload {
+                    expected_path: effective.to_string_lossy().to_string(),
+                    fallback_path: default_dir.to_string_lossy().to_string(),
+                },
+            );
+        }
+        return default_dir;
+    }
+
+    effective
 }
 
 // ── Window commands ──
@@ -458,4 +502,116 @@ pub fn cmd_shell_open_external(app: AppHandle, url: String) -> Result<(), String
     app.opener()
         .open_url(&url, None::<&str>)
         .map_err(|e| e.to_string())
+}
+
+// ── Cloud sync commands ──
+
+#[tauri::command]
+pub fn cmd_cloud_detect_providers() -> Vec<config_manager::CloudProviderInfo> {
+    config_manager::detect_cloud_providers()
+}
+
+#[tauri::command]
+pub async fn cmd_cloud_sync_enable(
+    app: AppHandle,
+    provider: String,
+) -> Result<CloudSyncResult, String> {
+    let providers = config_manager::detect_cloud_providers();
+    let info = providers
+        .iter()
+        .find(|p| p.id == provider)
+        .ok_or_else(|| format!("Unknown provider: {}", provider))?;
+
+    if !info.available {
+        return Err(format!("{} is not available", info.name));
+    }
+
+    let sync_folder = info
+        .sync_folder
+        .as_ref()
+        .ok_or("Sync folder not detected")?;
+
+    let cloud_notes_dir = PathBuf::from(sync_folder)
+        .join("HwanNote")
+        .join("Notes");
+
+    // Create the cloud notes directory
+    fs::create_dir_all(&cloud_notes_dir)
+        .map_err(|e| format!("Failed to create cloud directory: {}", e))?;
+
+    // Migrate notes from current effective dir to cloud dir
+    let src = resolve_effective_dir(&app);
+    let dst = cloud_notes_dir.clone();
+
+    let migration_result = tauri::async_runtime::spawn_blocking(move || {
+        file_manager::migrate_notes(&src, &dst)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    // Update config: set cloud provider first (so exists() check is bypassed)
+    config_manager::set_cloud_sync_provider(&app, Some(&provider))?;
+    config_manager::set_custom_auto_save_dir(&app, Some(&cloud_notes_dir.to_string_lossy()))?;
+
+    let effective_dir = cloud_notes_dir.to_string_lossy().to_string();
+
+    Ok(CloudSyncResult {
+        provider: Some(provider),
+        effective_dir,
+        files_copied: migration_result.files_copied,
+    })
+}
+
+#[tauri::command]
+pub async fn cmd_cloud_sync_disable(app: AppHandle) -> Result<CloudSyncResult, String> {
+    let documents = dirs::document_dir().unwrap_or_else(|| PathBuf::from("."));
+    let default_dir = file_manager::get_auto_save_dir(&documents);
+
+    // Ensure default dir exists
+    fs::create_dir_all(&default_dir)
+        .map_err(|e| format!("Failed to create local directory: {}", e))?;
+
+    // Migrate notes from cloud dir back to local
+    let src = resolve_effective_dir(&app);
+    let dst = default_dir.clone();
+
+    let migration_result = tauri::async_runtime::spawn_blocking(move || {
+        file_manager::migrate_notes(&src, &dst)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    // Reset config
+    config_manager::set_cloud_sync_provider(&app, None)?;
+    config_manager::set_custom_auto_save_dir(&app, None)?;
+
+    let effective_dir = default_dir.to_string_lossy().to_string();
+
+    Ok(CloudSyncResult {
+        provider: None,
+        effective_dir,
+        files_copied: migration_result.files_copied,
+    })
+}
+
+#[tauri::command]
+pub fn cmd_cloud_sync_status(app: AppHandle) -> CloudSyncStatus {
+    let provider = config_manager::get_cloud_sync_provider(&app);
+    let enabled = provider.is_some();
+
+    let sync_folder = if enabled {
+        let providers = config_manager::detect_cloud_providers();
+        providers
+            .into_iter()
+            .find(|p| Some(&p.id) == provider.as_ref())
+            .and_then(|p| p.sync_folder)
+    } else {
+        None
+    };
+
+    CloudSyncStatus {
+        enabled,
+        provider,
+        sync_folder,
+    }
 }
