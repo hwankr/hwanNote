@@ -15,6 +15,7 @@
     "build": "tauri build",
     "build:frontend": "vite build",
     "preview": "vite preview",
+    "setup:linux": "bash ./scripts/setup-linux-dev.sh",
     "typecheck": "tsc --noEmit",
     "tauri": "tauri"
   },

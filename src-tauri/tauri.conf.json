@@ -26,12 +26,9 @@
   },
   "bundle": {
     "active": true,
-    "targets": [
-      "nsis"
-    ],
     "createUpdaterArtifacts": true,
     "icon": [
-      "../resources/icon.ico"
+      "../resources/icon.png"
     ],
     "fileAssociations": [
       {
@@ -48,12 +45,7 @@
         "mimeType": "text/plain",
         "description": "Text Document"
       }
-    ],
-    "windows": {
-      "nsis": {
-        "installMode": "currentUser"
-      }
-    }
+    ]
   },
   "plugins": {
     "updater": {
