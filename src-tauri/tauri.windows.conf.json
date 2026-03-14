@@ -8,7 +8,11 @@
     ],
     "windows": {
       "nsis": {
-        "installMode": "currentUser"
+        "installMode": "currentUser",
+        "languages": [
+          "English",
+          "Korean"
+        ]
       }
     }
   }
