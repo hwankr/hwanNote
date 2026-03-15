@@ -134,6 +134,11 @@ pub fn cmd_window_close(window: WebviewWindow) {
     let _ = window.close();
 }
 
+#[tauri::command]
+pub fn cmd_app_exit(app: AppHandle) {
+    app.exit(0);
+}
+
 // ── Note commands ──
 
 #[tauri::command]

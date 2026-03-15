@@ -59,7 +59,6 @@ interface TitleBarProps {
   onToggleSidebar: () => void;
   onSelectTab: (id: string) => void;
   onCloseTab: (id: string) => void;
-  onSaveAsAndCloseTab: (id: string) => void;
   onCloseOtherTabs: (id: string) => void;
   onTogglePinTab: (id: string) => void;
   onReorderTabs: (sourceId: string, targetId: string) => void;
@@ -79,7 +78,6 @@ export default function TitleBar({
   onToggleSidebar,
   onSelectTab,
   onCloseTab,
-  onSaveAsAndCloseTab,
   onCloseOtherTabs,
   onTogglePinTab,
   onReorderTabs,
@@ -105,7 +103,6 @@ export default function TitleBar({
     offsetY: number;
   } | null>(null);
   const [menu, setMenu] = useState<{ tabId: string; x: number; y: number } | null>(null);
-  const [dirtyCloseMenu, setDirtyCloseMenu] = useState<{ tabId: string; x: number; y: number } | null>(null);
   const tabsRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<{ tabId: string; startX: number; startY: number; active: boolean } | null>(null);
   const dragOverIdRef = useRef<string | null>(null);
@@ -292,7 +289,6 @@ export default function TitleBar({
               }}
               onContextMenu={(event) => {
                 event.preventDefault();
-                setDirtyCloseMenu(null);
                 setMenu({ tabId: tab.id, x: event.clientX, y: event.clientY });
               }}
               onPointerDown={(event) => {
@@ -326,10 +322,6 @@ export default function TitleBar({
                 onClick={(event) => {
                   event.stopPropagation();
                   setMenu(null);
-                  if (tab.isDirty) {
-                    setDirtyCloseMenu({ tabId: tab.id, x: event.clientX, y: event.clientY });
-                    return;
-                  }
                   onCloseTab(tab.id);
                 }}
               >
@@ -393,39 +385,6 @@ export default function TitleBar({
           y={menu.y}
           items={menuItems}
           onClose={() => setMenu(null)}
-          className="no-drag"
-        />
-      ) : null}
-      {dirtyCloseMenu ? (
-        <ContextMenu
-          x={dirtyCloseMenu.x}
-          y={dirtyCloseMenu.y}
-          items={[
-            {
-              key: "saveAsAndClose",
-              label: t("titlebar.closeDirty.saveAsClose"),
-              onClick: () => {
-                onSaveAsAndCloseTab(dirtyCloseMenu.tabId);
-                setDirtyCloseMenu(null);
-              }
-            },
-            {
-              key: "temporaryClose",
-              label: t("titlebar.closeDirty.temporaryClose"),
-              onClick: () => {
-                onCloseTab(dirtyCloseMenu.tabId);
-                setDirtyCloseMenu(null);
-              }
-            },
-            {
-              key: "cancel",
-              label: t("titlebar.closeDirty.cancel"),
-              onClick: () => {
-                setDirtyCloseMenu(null);
-              }
-            }
-          ]}
-          onClose={() => setDirtyCloseMenu(null)}
           className="no-drag"
         />
       ) : null}

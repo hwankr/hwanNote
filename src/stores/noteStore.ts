@@ -3,6 +3,20 @@ import { create } from "zustand";
 export const OPEN_TAB_IDS_KEY = "hwan-note:open-tab-ids";
 export const ACTIVE_TAB_ID_KEY = "hwan-note:active-tab-id";
 
+export type NotePersistence = "transient" | "library" | "external";
+
+export interface SavedNoteSnapshot {
+  title: string;
+  isTitleManual: boolean;
+  content: string;
+  plainText: string;
+  folderPath: string;
+  fileFormat: "md" | "txt";
+  sourceFilePath?: string;
+  updatedAt: number;
+  lastSavedAt: number;
+}
+
 export interface NoteTab {
   id: string;
   title: string;
@@ -17,12 +31,22 @@ export interface NoteTab {
   lastSavedAt: number;
   sourceFilePath?: string;
   fileFormat: "md" | "txt";
+  persistence: NotePersistence;
+  savedSnapshot: SavedNoteSnapshot | null;
 }
 
 export interface PersistedTabSession {
   openTabIds: string[];
   activeTabId: string | null;
 }
+
+export interface SaveTabOptions {
+  lastSavedAt?: number;
+  persistence?: NotePersistence;
+  sourceFilePath?: string;
+}
+
+export type DiscardTabResult = "none" | "reverted" | "removed";
 
 interface NoteStore {
   notesById: Record<string, NoteTab>;
@@ -52,7 +76,8 @@ interface NoteStore {
   setActiveTitle: (title: string) => void;
   updateTabContent: (id: string, content: string, plainText: string) => void;
   updateActiveContent: (content: string, plainText: string) => void;
-  markTabSaved: (id: string) => void;
+  markTabSaved: (id: string, options?: SaveTabOptions) => void;
+  discardTabChanges: (id: string) => DiscardTabResult;
   toggleFileFormat: (id: string) => void;
   toggleSidebar: () => void;
 }
@@ -75,6 +100,23 @@ function deriveTitle(plainText: string) {
   return stripped.slice(0, 50) || "제목 없음";
 }
 
+function createSavedSnapshot(tab: Pick<
+  NoteTab,
+  "title" | "isTitleManual" | "content" | "plainText" | "folderPath" | "fileFormat" | "sourceFilePath" | "updatedAt" | "lastSavedAt"
+>): SavedNoteSnapshot {
+  return {
+    title: tab.title,
+    isTitleManual: tab.isTitleManual,
+    content: tab.content,
+    plainText: tab.plainText,
+    folderPath: tab.folderPath,
+    fileFormat: tab.fileFormat,
+    sourceFilePath: tab.sourceFilePath,
+    updatedAt: tab.updatedAt,
+    lastSavedAt: tab.lastSavedAt
+  };
+}
+
 function createEmptyTab(): NoteTab {
   const now = Date.now();
 
@@ -90,7 +132,9 @@ function createEmptyTab(): NoteTab {
     createdAt: now,
     updatedAt: now,
     lastSavedAt: 0,
-    fileFormat: "md"
+    fileFormat: "md",
+    persistence: "transient",
+    savedSnapshot: null
   };
 }
 
@@ -104,13 +148,17 @@ function buildCollections(
   openTabIds: string[],
   activeTabId: string | null
 ) {
+  const normalizedNoteIds = dedupeIds(
+    noteIds.filter((id) => Boolean(notesById[id]) && notesById[id].persistence === "library")
+  );
   const normalizedOpenTabIds = dedupeIds(openTabIds.filter((id) => Boolean(notesById[id])));
   const normalizedActiveTabId =
     activeTabId && normalizedOpenTabIds.includes(activeTabId) ? activeTabId : (normalizedOpenTabIds[0] ?? null);
-  const allNotes = noteIds.map((id) => notesById[id]).filter(Boolean);
+  const allNotes = normalizedNoteIds.map((id) => notesById[id]).filter(Boolean);
   const openTabs = normalizedOpenTabIds.map((id) => notesById[id]).filter(Boolean);
 
   return {
+    noteIds: normalizedNoteIds,
     openTabIds: normalizedOpenTabIds,
     activeTabId: normalizedActiveTabId,
     allNotes,
@@ -166,16 +214,54 @@ export function readTabSessionFromStorage(): PersistedTabSession {
   return { openTabIds, activeTabId };
 }
 
+function buildStateSlice(
+  notesById: Record<string, NoteTab>,
+  noteIds: string[],
+  openTabIds: string[],
+  activeTabId: string | null
+) {
+  const nextNotesById = { ...notesById };
+  let nextNoteIds = noteIds.filter((id) => Boolean(nextNotesById[id]) && nextNotesById[id].persistence === "library");
+  let nextOpenTabIds = openTabIds.filter((id) => Boolean(nextNotesById[id]));
+  let nextActiveTabId = activeTabId;
+
+  if (nextOpenTabIds.length === 0) {
+    const fallbackOpenId = nextNoteIds[0] ?? null;
+    if (fallbackOpenId) {
+      nextOpenTabIds = [fallbackOpenId];
+      nextActiveTabId = fallbackOpenId;
+    } else {
+      const freshTab = createEmptyTab();
+      nextNotesById[freshTab.id] = freshTab;
+      nextOpenTabIds = [freshTab.id];
+      nextActiveTabId = freshTab.id;
+    }
+  }
+
+  const nextCollections = buildCollections(nextNotesById, nextNoteIds, nextOpenTabIds, nextActiveTabId);
+  persistSession(nextCollections.openTabIds, nextCollections.activeTabId);
+
+  return {
+    notesById: nextNotesById,
+    noteIds: nextCollections.noteIds,
+    openTabIds: nextCollections.openTabIds,
+    activeTabId: nextCollections.activeTabId,
+    allNotes: nextCollections.allNotes,
+    openTabs: nextCollections.openTabs,
+    activeOpenTab: nextCollections.activeOpenTab
+  };
+}
+
 export const useNoteStore = create<NoteStore>((set, get) => {
   const firstTab = createEmptyTab();
   const notesById: Record<string, NoteTab> = { [firstTab.id]: firstTab };
-  const noteIds = [firstTab.id];
+  const noteIds: string[] = [];
   const openTabIds = [firstTab.id];
   const baseCollections = buildCollections(notesById, noteIds, openTabIds, firstTab.id);
 
   return {
     notesById,
-    noteIds,
+    noteIds: baseCollections.noteIds,
     openTabIds: baseCollections.openTabIds,
     activeTabId: baseCollections.activeTabId,
     allNotes: baseCollections.allNotes,
@@ -189,51 +275,31 @@ export const useNoteStore = create<NoteStore>((set, get) => {
 
       loadedTabs.forEach((tab) => {
         nextNotesById[tab.id] = tab;
-        nextNoteIds.push(tab.id);
+        if (tab.persistence === "library") {
+          nextNoteIds.push(tab.id);
+        }
       });
 
       const session = persistedSession ?? readTabSessionFromStorage();
       let nextOpenTabIds = session.openTabIds.filter((id) => Boolean(nextNotesById[id]));
       if (nextOpenTabIds.length === 0) {
-        nextOpenTabIds = [nextNoteIds[0]];
+        const fallbackOpenId = nextNoteIds[0] ?? loadedTabs[0]?.id ?? null;
+        nextOpenTabIds = fallbackOpenId ? [fallbackOpenId] : [];
       }
 
       const nextActiveTabId =
         session.activeTabId && nextOpenTabIds.includes(session.activeTabId)
           ? session.activeTabId
-          : nextOpenTabIds[0];
+          : (nextOpenTabIds[0] ?? null);
 
-      const nextCollections = buildCollections(nextNotesById, nextNoteIds, nextOpenTabIds, nextActiveTabId);
-      persistSession(nextCollections.openTabIds, nextCollections.activeTabId);
-
-      set({
-        notesById: nextNotesById,
-        noteIds: nextNoteIds,
-        openTabIds: nextCollections.openTabIds,
-        activeTabId: nextCollections.activeTabId,
-        allNotes: nextCollections.allNotes,
-        openTabs: nextCollections.openTabs,
-        activeOpenTab: nextCollections.activeOpenTab
-      });
+      set(buildStateSlice(nextNotesById, nextNoteIds, nextOpenTabIds, nextActiveTabId));
     },
     createTab: () => {
       const tab = createEmptyTab();
       set((state) => {
         const nextNotesById = { ...state.notesById, [tab.id]: tab };
-        const nextNoteIds = [...state.noteIds, tab.id];
         const nextOpenTabIds = [...state.openTabIds, tab.id];
-        const nextCollections = buildCollections(nextNotesById, nextNoteIds, nextOpenTabIds, tab.id);
-        persistSession(nextCollections.openTabIds, nextCollections.activeTabId);
-
-        return {
-          notesById: nextNotesById,
-          noteIds: nextNoteIds,
-          openTabIds: nextCollections.openTabIds,
-          activeTabId: nextCollections.activeTabId,
-          allNotes: nextCollections.allNotes,
-          openTabs: nextCollections.openTabs,
-          activeOpenTab: nextCollections.activeOpenTab
-        };
+        return buildStateSlice(nextNotesById, state.noteIds, nextOpenTabIds, tab.id);
       });
     },
     addImportedTab: (title, content, plainText, sourceFilePath) => {
@@ -244,32 +310,26 @@ export const useNoteStore = create<NoteStore>((set, get) => {
         isTitleManual: true,
         content,
         plainText,
-        isDirty: true,
+        isDirty: false,
         isPinned: false,
         folderPath: "",
         createdAt: now,
         updatedAt: now,
         lastSavedAt: 0,
         sourceFilePath,
-        fileFormat: sourceFilePath ? ("txt" as const) : ("md" as const)
+        fileFormat: sourceFilePath ? "txt" : "md",
+        persistence: sourceFilePath ? "external" : "transient",
+        savedSnapshot: null
       };
+
+      if (tab.persistence === "external") {
+        tab.savedSnapshot = createSavedSnapshot(tab);
+      }
 
       set((state) => {
         const nextNotesById = { ...state.notesById, [tab.id]: tab };
-        const nextNoteIds = [...state.noteIds, tab.id];
         const nextOpenTabIds = [...state.openTabIds, tab.id];
-        const nextCollections = buildCollections(nextNotesById, nextNoteIds, nextOpenTabIds, tab.id);
-        persistSession(nextCollections.openTabIds, nextCollections.activeTabId);
-
-        return {
-          notesById: nextNotesById,
-          noteIds: nextNoteIds,
-          openTabIds: nextCollections.openTabIds,
-          activeTabId: nextCollections.activeTabId,
-          allNotes: nextCollections.allNotes,
-          openTabs: nextCollections.openTabs,
-          activeOpenTab: nextCollections.activeOpenTab
-        };
+        return buildStateSlice(nextNotesById, state.noteIds, nextOpenTabIds, tab.id);
       });
     },
     openNote: (id) => {
@@ -320,43 +380,22 @@ export const useNoteStore = create<NoteStore>((set, get) => {
           return state;
         }
 
-        let nextOpenTabIds = state.openTabIds.filter((openId) => openId !== id);
-        if (nextOpenTabIds.length === 0) {
-          if (state.noteIds.length === 0) {
-            const freshTab = createEmptyTab();
-            const nextNotesById = { [freshTab.id]: freshTab };
-            const nextNoteIds = [freshTab.id];
-            const freshCollections = buildCollections(nextNotesById, nextNoteIds, nextNoteIds, freshTab.id);
-            persistSession(freshCollections.openTabIds, freshCollections.activeTabId);
-
-            return {
-              notesById: nextNotesById,
-              noteIds: nextNoteIds,
-              openTabIds: freshCollections.openTabIds,
-              activeTabId: freshCollections.activeTabId,
-              allNotes: freshCollections.allNotes,
-              openTabs: freshCollections.openTabs,
-              activeOpenTab: freshCollections.activeOpenTab
-            };
-          }
-
-          const fallbackOpenId = state.noteIds.find((noteId) => noteId !== id) ?? state.noteIds[0];
-          nextOpenTabIds = [fallbackOpenId];
+        const target = state.notesById[id];
+        const nextNotesById = { ...state.notesById };
+        if (target?.persistence !== "library") {
+          delete nextNotesById[id];
         }
 
+        let nextOpenTabIds = state.openTabIds.filter((openId) => openId !== id);
+        if (nextOpenTabIds.length === 0 && target?.persistence === "library") {
+          const fallbackOpenId = state.noteIds.find((noteId) => noteId !== id && Boolean(nextNotesById[noteId])) ?? id;
+          nextOpenTabIds = fallbackOpenId ? [fallbackOpenId] : [];
+        }
         const fallbackIndex = Math.max(0, targetIndex - 1);
-        const nextActiveTabId =
-          state.activeTabId === id ? (nextOpenTabIds[fallbackIndex] ?? nextOpenTabIds[0]) : state.activeTabId;
-        const nextCollections = buildCollections(state.notesById, state.noteIds, nextOpenTabIds, nextActiveTabId);
-        persistSession(nextCollections.openTabIds, nextCollections.activeTabId);
+        const preferredActiveTabId =
+          state.activeTabId === id ? (nextOpenTabIds[fallbackIndex] ?? nextOpenTabIds[0] ?? null) : state.activeTabId;
 
-        return {
-          openTabIds: nextCollections.openTabIds,
-          activeTabId: nextCollections.activeTabId,
-          allNotes: nextCollections.allNotes,
-          openTabs: nextCollections.openTabs,
-          activeOpenTab: nextCollections.activeOpenTab
-        };
+        return buildStateSlice(nextNotesById, state.noteIds, nextOpenTabIds, preferredActiveTabId);
       });
     },
     closeOtherTabs: (id) => {
@@ -365,19 +404,22 @@ export const useNoteStore = create<NoteStore>((set, get) => {
           return state;
         }
 
+        const closableIds = state.openTabIds.filter(
+          (openId) => openId !== id && state.notesById[openId]?.isPinned !== true
+        );
+        const nextNotesById = { ...state.notesById };
+
+        closableIds.forEach((openId) => {
+          if (nextNotesById[openId]?.persistence !== "library") {
+            delete nextNotesById[openId];
+          }
+        });
+
         const nextOpenTabIds = state.openTabIds.filter(
           (openId) => openId === id || state.notesById[openId]?.isPinned === true
         );
-        const nextCollections = buildCollections(state.notesById, state.noteIds, nextOpenTabIds, id);
-        persistSession(nextCollections.openTabIds, nextCollections.activeTabId);
 
-        return {
-          openTabIds: nextCollections.openTabIds,
-          activeTabId: nextCollections.activeTabId,
-          allNotes: nextCollections.allNotes,
-          openTabs: nextCollections.openTabs,
-          activeOpenTab: nextCollections.activeOpenTab
-        };
+        return buildStateSlice(nextNotesById, state.noteIds, nextOpenTabIds, id);
       });
     },
     reorderTabs: (sourceId, targetId) => {
@@ -416,31 +458,11 @@ export const useNoteStore = create<NoteStore>((set, get) => {
 
         const nextNotesById = { ...state.notesById };
         delete nextNotesById[id];
-        let nextNoteIds = state.noteIds.filter((noteId) => noteId !== id);
-        let nextOpenTabIds = state.openTabIds.filter((openId) => openId !== id);
+        const nextNoteIds = state.noteIds.filter((noteId) => noteId !== id);
+        const nextOpenTabIds = state.openTabIds.filter((openId) => openId !== id);
+        const preferredActiveTabId = state.activeTabId === id ? (nextOpenTabIds[0] ?? null) : state.activeTabId;
 
-        if (nextNoteIds.length === 0) {
-          const freshTab = createEmptyTab();
-          nextNotesById[freshTab.id] = freshTab;
-          nextNoteIds = [freshTab.id];
-          nextOpenTabIds = [freshTab.id];
-        } else if (nextOpenTabIds.length === 0) {
-          nextOpenTabIds = [nextNoteIds[0]];
-        }
-
-        const nextActiveTabId = state.activeTabId === id ? nextOpenTabIds[0] : state.activeTabId;
-        const nextCollections = buildCollections(nextNotesById, nextNoteIds, nextOpenTabIds, nextActiveTabId);
-        persistSession(nextCollections.openTabIds, nextCollections.activeTabId);
-
-        return {
-          notesById: nextNotesById,
-          noteIds: nextNoteIds,
-          openTabIds: nextCollections.openTabIds,
-          activeTabId: nextCollections.activeTabId,
-          allNotes: nextCollections.allNotes,
-          openTabs: nextCollections.openTabs,
-          activeOpenTab: nextCollections.activeOpenTab
-        };
+        return buildStateSlice(nextNotesById, nextNoteIds, nextOpenTabIds, preferredActiveTabId);
       });
     },
     togglePinTab: (id) => {
@@ -714,22 +736,87 @@ export const useNoteStore = create<NoteStore>((set, get) => {
       }
       get().updateTabContent(activeTabId, content, plainText);
     },
-    markTabSaved: (id) => {
+    markTabSaved: (id, options) => {
       set((state) => {
         const target = state.notesById[id];
         if (!target) {
           return state;
         }
 
+        const nextPersistence = options?.persistence ?? target.persistence;
+        const nextSourceFilePath = options?.sourceFilePath !== undefined ? options.sourceFilePath : target.sourceFilePath;
+        const nextLastSavedAt = options?.lastSavedAt ?? Date.now();
+        const savedTab: NoteTab = {
+          ...target,
+          persistence: nextPersistence,
+          sourceFilePath: nextSourceFilePath,
+          isDirty: false,
+          lastSavedAt: nextLastSavedAt
+        };
+        const nextSavedSnapshot = createSavedSnapshot(savedTab);
+        const nextNotesById = {
+          ...state.notesById,
+          [id]: {
+            ...savedTab,
+            savedSnapshot: nextSavedSnapshot
+          }
+        };
+
+        let nextNoteIds = state.noteIds.filter((noteId) => noteId !== id);
+        if (nextPersistence === "library") {
+          nextNoteIds = [...nextNoteIds, id];
+        }
+
+        const nextCollections = buildCollections(nextNotesById, nextNoteIds, state.openTabIds, state.activeTabId);
+        return {
+          notesById: nextNotesById,
+          noteIds: nextCollections.noteIds,
+          allNotes: nextCollections.allNotes,
+          openTabs: nextCollections.openTabs,
+          activeOpenTab: nextCollections.activeOpenTab
+        };
+      });
+    },
+    discardTabChanges: (id) => {
+      let result: DiscardTabResult = "none";
+
+      set((state) => {
+        const target = state.notesById[id];
+        if (!target) {
+          return state;
+        }
+
+        if (target.persistence === "transient" && !target.savedSnapshot) {
+          result = "removed";
+          const nextNotesById = { ...state.notesById };
+          delete nextNotesById[id];
+          const nextOpenTabIds = state.openTabIds.filter((openId) => openId !== id);
+          const preferredActiveTabId = state.activeTabId === id ? (nextOpenTabIds[0] ?? null) : state.activeTabId;
+          return buildStateSlice(nextNotesById, state.noteIds, nextOpenTabIds, preferredActiveTabId);
+        }
+
+        if (!target.savedSnapshot) {
+          return state;
+        }
+
+        result = "reverted";
+        const snapshot = target.savedSnapshot;
         const nextNotesById = {
           ...state.notesById,
           [id]: {
             ...target,
+            title: snapshot.title,
+            isTitleManual: snapshot.isTitleManual,
+            content: snapshot.content,
+            plainText: snapshot.plainText,
+            folderPath: snapshot.folderPath,
+            fileFormat: snapshot.fileFormat,
+            sourceFilePath: snapshot.sourceFilePath,
             isDirty: false,
-            lastSavedAt: Date.now()
+            updatedAt: snapshot.updatedAt,
+            lastSavedAt: snapshot.lastSavedAt
           }
         };
-
         const nextCollections = buildCollections(nextNotesById, state.noteIds, state.openTabIds, state.activeTabId);
         return {
           notesById: nextNotesById,
@@ -738,6 +825,8 @@ export const useNoteStore = create<NoteStore>((set, get) => {
           activeOpenTab: nextCollections.activeOpenTab
         };
       });
+
+      return result;
     },
     toggleFileFormat: (id) => {
       set((state) => {

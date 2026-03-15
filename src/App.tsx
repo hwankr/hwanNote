@@ -1,4 +1,6 @@
-﻿import { Editor as TiptapEditor } from "@tiptap/react";
+import { Editor as TiptapEditor } from "@tiptap/react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { message } from "@tauri-apps/plugin-dialog";
 import { type PointerEvent as ReactPointerEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { hwanNote, type CloudProviderInfo, type LoadedNote } from "./lib/tauriApi";
 import Editor, { restoreEditorFocus } from "./components/Editor";
@@ -8,7 +10,6 @@ import StatusBar from "./components/StatusBar";
 import TitleBar from "./components/TitleBar";
 import Toolbar from "./components/Toolbar";
 import UpdateToast from "./components/UpdateToast";
-import { useAutoSave } from "./hooks/useAutoSave";
 import { useI18n } from "./i18n/context";
 import {
   SHORTCUT_ACTIONS,
@@ -23,7 +24,13 @@ import {
   type ShortcutMap
 } from "./lib/shortcuts";
 import { applyTheme, type ThemeName } from "./styles/themes";
-import { readTabSessionFromStorage, useNoteStore, type NoteTab } from "./stores/noteStore";
+import {
+  readTabSessionFromStorage,
+  useNoteStore,
+  type NotePersistence,
+  type NoteTab,
+  type SavedNoteSnapshot
+} from "./stores/noteStore";
 
 const CUSTOM_FOLDERS_KEY = "hwan-note:custom-folders";
 const EDITOR_FONT_SIZE_KEY = "hwan-note:editor-font-size";
@@ -50,6 +57,11 @@ type PaneId = "primary" | "secondary";
 type PaneEditors = Record<PaneId, TiptapEditor | null>;
 type PaneCursor = { line: number; column: number; chars: number };
 type PaneCursors = Record<PaneId, PaneCursor>;
+type CloseDecision = "save" | "discard" | "cancel";
+
+interface ResolveDirtyTabsOptions {
+  closeResolvedTabs?: boolean;
+}
 
 function getDraftKey(tabId: string) {
   return `hwan-note:draft:${tabId}`;
@@ -216,20 +228,6 @@ function toMarkdownDocument(title: string, plainText: string, contentHtml: strin
   return `# ${safeTitle}\n`;
 }
 
-function toTabSaveAsContent(tab: NoteTab, fallbackTitle: string) {
-  if (tab.fileFormat === "txt") {
-    return {
-      extension: "txt" as const,
-      content: tab.plainText
-    };
-  }
-
-  return {
-    extension: "md" as const,
-    content: toMarkdownDocument(tab.title, tab.plainText, tab.content, fallbackTitle)
-  };
-}
-
 function extractTags(plainText: string) {
   const matcher = /(^|\s)#([\p{L}\p{N}_-]+)/gu;
   const tags = new Set<string>();
@@ -311,6 +309,40 @@ function pickDistinctTabId(tabIds: string[], excludedId: string, preferredId?: s
   return tabIds.find((id) => id !== excludedId) ?? null;
 }
 
+function createSavedSnapshot({
+  title,
+  isTitleManual,
+  content,
+  plainText,
+  folderPath,
+  fileFormat,
+  sourceFilePath,
+  updatedAt,
+  lastSavedAt
+}: {
+  title: string;
+  isTitleManual: boolean;
+  content: string;
+  plainText: string;
+  folderPath: string;
+  fileFormat: NoteTab["fileFormat"];
+  sourceFilePath?: string;
+  updatedAt: number;
+  lastSavedAt: number;
+}): SavedNoteSnapshot {
+  return {
+    title,
+    isTitleManual,
+    content,
+    plainText,
+    folderPath,
+    fileFormat,
+    sourceFilePath,
+    updatedAt,
+    lastSavedAt
+  };
+}
+
 export default function App() {
   const { t, localeTag, language } = useI18n();
   const allNotes = useNoteStore((state) => state.allNotes);
@@ -322,7 +354,6 @@ export default function App() {
   const openNote = useNoteStore((state) => state.openNote);
   const setActiveTab = useNoteStore((state) => state.setActiveTab);
   const closeTab = useNoteStore((state) => state.closeTab);
-  const closeOtherTabs = useNoteStore((state) => state.closeOtherTabs);
   const reorderTabs = useNoteStore((state) => state.reorderTabs);
   const removeNote = useNoteStore((state) => state.removeNote);
   const togglePinTab = useNoteStore((state) => state.togglePinTab);
@@ -332,6 +363,7 @@ export default function App() {
   const updateTabContent = useNoteStore((state) => state.updateTabContent);
   const setTabTitle = useNoteStore((state) => state.setTabTitle);
   const markTabSaved = useNoteStore((state) => state.markTabSaved);
+  const discardTabChanges = useNoteStore((state) => state.discardTabChanges);
   const toggleFileFormat = useNoteStore((state) => state.toggleFileFormat);
   const toggleSidebar = useNoteStore((state) => state.toggleSidebar);
   const addImportedTab = useNoteStore((state) => state.addImportedTab);
@@ -368,6 +400,7 @@ export default function App() {
   const openIntentBufferRef = useRef<string[]>([]);
   const inFlightIntentKeysRef = useRef<Set<string>>(new Set());
   const hydrationCompleteRef = useRef(false);
+  const guardedFlowRef = useRef(false);
 
   const tabById = useMemo(() => {
     const map = new Map<string, NoteTab>();
@@ -390,6 +423,10 @@ export default function App() {
   const focusedTab = focusedTabId ? (tabById.get(focusedTabId) ?? null) : null;
   const focusedEditor = focusedPane === "secondary" ? paneEditors.secondary : paneEditors.primary;
   const cursor = paneCursors[focusedPane];
+
+  const getTabById = useCallback((tabId: string) => {
+    return useNoteStore.getState().notesById[tabId] ?? null;
+  }, []);
 
   const setPaneTab = useCallback(
     (pane: PaneId, nextTabId: string) => {
@@ -561,26 +598,51 @@ export default function App() {
   }, [allNotes, selectedFolder, selectedTag, searchQuery, searchMode, noteTags, sortMode, localeTag]);
 
   const mapLoadedNoteToTab = useCallback(
-    (note: LoadedNote) => ({
-      id: note.noteId,
-      title: note.title,
-      isTitleManual: note.isTitleManual,
-      content: note.content,
-      plainText: note.plainText,
-      isDirty: false,
-      isPinned: false,
-      folderPath: normalizeFolderPath(note.folderPath),
-      createdAt: note.createdAt,
-      updatedAt: note.updatedAt,
-      lastSavedAt: 0,
-      fileFormat: "md" as const
-    }),
+    (note: LoadedNote): NoteTab => {
+      const folderPath = normalizeFolderPath(note.folderPath);
+      const persistence: NotePersistence = "library";
+      const lastSavedAt = note.updatedAt;
+      return {
+        id: note.noteId,
+        title: note.title,
+        isTitleManual: note.isTitleManual,
+        content: note.content,
+        plainText: note.plainText,
+        isDirty: false,
+        isPinned: false,
+        folderPath,
+        createdAt: note.createdAt,
+        updatedAt: note.updatedAt,
+        lastSavedAt,
+        fileFormat: "md",
+        persistence,
+        savedSnapshot: createSavedSnapshot({
+          title: note.title,
+          isTitleManual: note.isTitleManual,
+          content: note.content,
+          plainText: note.plainText,
+          folderPath,
+          fileFormat: "md",
+          updatedAt: note.updatedAt,
+          lastSavedAt
+        })
+      };
+    },
     []
   );
 
   const hydrateLoadedNotes = useCallback(
     (loaded: LoadedNote[]) => {
-      hydrateTabs(loaded.map(mapLoadedNoteToTab), readTabSessionFromStorage());
+      const preservedOpenOnlyTabs = hydrationCompleteRef.current
+        ? (() => {
+            const state = useNoteStore.getState();
+            return state.openTabIds
+              .map((id) => state.notesById[id])
+              .filter((tab): tab is NoteTab => Boolean(tab) && tab.persistence !== "library");
+          })()
+        : [];
+
+      hydrateTabs([...loaded.map(mapLoadedNoteToTab), ...preservedOpenOnlyTabs], readTabSessionFromStorage());
 
       const loadedFolders = loaded.map((note) => normalizeFolderPath(note.folderPath)).filter(Boolean);
       setCustomFolders((prev) => Array.from(new Set([...prev, ...loadedFolders])));
@@ -595,7 +657,7 @@ export default function App() {
     }
 
     const state = useNoteStore.getState();
-    for (const noteId of state.noteIds) {
+    for (const noteId of Object.keys(state.notesById)) {
       const sourcePath = state.notesById[noteId]?.sourceFilePath;
       if (!sourcePath) {
         continue;
@@ -1024,97 +1086,229 @@ export default function App() {
     }
   }, [ingestImportedTextFile]);
 
-  const handleManualSave = useCallback(async () => {
-    if (!focusedTab) {
-      return;
+  const promptCloseDecision = useCallback(async (tabId: string): Promise<CloseDecision> => {
+    const tab = getTabById(tabId);
+    if (!tab?.isDirty) {
+      return "discard";
     }
 
-    // 외부 .txt 파일인 경우: 원본 위치에 plain text로 저장
-    if (focusedTab.fileFormat === "txt" && focusedTab.sourceFilePath) {
-      const noteApi = hwanNote.note;
-      if (!noteApi?.saveTxt) return;
-
-      try {
-        await noteApi.saveTxt(focusedTab.sourceFilePath, focusedTab.plainText);
-        markTabSaved(focusedTab.id);
-      } catch (error) {
-        console.error("Save txt failed:", error);
+    const title = tab.title.trim() || t("common.untitled");
+    const saveLabel = t("common.save");
+    const dontSaveLabel = t("common.dontSave");
+    const cancelLabel = t("common.cancel");
+    const result = await message(
+      t("dialog.unsavedChangesMessage", { title }),
+      {
+        title: t("dialog.unsavedChangesTitle"),
+        kind: "warning",
+        buttons: {
+          yes: saveLabel,
+          no: dontSaveLabel,
+          cancel: cancelLabel
+        }
       }
-      return;
-    }
-
-    const noteApi = hwanNote.note;
-
-    if (!noteApi?.autoSave) {
-      window.localStorage.setItem(getDraftKey(focusedTab.id), focusedTab.content);
-      markTabSaved(focusedTab.id);
-      return;
-    }
-
-    try {
-      const isTxtWithoutSource = focusedTab.fileFormat === "txt" && !focusedTab.sourceFilePath;
-      const markdown = isTxtWithoutSource
-        ? focusedTab.plainText.trimEnd() + "\n"
-        : toMarkdownDocument(
-            focusedTab.title,
-            focusedTab.plainText,
-            focusedTab.content,
-            t("common.untitled")
-          );
-      await noteApi.autoSave(
-        focusedTab.id,
-        focusedTab.title,
-        markdown,
-        normalizeFolderPath(focusedTab.folderPath),
-        focusedTab.isTitleManual
-      );
-      markTabSaved(focusedTab.id);
-    } catch (error) {
-      console.error("Auto-save failed:", error);
-    }
-  }, [focusedTab, markTabSaved, t]);
-
-  const handleSaveAsAndCloseTab = useCallback(async (tabId: string) => {
-    const tab = tabById.get(tabId);
-    if (!tab) {
-      return;
-    }
-
-    const noteApi = hwanNote.note;
-    if (!noteApi?.pickSavePath) {
-      return;
-    }
-
-    const { extension, content } = toTabSaveAsContent(tab, t("common.untitled"));
-    const fallbackTitle = t("common.untitled");
-    const title = tab.title.trim() || fallbackTitle;
-    const path = await noteApi.pickSavePath(
-      t("titlebar.closeDirty.saveAsClose"),
-      `${title}.${extension}`,
-      extension
     );
 
-    if (!path) {
-      return;
+    if (result === "Yes" || result === saveLabel) {
+      return "save";
+    }
+
+    if (result === "No" || result === dontSaveLabel) {
+      return "discard";
+    }
+
+    return "cancel";
+  }, [getTabById, t]);
+
+  const handleSaveTab = useCallback(async (tabId: string) => {
+    const tab = getTabById(tabId);
+    if (!tab) {
+      return false;
+    }
+
+    const noteApi = hwanNote.note;
+    const persistence: NotePersistence = tab.persistence === "external" ? "external" : "library";
+
+    if (tab.fileFormat === "txt" && tab.sourceFilePath) {
+      if (!noteApi?.saveTxt) {
+        return false;
+      }
+
+      try {
+        await noteApi.saveTxt(tab.sourceFilePath, tab.plainText);
+        markTabSaved(tab.id, {
+          lastSavedAt: Date.now(),
+          persistence,
+          sourceFilePath: tab.sourceFilePath
+        });
+        return true;
+      } catch (error) {
+        console.error("Save txt failed:", error);
+        return false;
+      }
+    }
+
+    if (!noteApi?.autoSave) {
+      window.localStorage.setItem(getDraftKey(tab.id), tab.content);
+      markTabSaved(tab.id, {
+        lastSavedAt: Date.now(),
+        persistence: "library"
+      });
+      return true;
     }
 
     try {
-      if (extension === "txt") {
-        if (!noteApi.saveTxt) {
-          return;
-        }
-        await noteApi.saveTxt(path, content);
-      } else {
-        await noteApi.save(path, content);
-      }
-      closeTab(tabId);
+      const isTxtWithoutSource = tab.fileFormat === "txt" && !tab.sourceFilePath;
+      const markdown = isTxtWithoutSource
+        ? tab.plainText.trimEnd() + "\n"
+        : toMarkdownDocument(
+            tab.title,
+            tab.plainText,
+            tab.content,
+            t("common.untitled")
+          );
+
+      await noteApi.autoSave(
+        tab.id,
+        tab.title,
+        markdown,
+        normalizeFolderPath(tab.folderPath),
+        tab.isTitleManual
+      );
+
+      markTabSaved(tab.id, {
+        lastSavedAt: Date.now(),
+        persistence: "library"
+      });
+      return true;
     } catch (error) {
-      console.error("Save As failed:", error);
+      console.error("Save failed:", error);
+      return false;
     }
-  }, [closeTab, t, tabById]);
+  }, [getTabById, markTabSaved, t]);
+
+  const handleManualSave = useCallback(async () => {
+    if (!focusedTabId) {
+      return false;
+    }
+
+    return handleSaveTab(focusedTabId);
+  }, [focusedTabId, handleSaveTab]);
+
+  const resolveDirtyTabs = useCallback(async (tabIds: string[], options: ResolveDirtyTabsOptions = {}) => {
+    for (const tabId of tabIds) {
+      const tab = getTabById(tabId);
+      if (!tab) {
+        continue;
+      }
+
+      if (tab.isDirty) {
+        const decision = await promptCloseDecision(tabId);
+        if (decision === "cancel") {
+          return false;
+        }
+
+        if (decision === "save") {
+          const saved = await handleSaveTab(tabId);
+          if (!saved) {
+            return false;
+          }
+        } else {
+          discardTabChanges(tabId);
+        }
+      }
+
+      if (options.closeResolvedTabs) {
+        const latestTab = getTabById(tabId);
+        if (latestTab) {
+          closeTab(tabId);
+        }
+      }
+    }
+
+    return true;
+  }, [closeTab, discardTabChanges, getTabById, handleSaveTab, promptCloseDecision]);
+
+  const runGuardedFlow = useCallback(async (action: () => Promise<boolean>) => {
+    if (guardedFlowRef.current) {
+      return false;
+    }
+
+    guardedFlowRef.current = true;
+    try {
+      return await action();
+    } finally {
+      guardedFlowRef.current = false;
+    }
+  }, []);
+
+  const handleRequestCloseTab = useCallback(async (tabId: string) => {
+    return runGuardedFlow(() => resolveDirtyTabs([tabId], { closeResolvedTabs: true }));
+  }, [resolveDirtyTabs, runGuardedFlow]);
+
+  const handleRequestCloseOtherTabs = useCallback(async (tabId: string) => {
+    return runGuardedFlow(async () => {
+      const state = useNoteStore.getState();
+      const closableIds = state.openTabIds.filter(
+        (openId) => openId !== tabId && state.notesById[openId]?.isPinned !== true
+      );
+      const didResolve = await resolveDirtyTabs(closableIds, { closeResolvedTabs: true });
+      if (didResolve && getTabById(tabId)) {
+        setActiveTab(tabId);
+      }
+      return didResolve;
+    });
+  }, [getTabById, resolveDirtyTabs, runGuardedFlow, setActiveTab]);
+
+  const handleRequestCloseWindow = useCallback(async () => {
+    await runGuardedFlow(async () => {
+      const state = useNoteStore.getState();
+      const didResolve = await resolveDirtyTabs(state.openTabIds, { closeResolvedTabs: false });
+      if (!didResolve) {
+        return false;
+      }
+
+      await hwanNote.window.exit();
+      return true;
+    });
+  }, [resolveDirtyTabs, runGuardedFlow]);
+
+  const resolveOpenTabsBeforeReload = useCallback(async () => {
+    return runGuardedFlow(async () => {
+      const state = useNoteStore.getState();
+      return resolveDirtyTabs(state.openTabIds, { closeResolvedTabs: false });
+    });
+  }, [resolveDirtyTabs, runGuardedFlow]);
+
+  const handleDeleteNote = useCallback(async (id: string) => {
+    return runGuardedFlow(async () => {
+      const tab = getTabById(id);
+      if (!tab) {
+        return false;
+      }
+
+      const didResolve = await resolveDirtyTabs([id], { closeResolvedTabs: false });
+      if (!didResolve) {
+        return false;
+      }
+
+      try {
+        await hwanNote.note.delete(id);
+        removeNote(id);
+        return true;
+      } catch (error) {
+        console.error("Failed to delete note:", error);
+        return false;
+      }
+    });
+  }, [getTabById, removeNote, resolveDirtyTabs, runGuardedFlow]);
 
   const handleBrowseAutoSaveDir = useCallback(async () => {
-    await handleManualSave();
+    const didResolve = await resolveOpenTabsBeforeReload();
+    if (!didResolve) {
+      return;
+    }
+
     const settingsApi = hwanNote.settings;
     if (!settingsApi) return;
 
@@ -1134,10 +1328,14 @@ export default function App() {
     } catch (error) {
       console.error("Failed to set auto-save directory:", error);
     }
-  }, [handleManualSave, hydrateLoadedNotes]);
+  }, [hydrateLoadedNotes, resolveOpenTabsBeforeReload]);
 
   const handleResetAutoSaveDir = useCallback(async () => {
-    await handleManualSave();
+    const didResolve = await resolveOpenTabsBeforeReload();
+    if (!didResolve) {
+      return;
+    }
+
     const settingsApi = hwanNote.settings;
     if (!settingsApi) return;
 
@@ -1154,10 +1352,14 @@ export default function App() {
     } catch (error) {
       console.error("Failed to reset auto-save directory:", error);
     }
-  }, [handleManualSave, hydrateLoadedNotes]);
+  }, [hydrateLoadedNotes, resolveOpenTabsBeforeReload]);
 
   const handleCloudSyncChange = useCallback(async (provider: string | null) => {
-    await handleManualSave();
+    const didResolve = await resolveOpenTabsBeforeReload();
+    if (!didResolve) {
+      return;
+    }
+
     try {
       if (provider) {
         const result = await hwanNote.cloud.enable(provider);
@@ -1177,14 +1379,7 @@ export default function App() {
     } catch (error) {
       console.error("Failed to change cloud sync:", error);
     }
-  }, [handleManualSave, hydrateLoadedNotes]);
-
-  useAutoSave({
-    value: focusedTab?.content ?? "",
-    enabled: Boolean(focusedTab?.isDirty),
-    delay: 1000,
-    onSave: handleManualSave
-  });
+  }, [hydrateLoadedNotes, resolveOpenTabsBeforeReload]);
 
   useEffect(() => {
     const settingsApi = hwanNote.settings;
@@ -1217,6 +1412,31 @@ export default function App() {
     });
     return () => unlisten();
   }, [t]);
+
+  useEffect(() => {
+    let disposed = false;
+    let cleanup: (() => void) | null = null;
+
+    void getCurrentWindow().onCloseRequested(async (event) => {
+      event.preventDefault();
+      if (!disposed) {
+        await handleRequestCloseWindow();
+      }
+    }).then((unlisten) => {
+      if (disposed) {
+        unlisten();
+      } else {
+        cleanup = unlisten;
+      }
+    }).catch((error) => {
+      console.error("Failed to attach close-request listener:", error);
+    });
+
+    return () => {
+      disposed = true;
+      cleanup?.();
+    };
+  }, [handleRequestCloseWindow]);
 
   useEffect(() => {
     const media = window.matchMedia("(prefers-color-scheme: dark)");
@@ -1316,7 +1536,7 @@ export default function App() {
             }
 
             event.preventDefault();
-            closeTab(focusedTabId);
+            void handleRequestCloseTab(focusedTabId);
             return;
 
           case "toggleBold":
@@ -1384,13 +1604,13 @@ export default function App() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [
-    closeTab,
     focusPane,
     focusedEditor,
     focusedTabId,
     handleCreateTabInFocusedPane,
     handleCycleTabInFocusedPane,
     handleManualSave,
+    handleRequestCloseTab,
     localeTag,
     settingsOpen,
     shortcuts,
@@ -1476,9 +1696,8 @@ export default function App() {
         isMaximized={isMaximized}
         onToggleSidebar={toggleSidebar}
         onSelectTab={handleSelectTabInFocusedPane}
-        onCloseTab={closeTab}
-        onSaveAsAndCloseTab={(tabId) => void handleSaveAsAndCloseTab(tabId)}
-        onCloseOtherTabs={closeOtherTabs}
+        onCloseTab={(tabId) => void handleRequestCloseTab(tabId)}
+        onCloseOtherTabs={(tabId) => void handleRequestCloseOtherTabs(tabId)}
         onTogglePinTab={togglePinTab}
         onReorderTabs={reorderTabs}
         onDropTabOutside={handleDropTabOutside}
@@ -1487,7 +1706,7 @@ export default function App() {
         onCreateTab={handleCreateTabInFocusedPane}
         onMinimize={() => void hwanNote.window.minimize()}
         onToggleMaximize={() => void handleToggleMaximize()}
-        onCloseWindow={() => void hwanNote.window.close()}
+        onCloseWindow={() => void handleRequestCloseWindow()}
       />
 
       <Toolbar
@@ -1523,16 +1742,7 @@ export default function App() {
           onSortModeChange={setSortMode}
           onSelectNote={handleSelectNoteInFocusedPane}
           onTogglePinNote={togglePinTab}
-          onDeleteNote={(id) => {
-            void (async () => {
-              try {
-                await hwanNote.note.delete(id);
-                removeNote(id);
-              } catch (error) {
-                console.error("Failed to delete note:", error);
-              }
-            })();
-          }}
+          onDeleteNote={(id) => { void handleDeleteNote(id); }}
           onMoveNoteToFolder={(id, folderPath) => {
             moveTabToFolder(id, normalizeFolderPath(folderPath));
           }}
@@ -1706,3 +1916,4 @@ export default function App() {
     </div>
   );
 }
+

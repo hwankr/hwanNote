@@ -93,6 +93,7 @@ export const hwanNote = {
     minimize: () => invoke("cmd_window_minimize"),
     toggleMaximize: () => invoke<boolean>("cmd_window_toggle_maximize"),
     close: () => invoke("cmd_window_close"),
+    exit: () => invoke("cmd_app_exit"),
   },
 
   note: {

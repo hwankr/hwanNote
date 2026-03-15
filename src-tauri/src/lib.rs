@@ -65,6 +65,7 @@ pub fn run() {
             cmd_window_minimize,
             cmd_window_toggle_maximize,
             cmd_window_close,
+            cmd_app_exit,
             cmd_note_save,
             cmd_note_read,
             cmd_note_list,

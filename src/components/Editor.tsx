@@ -122,8 +122,6 @@ export default function Editor({
 
   const initialAutofocusRef = useRef(autofocus);
 
-  const isLocalUpdateRef = useRef(false);
-
   const editor = useEditor({
     extensions: [
       StarterKit.configure({
@@ -171,7 +169,6 @@ export default function Editor({
       }
     },
     onUpdate: ({ editor }) => {
-      isLocalUpdateRef.current = true;
       const plainText = collectPlainText(editor);
       const cursor = collectCursor(editor, plainText);
       onChangeRef.current(editor.getHTML(), plainText);
@@ -219,11 +216,6 @@ export default function Editor({
 
   useEffect(() => {
     if (!editor) {
-      return;
-    }
-
-    if (isLocalUpdateRef.current) {
-      isLocalUpdateRef.current = false;
       return;
     }
 

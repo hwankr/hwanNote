@@ -9,6 +9,11 @@ type MessageDictionary = Record<string, MessageValue>;
 const messages = {
   ko: {
     "common.untitled": "제목 없음",
+    "common.save": "저장",
+    "common.dontSave": "저장 안 함",
+    "common.cancel": "취소",
+    "dialog.unsavedChangesTitle": "저장하지 않은 변경 내용",
+    "dialog.unsavedChangesMessage": "\"{{title}}\"의 변경 내용을 저장할까요?\n저장하지 않으면 변경 내용이 사라집니다.",
     "titlebar.menu": "Menu",
     "titlebar.toggleSidebar": "사이드바 토글",
     "titlebar.closeTab": "{{title}} 닫기",
@@ -153,6 +158,11 @@ const messages = {
   },
   en: {
     "common.untitled": "Untitled",
+    "common.save": "Save",
+    "common.dontSave": "Don't Save",
+    "common.cancel": "Cancel",
+    "dialog.unsavedChangesTitle": "Unsaved Changes",
+    "dialog.unsavedChangesMessage": "Do you want to save changes to \"{{title}}\"?\nIf you don't save, your changes will be lost.",
     "titlebar.menu": "Menu",
     "titlebar.toggleSidebar": "Toggle sidebar",
     "titlebar.closeTab": "Close {{title}}",
