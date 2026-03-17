@@ -10,27 +10,23 @@ use sha1::Digest;
 
 const INDEX_FILENAME: &str = ".hwan-note-index.json";
 
-static TOGGLE_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^:::toggle\[(open|closed)\](?:\s+(.*))?$").unwrap()
-});
+static TOGGLE_BLOCK_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^:::toggle\[(open|closed)\](?:\s+(.*))?$").unwrap());
 static CHECKLIST_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(\s*)-\s+\[([ xX])\]\s*(.*)$").unwrap());
-static HEADING_PREFIX_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^#{1,3}\s+").unwrap());
-static TASK_PREFIX_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^- \[[ xX]\]\s*").unwrap());
-static TOGGLE_END_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^:::\s*$").unwrap());
+static HEADING_PREFIX_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^#{1,3}\s+").unwrap());
+static TASK_PREFIX_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^- \[[ xX]\]\s*").unwrap());
+static TOGGLE_END_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^:::\s*$").unwrap());
 static UNSAFE_FILENAME_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"[<>:"/\\|?*\x00-\x1F]"#).unwrap());
-static WHITESPACE_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\s+").unwrap());
-static TRAILING_DOTS_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\.+$").unwrap());
+static WHITESPACE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").unwrap());
+static TRAILING_DOTS_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\.+$").unwrap());
 static PLAIN_TASK_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(\s*)- \[[ xX]\]\s*").unwrap());
 
 const TOGGLE_BLOCK_END: &str = ":::";
+const MANUAL_TITLE_META_PREFIX: &str = "<!-- hwan-note:manual-title:";
+const MANUAL_TITLE_META_SUFFIX: &str = " -->";
 
 // ── Types ──
 
@@ -141,7 +137,8 @@ fn is_invalid_folder_segment(segment: &str) -> bool {
         || segment.ends_with(' ')
         || segment.ends_with('.')
         || segment.chars().any(|c| {
-            c.is_ascii_control() || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+            c.is_ascii_control()
+                || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
         })
 }
 
@@ -200,8 +197,103 @@ pub fn slugify_title(title: &str) -> String {
     }
 }
 
-pub fn derive_title(markdown: &str) -> String {
+fn normalize_manual_title(title: &str) -> Option<String> {
+    let trimmed = title.trim();
+    let sliced: String = trimmed.chars().take(50).collect();
+    if sliced.is_empty() {
+        None
+    } else {
+        Some(sliced)
+    }
+}
+
+fn encode_manual_title_hex(title: &str) -> String {
+    let mut encoded = String::with_capacity(title.len() * 2);
+    for byte in title.as_bytes() {
+        encoded.push_str(&format!("{:02x}", byte));
+    }
+    encoded
+}
+
+fn decode_manual_title_hex(value: &str) -> Option<String> {
+    if value.len() % 2 != 0 {
+        return None;
+    }
+
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len() / 2);
+    let decode_nibble = |byte: u8| -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        }
+    };
+
+    let mut index = 0;
+    while index < bytes.len() {
+        let high = decode_nibble(bytes[index])?;
+        let low = decode_nibble(bytes[index + 1])?;
+        decoded.push((high << 4) | low);
+        index += 2;
+    }
+
+    String::from_utf8(decoded)
+        .ok()
+        .and_then(|title| normalize_manual_title(&title))
+}
+
+fn parse_manual_title_metadata_line(line: &str) -> Option<String> {
+    let encoded = line
+        .strip_prefix(MANUAL_TITLE_META_PREFIX)?
+        .strip_suffix(MANUAL_TITLE_META_SUFFIX)?;
+    decode_manual_title_hex(encoded)
+}
+
+fn extract_manual_title_metadata(markdown: &str) -> (Option<String>, String) {
     let normalized = markdown.replace("\r\n", "\n");
+
+    match normalized.split_once('\n') {
+        Some((first_line, rest)) => {
+            if let Some(title) = parse_manual_title_metadata_line(first_line) {
+                (Some(title), rest.to_string())
+            } else {
+                (None, normalized)
+            }
+        }
+        None => {
+            if let Some(title) = parse_manual_title_metadata_line(&normalized) {
+                (Some(title), String::new())
+            } else {
+                (None, normalized)
+            }
+        }
+    }
+}
+
+fn embed_manual_title_metadata(markdown: &str, manual_title: Option<&str>) -> String {
+    let (_, stripped_markdown) = extract_manual_title_metadata(markdown);
+    let Some(title) = manual_title.and_then(normalize_manual_title) else {
+        return stripped_markdown;
+    };
+
+    let metadata_line = format!(
+        "{}{}{}",
+        MANUAL_TITLE_META_PREFIX,
+        encode_manual_title_hex(&title),
+        MANUAL_TITLE_META_SUFFIX
+    );
+
+    if stripped_markdown.is_empty() {
+        metadata_line
+    } else {
+        format!("{}\n{}", metadata_line, stripped_markdown)
+    }
+}
+
+pub fn derive_title(markdown: &str) -> String {
+    let (_, normalized) = extract_manual_title_metadata(markdown);
     let first_line = normalized
         .split('\n')
         .map(|line| line.trim())
@@ -233,7 +325,7 @@ pub fn derive_title(markdown: &str) -> String {
 }
 
 pub fn markdown_to_plain_text(markdown: &str) -> String {
-    let normalized = markdown.replace("\r\n", "\n");
+    let (_, normalized) = extract_manual_title_metadata(markdown);
     normalized
         .split('\n')
         .map(|line| {
@@ -389,8 +481,7 @@ fn render_lines(lines: &[&str]) -> String {
                             escaped
                         }
                     };
-                    let inner_lines: Vec<&str> =
-                        lines[line_index + 1..end_index].to_vec();
+                    let inner_lines: Vec<&str> = lines[line_index + 1..end_index].to_vec();
                     let inner_html = {
                         let result = render_lines(&inner_lines);
                         if result.is_empty() {
@@ -419,8 +510,7 @@ fn render_lines(lines: &[&str]) -> String {
                         break;
                     }
                     if let Some(m) = CHECKLIST_RE.captures(task_line) {
-                        let indent_str =
-                            m.get(1).map_or("", |m| m.as_str()).replace('\t', "  ");
+                        let indent_str = m.get(1).map_or("", |m| m.as_str()).replace('\t', "  ");
                         let depth = indent_str.len() / 2;
                         let checked = m
                             .get(2)
@@ -453,7 +543,7 @@ fn render_lines(lines: &[&str]) -> String {
 }
 
 pub fn markdown_to_html(markdown: &str) -> String {
-    let normalized = markdown.replace("\r\n", "\n");
+    let (_, normalized) = extract_manual_title_metadata(markdown);
     if normalized.trim().is_empty() {
         return "<p></p>".to_string();
     }
@@ -470,10 +560,9 @@ fn get_index_path(auto_save_dir: &Path) -> PathBuf {
 pub fn read_index(auto_save_dir: &Path) -> NoteIndex {
     let index_path = get_index_path(auto_save_dir);
     match fs::read_to_string(&index_path) {
-        Ok(raw) => serde_json::from_str::<NoteIndex>(&raw)
-            .unwrap_or(NoteIndex {
-                entries: HashMap::new(),
-            }),
+        Ok(raw) => serde_json::from_str::<NoteIndex>(&raw).unwrap_or(NoteIndex {
+            entries: HashMap::new(),
+        }),
         Err(_) => NoteIndex {
             entries: HashMap::new(),
         },
@@ -627,12 +716,16 @@ fn reconcile_index_with_files(
                         .unwrap_or_else(|_| now_millis())
                 });
 
+            let manual_title = fs::read_to_string(full_path)
+                .ok()
+                .and_then(|markdown| extract_manual_title_metadata(&markdown).0);
+
             index.entries.insert(
                 generated_id,
                 NoteIndexEntry {
                     relative_path: rel_path.clone(),
                     created_at,
-                    manual_title: None,
+                    manual_title,
                 },
             );
             used_paths.insert(rel_path.clone());
@@ -678,10 +771,7 @@ pub fn get_auto_save_dir(documents_dir: &Path) -> PathBuf {
 }
 
 pub fn save_markdown_file(file_path: &Path, content: &str) -> Result<(), String> {
-    let ext = file_path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
+    let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
     if ext.to_lowercase() != "md" {
         return Err("Only .md files are supported.".to_string());
     }
@@ -692,10 +782,7 @@ pub fn save_markdown_file(file_path: &Path, content: &str) -> Result<(), String>
 }
 
 pub fn read_markdown_file(file_path: &Path) -> Result<String, String> {
-    let ext = file_path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
+    let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
     if ext.to_lowercase() != "md" {
         return Err("Only .md files are supported.".to_string());
     }
@@ -792,7 +879,10 @@ pub fn rename_folder(auto_save_dir: &Path, from: &str, to: &str) -> Result<Vec<S
     list_folders(auto_save_dir)
 }
 
-pub fn delete_folder(auto_save_dir: &Path, folder_path: &str) -> Result<FolderDeleteResult, String> {
+pub fn delete_folder(
+    auto_save_dir: &Path,
+    folder_path: &str,
+) -> Result<FolderDeleteResult, String> {
     fs::create_dir_all(auto_save_dir).map_err(|e| e.to_string())?;
 
     let normalized = sanitize_folder_path(Some(folder_path))?;
@@ -824,7 +914,10 @@ pub fn delete_folder(auto_save_dir: &Path, folder_path: &str) -> Result<FolderDe
     for (note_id, old_relative_path) in matching_entries {
         let old_path = auto_save_dir.join(&old_relative_path);
         if !old_path.exists() {
-            return Err(format!("Note file missing during folder delete: {}", old_relative_path));
+            return Err(format!(
+                "Note file missing during folder delete: {}",
+                old_relative_path
+            ));
         }
 
         let base_name = old_path
@@ -886,17 +979,19 @@ pub fn auto_save_markdown_note(
         payload.title.clone()
     };
     let base_name = slugify_title(&title_for_slug);
-    let next_file_path =
-        ensure_unique_file_path(&target_dir, &base_name, existing_path.as_deref());
+    let next_file_path = ensure_unique_file_path(&target_dir, &base_name, existing_path.as_deref());
+    let manual_title = if payload.is_title_manual.unwrap_or(false) {
+        normalize_manual_title(&payload.title)
+    } else {
+        None
+    };
+    let stored_markdown = embed_manual_title_metadata(&payload.content, manual_title.as_deref());
 
-    fs::write(&next_file_path, to_windows_crlf(&payload.content))
-        .map_err(|e| e.to_string())?;
+    fs::write(&next_file_path, to_windows_crlf(&stored_markdown)).map_err(|e| e.to_string())?;
 
     // Remove old file if path changed
     if let Some(ref old_path) = existing_path {
-        if to_posix(&old_path.to_string_lossy())
-            != to_posix(&next_file_path.to_string_lossy())
-        {
+        if to_posix(&old_path.to_string_lossy()) != to_posix(&next_file_path.to_string_lossy()) {
             let _ = fs::remove_file(old_path);
         }
     }
@@ -905,21 +1000,9 @@ pub fn auto_save_markdown_note(
     let created_at = existing_entry
         .map(|e| e.created_at)
         .unwrap_or_else(now_millis);
-    let updated_at = system_time_to_millis(
-        metadata.modified().unwrap_or(SystemTime::now()),
-    );
+    let updated_at = system_time_to_millis(metadata.modified().unwrap_or(SystemTime::now()));
 
     let rel = relative_path(auto_save_dir, &next_file_path);
-
-    let manual_title = {
-        let trimmed = payload.title.trim();
-        let sliced: String = trimmed.chars().take(50).collect();
-        if payload.is_title_manual.unwrap_or(false) && !sliced.is_empty() {
-            Some(sliced)
-        } else {
-            None
-        }
-    };
 
     index.entries.insert(
         safe_id.clone(),
@@ -949,24 +1032,44 @@ pub fn load_markdown_notes(auto_save_dir: &Path) -> Result<Vec<LoadedNote>, Stri
 
     // Build notes
     let mut notes: Vec<LoadedNote> = Vec::new();
+    let mut index_changed = false;
+    let indexed_entries: Vec<(String, NoteIndexEntry)> = index
+        .entries
+        .iter()
+        .map(|(note_id, entry)| (note_id.clone(), entry.clone()))
+        .collect();
 
-    for (note_id, entry) in &index.entries {
+    for (note_id, entry) in indexed_entries {
         let file_path = match by_relative_path.get(&entry.relative_path) {
             Some(p) => p,
             None => continue,
         };
 
-        let markdown = match fs::read_to_string(file_path) {
+        let raw_markdown = match fs::read_to_string(file_path) {
             Ok(content) => content,
             Err(_) => continue,
         };
+        let (embedded_manual_title, markdown) = extract_manual_title_metadata(&raw_markdown);
+        let indexed_manual_title = entry
+            .manual_title
+            .as_deref()
+            .and_then(normalize_manual_title);
 
         let plain_text = markdown_to_plain_text(&markdown);
         let derived_title = derive_title(&markdown);
-        let title = match &entry.manual_title {
-            Some(mt) if !mt.trim().is_empty() => mt.trim().to_string(),
-            _ => derived_title,
-        };
+        let effective_manual_title = indexed_manual_title
+            .clone()
+            .or_else(|| embedded_manual_title.clone());
+        let title = effective_manual_title.clone().unwrap_or(derived_title);
+
+        if indexed_manual_title.is_none() {
+            if let Some(recovered_title) = embedded_manual_title {
+                if let Some(index_entry) = index.entries.get_mut(&note_id) {
+                    index_entry.manual_title = Some(recovered_title);
+                    index_changed = true;
+                }
+            }
+        }
 
         // Extract folder path from relative path (using POSIX separators)
         let rel_dir = match entry.relative_path.rfind('/') {
@@ -983,16 +1086,12 @@ pub fn load_markdown_notes(auto_save_dir: &Path) -> Result<Vec<LoadedNote>, Stri
             Ok(m) => m,
             Err(_) => continue,
         };
-        let updated_at =
-            system_time_to_millis(metadata.modified().unwrap_or(SystemTime::now()));
+        let updated_at = system_time_to_millis(metadata.modified().unwrap_or(SystemTime::now()));
 
         notes.push(LoadedNote {
-            note_id: note_id.clone(),
+            note_id,
             title,
-            is_title_manual: entry
-                .manual_title
-                .as_ref()
-                .map_or(false, |mt| !mt.trim().is_empty()),
+            is_title_manual: effective_manual_title.is_some(),
             plain_text,
             content: markdown_to_html(&markdown),
             folder_path,
@@ -1000,6 +1099,10 @@ pub fn load_markdown_notes(auto_save_dir: &Path) -> Result<Vec<LoadedNote>, Stri
             updated_at,
             file_path: file_path.to_string_lossy().to_string(),
         });
+    }
+
+    if index_changed {
+        write_index(auto_save_dir, &index)?;
     }
 
     notes.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
@@ -1133,11 +1236,12 @@ pub fn migrate_notes(src_dir: &Path, dst_dir: &Path) -> Result<MigrationResult, 
             .filter(|value| !value.is_empty())
             .unwrap_or("untitled");
 
-        let final_path = if existing_dst_paths.contains(&src_entry.relative_path) || desired_path.exists() {
-            ensure_unique_file_path(&parent_dir, base_name, None)
-        } else {
-            desired_path
-        };
+        let final_path =
+            if existing_dst_paths.contains(&src_entry.relative_path) || desired_path.exists() {
+                ensure_unique_file_path(&parent_dir, base_name, None)
+            } else {
+                desired_path
+            };
 
         if let Some(parent) = final_path.parent() {
             fs::create_dir_all(parent)
@@ -1179,10 +1283,7 @@ pub fn migrate_notes(src_dir: &Path, dst_dir: &Path) -> Result<MigrationResult, 
 }
 
 pub fn title_from_filename(file_path: &Path) -> String {
-    let stem = file_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
+    let stem = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
     let title: String = stem.trim().chars().take(50).collect();
     if title.is_empty() {
         "\u{c81c}\u{baa9} \u{c5c6}\u{c74c}".to_string() // 제목 없음
@@ -1218,7 +1319,10 @@ mod tests {
             sanitize_folder_path(Some(" inbox/.config/dev ")).unwrap(),
             ".config/dev"
         );
-        assert_eq!(sanitize_folder_path(Some("team-alpha")).unwrap(), "team-alpha");
+        assert_eq!(
+            sanitize_folder_path(Some("team-alpha")).unwrap(),
+            "team-alpha"
+        );
     }
 
     #[test]
@@ -1241,7 +1345,12 @@ mod tests {
             let folders = list_folders(&dir)?;
             assert_eq!(
                 folders,
-                vec![".folder".to_string(), "alpha".to_string(), "parent".to_string(), "parent/child".to_string()]
+                vec![
+                    ".folder".to_string(),
+                    "alpha".to_string(),
+                    "parent".to_string(),
+                    "parent/child".to_string()
+                ]
             );
             Ok(())
         })();
@@ -1316,6 +1425,85 @@ mod tests {
 
             let folders = list_folders(&dir)?;
             assert!(folders.is_empty());
+            Ok(())
+        })();
+        cleanup_temp_dir(&dir);
+        result.unwrap();
+    }
+
+    #[test]
+    fn auto_save_embeds_manual_title_metadata_and_load_hides_it() {
+        let dir = make_temp_dir("manual-title-meta");
+        let result = (|| -> Result<(), String> {
+            auto_save_markdown_note(
+                &dir,
+                &AutoSavePayload {
+                    note_id: "note-1".to_string(),
+                    title: "Project Launch".to_string(),
+                    content: "Body first line\nSecond line".to_string(),
+                    folder_path: None,
+                    is_title_manual: Some(true),
+                },
+            )?;
+
+            let files = list_markdown_files(&dir)?;
+            assert_eq!(files.len(), 1);
+
+            let raw_markdown = fs::read_to_string(&files[0]).unwrap();
+            assert!(raw_markdown.starts_with(MANUAL_TITLE_META_PREFIX));
+            assert!(raw_markdown.contains("Body first line"));
+
+            let notes = load_markdown_notes(&dir)?;
+            assert_eq!(notes.len(), 1);
+            assert_eq!(notes[0].title, "Project Launch");
+            assert!(notes[0].is_title_manual);
+            assert_eq!(notes[0].plain_text, "Body first line\nSecond line");
+            assert!(!notes[0].content.contains("hwan-note:manual-title"));
+            Ok(())
+        })();
+        cleanup_temp_dir(&dir);
+        result.unwrap();
+    }
+
+    #[test]
+    fn load_backfills_index_from_embedded_manual_title_metadata() {
+        let dir = make_temp_dir("manual-title-backfill");
+        let result = (|| -> Result<(), String> {
+            let relative_path = "topic.md".to_string();
+            let note_id = generate_note_id(&relative_path);
+            let manual_title = "Exact Sync Title";
+
+            fs::write(
+                dir.join(&relative_path),
+                to_windows_crlf(&format!(
+                    "{}\nBody first line",
+                    embed_manual_title_metadata("", Some(manual_title))
+                )),
+            )
+            .unwrap();
+
+            write_index(
+                &dir,
+                &NoteIndex {
+                    entries: HashMap::from([(
+                        note_id.clone(),
+                        NoteIndexEntry {
+                            relative_path: relative_path.clone(),
+                            created_at: now_millis(),
+                            manual_title: None,
+                        },
+                    )]),
+                },
+            )?;
+
+            let notes = load_markdown_notes(&dir)?;
+            assert_eq!(notes.len(), 1);
+            assert_eq!(notes[0].title, manual_title);
+            assert!(notes[0].is_title_manual);
+
+            let index = read_index(&dir);
+            let entry = index.entries.get(&note_id).unwrap();
+            assert_eq!(entry.manual_title.as_deref(), Some(manual_title));
             Ok(())
         })();
         cleanup_temp_dir(&dir);

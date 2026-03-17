@@ -300,6 +300,10 @@ function clampSplitRatio(value: number) {
   return Math.min(MAX_SPLIT_RATIO, Math.max(MIN_SPLIT_RATIO, value));
 }
 
+function normalizeNoteTitle(value: string) {
+  return value.trim().slice(0, 50);
+}
+
 function pickDistinctTabId(tabIds: string[], excludedId: string, preferredId?: string | null) {
   if (preferredId && preferredId !== excludedId && tabIds.includes(preferredId)) {
     return preferredId;
@@ -399,6 +403,7 @@ export default function App() {
   const hydrationCompleteRef = useRef(false);
   const guardedFlowRef = useRef(false);
   const allowImmediateCloseRef = useRef(false);
+  const pendingTitleDraftsRef = useRef<Record<string, string>>({});
 
   const tabById = useMemo(() => {
     const map = new Map<string, NoteTab>();
@@ -426,6 +431,46 @@ export default function App() {
     return useNoteStore.getState().notesById[tabId] ?? null;
   }, []);
 
+  const handleTitleDraftChange = useCallback((tabId: string, title: string) => {
+    if (!tabId) {
+      return;
+    }
+    pendingTitleDraftsRef.current[tabId] = title;
+  }, []);
+
+  const flushTitleDraft = useCallback((tabId: string | null | undefined) => {
+    if (!tabId) {
+      return;
+    }
+
+    const pendingTitle = pendingTitleDraftsRef.current[tabId];
+    if (pendingTitle === undefined) {
+      return;
+    }
+
+    delete pendingTitleDraftsRef.current[tabId];
+
+    const tab = getTabById(tabId);
+    if (!tab) {
+      return;
+    }
+
+    const normalizedPending = normalizeNoteTitle(pendingTitle);
+    const normalizedCurrent = normalizeNoteTitle(tab.title);
+    const shouldRevertToDerived = normalizedPending.length === 0 && tab.isTitleManual;
+
+    if (normalizedPending === normalizedCurrent && !shouldRevertToDerived) {
+      return;
+    }
+
+    setTabTitle(tabId, pendingTitle);
+  }, [getTabById, setTabTitle]);
+
+  const handleTitleCommit = useCallback((tabId: string, title: string) => {
+    handleTitleDraftChange(tabId, title);
+    flushTitleDraft(tabId);
+  }, [flushTitleDraft, handleTitleDraftChange]);
+
   const setPaneTab = useCallback(
     (pane: PaneId, nextTabId: string) => {
       if (pane === "primary") {
@@ -449,13 +494,17 @@ export default function App() {
         return;
       }
 
+      if (pane !== focusedPane) {
+        flushTitleDraft(focusedTabId);
+      }
+
       setFocusedPane(pane);
       const paneTabId = pane === "secondary" && isSplit ? secondaryTabId : primaryTabId;
       if (paneTabId && paneTabId !== activeTabId) {
         setActiveTab(paneTabId);
       }
     },
-    [activeTabId, isSplit, primaryTabId, secondaryTabId, setActiveTab]
+    [activeTabId, flushTitleDraft, focusedPane, focusedTabId, isSplit, primaryTabId, secondaryTabId, setActiveTab]
   );
 
   const handleCursorChange = useCallback((pane: PaneId, line: number, column: number, chars: number) => {
@@ -960,17 +1009,20 @@ export default function App() {
   }, [selectedTag, tags]);
 
   const handleSelectTabInFocusedPane = useCallback((tabId: string) => {
+    flushTitleDraft(focusedTabId);
     setPaneTab(focusedPane, tabId);
     setActiveTab(tabId);
-  }, [focusedPane, setActiveTab, setPaneTab]);
+  }, [flushTitleDraft, focusedPane, focusedTabId, setActiveTab, setPaneTab]);
 
   const handleSelectNoteInFocusedPane = useCallback((tabId: string) => {
+    flushTitleDraft(focusedTabId);
     openNote(tabId);
     setPaneTab(focusedPane, tabId);
     setActiveTab(tabId);
-  }, [focusedPane, openNote, setActiveTab, setPaneTab]);
+  }, [flushTitleDraft, focusedPane, focusedTabId, openNote, setActiveTab, setPaneTab]);
 
   const handleCreateTabInFocusedPane = useCallback(() => {
+    flushTitleDraft(focusedTabId);
     const prevIds = new Set(openTabIds);
     createTab();
 
@@ -984,7 +1036,7 @@ export default function App() {
       setPaneTab(focusedPane, createdId);
       setActiveTab(createdId);
     });
-  }, [createTab, focusedPane, openTabIds, setActiveTab, setPaneTab]);
+  }, [createTab, flushTitleDraft, focusedPane, focusedTabId, openTabIds, setActiveTab, setPaneTab]);
 
   const resolveWorkspaceDropTarget = useCallback((clientX: number, clientY: number) => {
     const workspace = editorWorkspaceRef.current;
@@ -1147,6 +1199,7 @@ export default function App() {
   }, [getTabById, t]);
 
   const handleSaveTab = useCallback(async (tabId: string) => {
+    flushTitleDraft(tabId);
     const tab = getTabById(tabId);
     if (!tab) {
       return false;
@@ -1211,7 +1264,7 @@ export default function App() {
       console.error("Save failed:", error);
       return false;
     }
-  }, [getTabById, markTabSaved, t]);
+  }, [flushTitleDraft, getTabById, markTabSaved, t]);
 
   const handleManualSave = useCallback(async () => {
     if (!focusedTabId) {
@@ -1223,6 +1276,7 @@ export default function App() {
 
   const resolveDirtyTabs = useCallback(async (tabIds: string[], options: ResolveDirtyTabsOptions = {}) => {
     for (const tabId of tabIds) {
+      flushTitleDraft(tabId);
       const tab = getTabById(tabId);
       if (!tab) {
         continue;
@@ -1253,7 +1307,7 @@ export default function App() {
     }
 
     return true;
-  }, [closeTab, discardTabChanges, getTabById, handleSaveTab, promptCloseDecision]);
+  }, [closeTab, discardTabChanges, flushTitleDraft, getTabById, handleSaveTab, promptCloseDecision]);
 
   const runGuardedFlow = useCallback(async (action: () => Promise<boolean>) => {
     if (guardedFlowRef.current) {
@@ -1758,10 +1812,8 @@ export default function App() {
         activeTitle={focusedTab?.title ?? ""}
         activeTabId={focusedTab?.id ?? ""}
         isTitleManual={Boolean(focusedTab?.isTitleManual)}
-        onChangeTitle={(title) => {
-          if (!focusedTabId) return;
-          setTabTitle(focusedTabId, title);
-        }}
+        onTitleDraftChange={handleTitleDraftChange}
+        onChangeTitle={handleTitleCommit}
         lastSavedAt={focusedTab?.lastSavedAt ?? 0}
         onOpenSettings={() => setSettingsOpen(true)}
         onImportTxt={() => void handleImportTxt()}

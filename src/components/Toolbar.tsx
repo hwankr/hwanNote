@@ -67,7 +67,8 @@ interface ToolbarProps {
   activeTitle: string;
   activeTabId: string;
   isTitleManual: boolean;
-  onChangeTitle: (title: string) => void;
+  onTitleDraftChange: (tabId: string, title: string) => void;
+  onChangeTitle: (tabId: string, title: string) => void;
   lastSavedAt: number;
   onOpenSettings: () => void;
   onImportTxt: () => void;
@@ -78,6 +79,7 @@ export default function Toolbar({
   activeTitle,
   activeTabId,
   isTitleManual,
+  onTitleDraftChange,
   onChangeTitle,
   lastSavedAt,
   onOpenSettings,
@@ -103,13 +105,21 @@ export default function Toolbar({
 
   useEffect(() => {
     setTitleInput(activeTitle);
-  }, [activeTitle, activeTabId]);
+    if (activeTabId) {
+      onTitleDraftChange(activeTabId, activeTitle);
+    }
+  }, [activeTitle, activeTabId, onTitleDraftChange]);
 
   const commitTitle = () => {
-    if (normalizeTitle(titleInput) === normalizeTitle(activeTitle)) {
+    if (!activeTabId) {
       return;
     }
-    onChangeTitle(titleInput);
+
+    if (normalizeTitle(titleInput) === normalizeTitle(activeTitle)) {
+      onTitleDraftChange(activeTabId, activeTitle);
+      return;
+    }
+    onChangeTitle(activeTabId, titleInput);
   };
 
   const setHeading = (value: string) => {
@@ -254,7 +264,13 @@ export default function Toolbar({
           value={titleInput}
           placeholder={t("common.untitled")}
           aria-label="Note title"
-          onChange={(event) => setTitleInput(event.target.value)}
+          onChange={(event) => {
+            const nextTitle = event.target.value;
+            setTitleInput(nextTitle);
+            if (activeTabId) {
+              onTitleDraftChange(activeTabId, nextTitle);
+            }
+          }}
           onBlur={commitTitle}
           onKeyDown={(event) => {
             if (event.key === "Enter") {
@@ -267,6 +283,9 @@ export default function Toolbar({
             if (event.key === "Escape") {
               event.preventDefault();
               setTitleInput(activeTitle);
+              if (activeTabId) {
+                onTitleDraftChange(activeTabId, activeTitle);
+              }
               editor?.commands.focus();
             }
           }}
