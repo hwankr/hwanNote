@@ -398,6 +398,7 @@ export default function App() {
   const inFlightIntentKeysRef = useRef<Set<string>>(new Set());
   const hydrationCompleteRef = useRef(false);
   const guardedFlowRef = useRef(false);
+  const allowImmediateCloseRef = useRef(false);
 
   const tabById = useMemo(() => {
     const map = new Map<string, NoteTab>();
@@ -1412,6 +1413,21 @@ export default function App() {
     }
   }, [loadLibraryState, resolveOpenTabsBeforeReload]);
 
+  const handleInstallUpdate = useCallback(async () => {
+    const didResolve = await resolveOpenTabsBeforeReload();
+    if (!didResolve) {
+      return;
+    }
+
+    allowImmediateCloseRef.current = true;
+    try {
+      await hwanNote.updater.install();
+    } catch (error) {
+      allowImmediateCloseRef.current = false;
+      console.error("Failed to install update:", error);
+    }
+  }, [resolveOpenTabsBeforeReload]);
+
   useEffect(() => {
     void refreshLocalAutoSaveDir().catch(() => {
       setAutoSaveDir("");
@@ -1443,6 +1459,9 @@ export default function App() {
     let cleanup: (() => void) | null = null;
 
     void getCurrentWindow().onCloseRequested(async (event) => {
+      if (allowImmediateCloseRef.current) {
+        return;
+      }
       event.preventDefault();
       if (!disposed) {
         await handleRequestCloseWindow();
@@ -1976,7 +1995,7 @@ export default function App() {
         }}
       />
 
-      <UpdateToast language={language} />
+      <UpdateToast language={language} onInstall={handleInstallUpdate} />
     </div>
   );
 }

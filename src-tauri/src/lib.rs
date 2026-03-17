@@ -60,6 +60,7 @@ pub fn run() {
             enqueue_open_intents(app, intents, true);
         }))
         .manage(PendingUpdate::default())
+        .manage(DownloadedUpdate::default())
         .manage(PendingOpenIntents::default())
         .invoke_handler(tauri::generate_handler![
             cmd_window_minimize,

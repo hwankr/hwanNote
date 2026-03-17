@@ -6,9 +6,10 @@ type UpdateStatus = "checking" | "available" | "not-available" | "downloading" |
 
 interface Props {
   language: AppLanguage;
+  onInstall: () => Promise<void>;
 }
 
-export default function UpdateToast({ language }: Props) {
+export default function UpdateToast({ language, onInstall }: Props) {
   const [status, setStatus] = useState<UpdateStatus | null>(null);
   const [version, setVersion] = useState("");
   const [progress, setProgress] = useState(0);
@@ -74,7 +75,7 @@ export default function UpdateToast({ language }: Props) {
         <>
           <span className="update-toast-text">{t("update.downloaded")}</span>
           <div className="update-toast-actions">
-            <button className="update-toast-btn update-toast-btn-primary" onClick={() => void hwanNote.updater.install()}>
+            <button className="update-toast-btn update-toast-btn-primary" onClick={() => void onInstall()}>
               {t("update.install")}
             </button>
             <button className="update-toast-btn" onClick={() => setDismissed(true)}>

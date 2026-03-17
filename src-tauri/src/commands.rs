@@ -20,6 +20,19 @@ impl Default for PendingUpdate {
     }
 }
 
+struct DownloadedUpdatePayload {
+    update: tauri_plugin_updater::Update,
+    bytes: Vec<u8>,
+}
+
+pub struct DownloadedUpdate(Mutex<Option<DownloadedUpdatePayload>>);
+
+impl Default for DownloadedUpdate {
+    fn default() -> Self {
+        DownloadedUpdate(Mutex::new(None))
+    }
+}
+
 
 pub struct PendingOpenIntents(pub Mutex<Vec<String>>);
 
@@ -434,6 +447,7 @@ pub async fn check_for_updates(app: AppHandle) {
                 .lock()
                 .unwrap()
                 .replace(update);
+            app.state::<DownloadedUpdate>().0.lock().unwrap().take();
         }
         Ok(None) => {
             emit(UpdateStatusPayload {
@@ -474,7 +488,7 @@ pub async fn cmd_updater_download(app: AppHandle) {
         let win_progress = window.clone();
 
         let result = update
-            .download_and_install(
+            .download(
                 move |chunk_length, content_length| {
                     downloaded += chunk_length;
                     if let Some(total) = content_length {
@@ -495,7 +509,12 @@ pub async fn cmd_updater_download(app: AppHandle) {
             .await;
 
         match result {
-            Ok(_) => {
+            Ok(bytes) => {
+                app.state::<DownloadedUpdate>()
+                    .0
+                    .lock()
+                    .unwrap()
+                    .replace(DownloadedUpdatePayload { update, bytes });
                 let _ = window.emit(
                     "updater:status",
                     UpdateStatusPayload {
@@ -507,6 +526,11 @@ pub async fn cmd_updater_download(app: AppHandle) {
                 );
             }
             Err(e) => {
+                app.state::<PendingUpdate>()
+                    .0
+                    .lock()
+                    .unwrap()
+                    .replace(update);
                 let _ = window.emit(
                     "updater:status",
                     UpdateStatusPayload {
@@ -523,6 +547,53 @@ pub async fn cmd_updater_download(app: AppHandle) {
 
 #[tauri::command]
 pub fn cmd_updater_install(app: AppHandle) {
+    let window = match app.get_webview_window("main") {
+        Some(w) => w,
+        None => return,
+    };
+
+    let downloaded = app
+        .state::<DownloadedUpdate>()
+        .0
+        .lock()
+        .unwrap()
+        .take();
+
+    let Some(downloaded) = downloaded else {
+        let _ = window.emit(
+            "updater:status",
+            UpdateStatusPayload {
+                status: "error".to_string(),
+                version: None,
+                progress: None,
+                error: Some("No downloaded update is ready to install.".to_string()),
+            },
+        );
+        return;
+    };
+
+    let DownloadedUpdatePayload { update, bytes } = downloaded;
+    let result = update.install(bytes.clone());
+
+    if let Err(error) = result {
+        app.state::<DownloadedUpdate>()
+            .0
+            .lock()
+            .unwrap()
+            .replace(DownloadedUpdatePayload { update, bytes });
+        let _ = window.emit(
+            "updater:status",
+            UpdateStatusPayload {
+                status: "error".to_string(),
+                version: None,
+                progress: None,
+                error: Some(error.to_string()),
+            },
+        );
+        return;
+    }
+
+    #[cfg(not(target_os = "windows"))]
     app.restart();
 }
 
