@@ -33,6 +33,7 @@ interface SidebarProps {
   onMoveNoteToFolder: (id: string, folderPath: string) => void;
   onTogglePinNote: (id: string) => void;
   onDeleteNote: (id: string) => void;
+  onCreateNoteInFolder: (folderPath: string) => void;
   onCreateFolder: (folderPath: string) => void;
   onRenameFolder: (from: string, to: string) => void;
   onDeleteFolder: (folderPath: string) => void;
@@ -85,6 +86,7 @@ export default function Sidebar({
   onMoveNoteToFolder,
   onTogglePinNote,
   onDeleteNote,
+  onCreateNoteInFolder,
   onCreateFolder,
   onRenameFolder,
   onDeleteFolder
@@ -173,6 +175,7 @@ export default function Sidebar({
           searchQuery={searchQuery}
           actions={{
             onSelectFolder,
+            onCreateNote: onCreateNoteInFolder,
             onCreateFolder,
             onRenameFolder,
             onDeleteFolder,

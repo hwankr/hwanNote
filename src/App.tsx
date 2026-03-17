@@ -1034,8 +1034,9 @@ export default function App() {
     setActiveTab(tabId);
   }, [flushTitleDraft, focusedPane, focusedTabId, openNote, setActiveTab, setPaneTab]);
 
-  const handleCreateTabInFocusedPane = useCallback(() => {
+  const handleCreateTabInFocusedPane = useCallback((targetFolderPath?: string | null) => {
     flushTitleDraft(focusedTabId);
+    const normalizedTargetFolder = targetFolderPath ? normalizeFolderPath(targetFolderPath) : "";
     const prevIds = new Set(openTabIds);
     createTab();
 
@@ -1046,10 +1047,15 @@ export default function App() {
         return;
       }
 
+      if (normalizedTargetFolder) {
+        moveTabToFolder(createdId, normalizedTargetFolder);
+        setSelectedFolder(normalizedTargetFolder);
+      }
+
       setPaneTab(focusedPane, createdId);
       setActiveTab(createdId);
     });
-  }, [createTab, flushTitleDraft, focusedPane, focusedTabId, openTabIds, setActiveTab, setPaneTab]);
+  }, [createTab, flushTitleDraft, focusedPane, focusedTabId, moveTabToFolder, openTabIds, setActiveTab, setPaneTab]);
 
   const resolveWorkspaceDropTarget = useCallback((clientX: number, clientY: number) => {
     const workspace = editorWorkspaceRef.current;
@@ -1840,6 +1846,9 @@ export default function App() {
           onSelectNote={handleSelectNoteInFocusedPane}
           onTogglePinNote={togglePinTab}
           onDeleteNote={(id) => { void handleDeleteNote(id); }}
+          onCreateNoteInFolder={(folderPath) => {
+            handleCreateTabInFocusedPane(folderPath);
+          }}
           onMoveNoteToFolder={(id, folderPath) => {
             moveTabToFolder(id, normalizeFolderPath(folderPath));
           }}

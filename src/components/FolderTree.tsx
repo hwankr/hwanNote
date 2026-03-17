@@ -11,6 +11,7 @@ interface FolderRow {
 
 interface FolderActions {
   onSelectFolder: (folderPath: string | null) => void;
+  onCreateNote: (folderPath: string) => void;
   onCreateFolder: (folderPath: string) => void;
   onRenameFolder: (from: string, to: string) => void;
   onDeleteFolder: (folderPath: string) => void;
@@ -238,6 +239,12 @@ export default function FolderTree({
     setFolderMenu(null);
   }, [folderMenu]);
 
+  const handleCreateNote = useCallback(() => {
+    if (!folderMenu) return;
+    actions.onCreateNote(folderMenu.folderPath);
+    setFolderMenu(null);
+  }, [actions, folderMenu]);
+
   const handleRenameStart = useCallback(() => {
     if (!folderMenu) return;
     setRenamingFolder(folderMenu.folderPath);
@@ -258,13 +265,15 @@ export default function FolderTree({
     if (!folderMenu) return [];
 
     return [
+      { key: "newNote", label: t("sidebar.addNote"), onClick: handleCreateNote },
+      { key: "sep0", separator: true },
       { key: "newSub", label: t("sidebar.newSubfolder"), onClick: handleNewSubfolder },
       { key: "sep1", separator: true },
       { key: "rename", label: t("sidebar.renameFolder"), onClick: handleRenameStart },
       { key: "sep2", separator: true },
       { key: "delete", label: t("sidebar.deleteFolder"), danger: true, onClick: handleDelete },
     ];
-  }, [folderMenu, t, handleNewSubfolder, handleRenameStart, handleDelete]);
+  }, [folderMenu, t, handleCreateNote, handleNewSubfolder, handleRenameStart, handleDelete]);
 
   const getCreatingDepth = useCallback((parentPath: string) => {
     if (parentPath === "") return 0;
