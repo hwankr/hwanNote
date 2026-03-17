@@ -1,7 +1,7 @@
 import { type KeyboardEvent, useState } from "react";
 import { useI18n } from "../i18n/context";
 import type { AppLanguage } from "../i18n/messages";
-import type { CloudProviderInfo } from "../lib/tauriApi";
+import type { CloudProviderInfo, CloudSyncSource } from "../lib/tauriApi";
 import {
   SHORTCUT_DEFINITIONS,
   SHORTCUT_GROUPS,
@@ -27,9 +27,11 @@ interface SettingsPanelProps {
   onBrowseAutoSaveDir: () => void;
   onResetAutoSaveDir: () => void;
   cloudSyncProvider: string | null;
+  cloudSyncSource: CloudSyncSource;
   cloudProviders: CloudProviderInfo[];
   noteCount: number;
-  onCloudSyncChange: (provider: string | null) => Promise<void>;
+  onCloudSyncChange: (provider: string | null, options?: { copyLocalNotes: boolean }) => Promise<void>;
+  onCloudSyncSourceChange: (source: CloudSyncSource) => Promise<void>;
   shortcuts: ShortcutMap;
   onThemeModeChange: (mode: ThemeMode) => void;
   onEditorLineHeightChange: (value: number) => void;
@@ -53,9 +55,11 @@ export default function SettingsPanel({
   onBrowseAutoSaveDir,
   onResetAutoSaveDir,
   cloudSyncProvider,
+  cloudSyncSource,
   cloudProviders,
   noteCount,
   onCloudSyncChange,
+  onCloudSyncSourceChange,
   shortcuts,
   onThemeModeChange,
   onEditorLineHeightChange,
@@ -238,7 +242,6 @@ export default function SettingsPanel({
                 type="button"
                 className="settings-autosave-btn"
                 onClick={onBrowseAutoSaveDir}
-                disabled={cloudSyncProvider != null}
               >
                 {t("settings.autoSaveBrowse")}
               </button>
@@ -268,14 +271,22 @@ export default function SettingsPanel({
                   const provider = cloudProviders.find((p) => p.id === value);
                   if (!provider?.available) return;
                   const msg = t("settings.cloudSyncConfirmEnable", {
-                    count: noteCount,
                     provider: provider.name,
                   });
                   if (!window.confirm(msg)) {
                     event.target.value = cloudSyncProvider ?? "";
                     return;
                   }
-                  void onCloudSyncChange(value);
+                  const copyLocalNotes =
+                    noteCount > 0
+                      ? window.confirm(
+                          t("settings.cloudSyncConfirmCopy", {
+                            count: noteCount,
+                            provider: provider.name,
+                          })
+                        )
+                      : false;
+                  void onCloudSyncChange(value, { copyLocalNotes });
                 } else {
                   if (!window.confirm(t("settings.cloudSyncConfirmDisable"))) {
                     event.target.value = cloudSyncProvider ?? "";
@@ -302,6 +313,29 @@ export default function SettingsPanel({
             })()}
             <div className="settings-subtext">{t("settings.cloudSyncHelp")}</div>
           </div>
+
+          {cloudSyncProvider && (
+            <div className="settings-item">
+              <label htmlFor="cloud-sync-source">{t("settings.cloudSyncSource")}</label>
+              <select
+                id="cloud-sync-source"
+                value={cloudSyncSource}
+                onChange={(event) => {
+                  const value = event.target.value as CloudSyncSource;
+                  if (value === cloudSyncSource) {
+                    return;
+                  }
+                  void onCloudSyncSourceChange(value);
+                }}
+              >
+                <option value="cloud">
+                  {cloudProviders.find((provider) => provider.id === cloudSyncProvider)?.name ?? t("settings.cloudSyncSourceCloud")}
+                </option>
+                <option value="local">{t("settings.cloudSyncSourceLocal")}</option>
+              </select>
+              <div className="settings-subtext">{t("settings.cloudSyncSourceHelp")}</div>
+            </div>
+          )}
 
           <div className="settings-item">
             <label>{t("settings.shortcuts")}</label>

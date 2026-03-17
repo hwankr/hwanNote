@@ -48,21 +48,29 @@ export interface CloudProviderInfo {
   syncFolder: string | null;
 }
 
+export type CloudSyncSource = "local" | "cloud";
+
 export interface CloudSyncResult {
   provider: string | null;
-  effectiveDir: string;
   filesCopied: number;
+  activeSource: CloudSyncSource;
 }
 
 export interface CloudSyncStatus {
   enabled: boolean;
   provider: string | null;
   syncFolder: string | null;
+  activeSource: CloudSyncSource;
 }
 
 export interface CloudFolderMissingData {
   expectedPath: string;
   fallbackPath: string;
+}
+
+export interface FolderDeleteResult {
+  folders: string[];
+  movedNoteIds: string[];
 }
 
 // -- IPC abstraction layer --
@@ -149,6 +157,20 @@ export const hwanNote = {
       invoke<boolean>("cmd_note_delete", { noteId }),
   },
 
+  folder: {
+    list: () =>
+      invoke<string[]>("cmd_folder_list"),
+
+    create: (folderPath: string) =>
+      invoke<string[]>("cmd_folder_create", { folderPath }),
+
+    rename: (from: string, to: string) =>
+      invoke<string[]>("cmd_folder_rename", { from, to }),
+
+    delete: (folderPath: string) =>
+      invoke<FolderDeleteResult>("cmd_folder_delete", { folderPath }),
+  },
+
   updater: {
     check: () => invoke("cmd_updater_check"),
     download: () => invoke("cmd_updater_download"),
@@ -172,14 +194,17 @@ export const hwanNote = {
     detectProviders: () =>
       invoke<CloudProviderInfo[]>("cmd_cloud_detect_providers"),
 
-    enable: (provider: string) =>
-      invoke<CloudSyncResult>("cmd_cloud_sync_enable", { provider }),
+    enable: (provider: string, copyExisting: boolean) =>
+      invoke<CloudSyncResult>("cmd_cloud_sync_enable", { provider, copyExisting }),
 
     disable: () =>
       invoke<CloudSyncResult>("cmd_cloud_sync_disable"),
 
     status: () =>
       invoke<CloudSyncStatus>("cmd_cloud_sync_status"),
+
+    setActiveSource: (source: CloudSyncSource) =>
+      invoke<CloudSyncStatus>("cmd_cloud_sync_set_active_source", { source }),
 
     onFolderMissing: (callback: (data: CloudFolderMissingData) => void): (() => void) =>
       wrapListener<CloudFolderMissingData>("cloud:folder-missing", callback),

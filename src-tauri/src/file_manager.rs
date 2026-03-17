@@ -81,6 +81,13 @@ pub struct LoadedNote {
     pub file_path: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderDeleteResult {
+    pub folders: Vec<String>,
+    pub moved_note_ids: Vec<String>,
+}
+
 // ── Time helpers ──
 
 fn system_time_to_millis(time: SystemTime) -> u64 {
@@ -128,31 +135,55 @@ fn strip_inbox_root_alias(path: &str) -> String {
     segments.join("/")
 }
 
-pub fn sanitize_folder_path(folder_path: Option<&str>) -> String {
-    let folder_path = match folder_path {
-        Some(p) if !p.is_empty() => p,
-        _ => return String::new(),
-    };
-
-    let normalized = folder_path
-        .replace('\\', "/")
-        .split('/')
-        .map(|segment| {
-            segment
-                .chars()
-                .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
-                .collect::<String>()
+fn is_invalid_folder_segment(segment: &str) -> bool {
+    segment == "."
+        || segment == ".."
+        || segment.ends_with(' ')
+        || segment.ends_with('.')
+        || segment.chars().any(|c| {
+            c.is_ascii_control() || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
         })
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("/");
-    let normalized = strip_inbox_root_alias(&normalized);
+}
 
-    if normalized.is_empty() {
-        return String::new();
+fn validate_folder_segment(segment: &str) -> Result<(), String> {
+    if is_invalid_folder_segment(segment) {
+        return Err(format!("Invalid folder name segment: {}", segment));
     }
 
-    normalized
+    Ok(())
+}
+
+pub fn sanitize_folder_path(folder_path: Option<&str>) -> Result<String, String> {
+    let folder_path = match folder_path {
+        Some(p) if !p.trim().is_empty() => p,
+        _ => return Ok(String::new()),
+    };
+
+    let mut segments = folder_path
+        .replace('\\', "/")
+        .split('/')
+        .map(|segment| segment.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>();
+
+    if segments
+        .first()
+        .map_or(false, |segment| segment.eq_ignore_ascii_case("inbox"))
+    {
+        segments.remove(0);
+    }
+
+    for segment in &segments {
+        validate_folder_segment(segment)?;
+    }
+
+    let normalized = strip_inbox_root_alias(&segments.join("/"));
+
+    if normalized.is_empty() {
+        return Ok(String::new());
+    }
+
+    Ok(normalized)
 }
 
 pub fn slugify_title(title: &str) -> String {
@@ -489,6 +520,15 @@ fn walk_markdown_files(root_dir: &Path, current_dir: &Path) -> Vec<PathBuf> {
     files
 }
 
+fn collect_markdown_file_map(root_dir: &Path) -> HashMap<String, PathBuf> {
+    let mut by_relative_path = HashMap::new();
+    for file_path in walk_markdown_files(root_dir, root_dir) {
+        let rel = relative_path(root_dir, &file_path);
+        by_relative_path.insert(rel, file_path);
+    }
+    by_relative_path
+}
+
 fn ensure_unique_file_path(
     target_dir: &Path,
     base_name: &str,
@@ -518,10 +558,109 @@ fn ensure_unique_file_path(
     }
 }
 
+fn walk_folder_paths(root_dir: &Path, current_dir: &Path, folders: &mut Vec<String>) {
+    let entries = match fs::read_dir(current_dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let relative = strip_inbox_root_alias(&relative_path(root_dir, &path));
+        if !relative.is_empty() {
+            folders.push(relative);
+        }
+        walk_folder_paths(root_dir, &path, folders);
+    }
+}
+
 fn relative_path(from: &Path, to: &Path) -> String {
     match to.strip_prefix(from) {
         Ok(rel) => to_posix(&rel.to_string_lossy()),
         Err(_) => to_posix(&to.to_string_lossy()),
+    }
+}
+
+fn reconcile_index_with_files(
+    auto_save_dir: &Path,
+    index: &mut NoteIndex,
+    by_relative_path: &HashMap<String, PathBuf>,
+) -> Result<bool, String> {
+    let mut used_paths: HashSet<String> = HashSet::new();
+    let mut index_changed = false;
+
+    let missing_ids: Vec<String> = index
+        .entries
+        .iter()
+        .filter(|(_, entry)| !by_relative_path.contains_key(&entry.relative_path))
+        .map(|(id, _)| id.clone())
+        .collect();
+
+    for id in &missing_ids {
+        index.entries.remove(id);
+        index_changed = true;
+    }
+
+    for entry in index.entries.values() {
+        used_paths.insert(entry.relative_path.clone());
+    }
+
+    for (rel_path, full_path) in by_relative_path {
+        if used_paths.contains(rel_path) {
+            continue;
+        }
+
+        let generated_id = generate_note_id(rel_path);
+        if !index.entries.contains_key(&generated_id) {
+            let metadata = fs::metadata(full_path).map_err(|e| e.to_string())?;
+            let created_at = metadata
+                .created()
+                .map(system_time_to_millis)
+                .unwrap_or_else(|_| {
+                    metadata
+                        .modified()
+                        .map(system_time_to_millis)
+                        .unwrap_or_else(|_| now_millis())
+                });
+
+            index.entries.insert(
+                generated_id,
+                NoteIndexEntry {
+                    relative_path: rel_path.clone(),
+                    created_at,
+                    manual_title: None,
+                },
+            );
+            used_paths.insert(rel_path.clone());
+            index_changed = true;
+        }
+    }
+
+    if index_changed {
+        write_index(auto_save_dir, index)?;
+    }
+
+    Ok(index_changed)
+}
+
+fn ensure_unique_note_id(existing_ids: &HashSet<String>, seed: &str) -> String {
+    let mut counter = 0u32;
+
+    loop {
+        let candidate_seed = if counter == 0 {
+            seed.to_string()
+        } else {
+            format!("{}#{}", seed, counter + 1)
+        };
+        let candidate = generate_note_id(&candidate_seed);
+        if !existing_ids.contains(&candidate) {
+            return candidate;
+        }
+        counter += 1;
     }
 }
 
@@ -579,6 +718,141 @@ pub fn list_markdown_files(dir_path: &Path) -> Result<Vec<String>, String> {
     Ok(files)
 }
 
+pub fn list_folders(auto_save_dir: &Path) -> Result<Vec<String>, String> {
+    fs::create_dir_all(auto_save_dir).map_err(|e| e.to_string())?;
+
+    let mut folders = Vec::new();
+    walk_folder_paths(auto_save_dir, auto_save_dir, &mut folders);
+    folders.sort();
+    folders.dedup();
+    Ok(folders)
+}
+
+pub fn create_folder(auto_save_dir: &Path, folder_path: &str) -> Result<Vec<String>, String> {
+    fs::create_dir_all(auto_save_dir).map_err(|e| e.to_string())?;
+
+    let normalized = sanitize_folder_path(Some(folder_path))?;
+    if normalized.is_empty() {
+        return Err("Folder path is required.".to_string());
+    }
+
+    fs::create_dir_all(auto_save_dir.join(&normalized)).map_err(|e| e.to_string())?;
+    list_folders(auto_save_dir)
+}
+
+pub fn rename_folder(auto_save_dir: &Path, from: &str, to: &str) -> Result<Vec<String>, String> {
+    fs::create_dir_all(auto_save_dir).map_err(|e| e.to_string())?;
+
+    let from_path = sanitize_folder_path(Some(from))?;
+    let to_path = sanitize_folder_path(Some(to))?;
+
+    if from_path.is_empty() || to_path.is_empty() {
+        return Err("Folder path is required.".to_string());
+    }
+    if from_path == to_path {
+        return list_folders(auto_save_dir);
+    }
+    if to_path.starts_with(&format!("{}/", from_path)) {
+        return Err("Cannot move a folder into its own child.".to_string());
+    }
+
+    let source_dir = auto_save_dir.join(&from_path);
+    if !source_dir.exists() {
+        return Err("Folder not found.".to_string());
+    }
+
+    let target_dir = auto_save_dir.join(&to_path);
+    if target_dir.exists() {
+        return Err("Target folder already exists.".to_string());
+    }
+
+    if let Some(parent) = target_dir.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    fs::rename(&source_dir, &target_dir).map_err(|e| e.to_string())?;
+
+    let mut index = read_index(auto_save_dir);
+    let from_prefix = format!("{}/", from_path);
+    let to_prefix = format!("{}/", to_path);
+    let mut index_changed = false;
+
+    for entry in index.entries.values_mut() {
+        if entry.relative_path.starts_with(&from_prefix) {
+            entry.relative_path =
+                format!("{}{}", to_prefix, &entry.relative_path[from_prefix.len()..]);
+            index_changed = true;
+        }
+    }
+
+    if index_changed {
+        write_index(auto_save_dir, &index)?;
+    }
+
+    list_folders(auto_save_dir)
+}
+
+pub fn delete_folder(auto_save_dir: &Path, folder_path: &str) -> Result<FolderDeleteResult, String> {
+    fs::create_dir_all(auto_save_dir).map_err(|e| e.to_string())?;
+
+    let normalized = sanitize_folder_path(Some(folder_path))?;
+    if normalized.is_empty() {
+        return Err("Folder path is required.".to_string());
+    }
+
+    let source_dir = auto_save_dir.join(&normalized);
+    let prefix = format!("{}/", normalized);
+    let mut index = read_index(auto_save_dir);
+    let matching_entries = index
+        .entries
+        .iter()
+        .filter_map(|(note_id, entry)| {
+            if entry.relative_path.starts_with(&prefix) {
+                Some((note_id.clone(), entry.relative_path.clone()))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if !source_dir.exists() && matching_entries.is_empty() {
+        return Err("Folder not found.".to_string());
+    }
+
+    let mut moved_note_ids = Vec::new();
+
+    for (note_id, old_relative_path) in matching_entries {
+        let old_path = auto_save_dir.join(&old_relative_path);
+        if !old_path.exists() {
+            return Err(format!("Note file missing during folder delete: {}", old_relative_path));
+        }
+
+        let base_name = old_path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.is_empty())
+            .unwrap_or("untitled");
+        let new_path = ensure_unique_file_path(auto_save_dir, base_name, None);
+        fs::rename(&old_path, &new_path).map_err(|e| e.to_string())?;
+
+        if let Some(entry) = index.entries.get_mut(&note_id) {
+            entry.relative_path = relative_path(auto_save_dir, &new_path);
+        }
+        moved_note_ids.push(note_id);
+    }
+
+    write_index(auto_save_dir, &index)?;
+
+    if source_dir.exists() {
+        fs::remove_dir_all(&source_dir).map_err(|e| e.to_string())?;
+    }
+
+    Ok(FolderDeleteResult {
+        folders: list_folders(auto_save_dir)?,
+        moved_note_ids,
+    })
+}
+
 pub fn auto_save_markdown_note(
     auto_save_dir: &Path,
     payload: &AutoSavePayload,
@@ -591,7 +865,7 @@ pub fn auto_save_markdown_note(
             sanitized
         }
     };
-    let safe_folder = sanitize_folder_path(payload.folder_path.as_deref());
+    let safe_folder = sanitize_folder_path(payload.folder_path.as_deref())?;
     let target_dir = if safe_folder.is_empty() {
         auto_save_dir.to_path_buf()
     } else {
@@ -670,65 +944,8 @@ pub fn load_markdown_notes(auto_save_dir: &Path) -> Result<Vec<LoadedNote>, Stri
     fs::create_dir_all(auto_save_dir).map_err(|e| e.to_string())?;
 
     let mut index = read_index(auto_save_dir);
-    let files = walk_markdown_files(auto_save_dir, auto_save_dir);
-
-    let mut by_relative_path: HashMap<String, PathBuf> = HashMap::new();
-    for file_path in &files {
-        let rel = relative_path(auto_save_dir, file_path);
-        by_relative_path.insert(rel, file_path.clone());
-    }
-
-    let mut used_paths: HashSet<String> = HashSet::new();
-    let mut index_changed = false;
-
-    // Remove entries for missing files
-    let missing_ids: Vec<String> = index
-        .entries
-        .iter()
-        .filter(|(_, entry)| !by_relative_path.contains_key(&entry.relative_path))
-        .map(|(id, _)| id.clone())
-        .collect();
-
-    for id in &missing_ids {
-        index.entries.remove(id);
-        index_changed = true;
-    }
-
-    // Track used paths
-    for entry in index.entries.values() {
-        used_paths.insert(entry.relative_path.clone());
-    }
-
-    // Add entries for orphan files
-    for (rel_path, full_path) in &by_relative_path {
-        if used_paths.contains(rel_path) {
-            continue;
-        }
-
-        let generated_id = generate_note_id(rel_path);
-        if !index.entries.contains_key(&generated_id) {
-            let metadata = fs::metadata(full_path).map_err(|e| e.to_string())?;
-            let created_at = metadata
-                .created()
-                .map(system_time_to_millis)
-                .unwrap_or_else(|_| {
-                    metadata
-                        .modified()
-                        .map(system_time_to_millis)
-                        .unwrap_or_else(|_| now_millis())
-                });
-
-            index.entries.insert(
-                generated_id,
-                NoteIndexEntry {
-                    relative_path: rel_path.clone(),
-                    created_at,
-                    manual_title: None,
-                },
-            );
-            index_changed = true;
-        }
-    }
+    let by_relative_path = collect_markdown_file_map(auto_save_dir);
+    reconcile_index_with_files(auto_save_dir, &mut index, &by_relative_path)?;
 
     // Build notes
     let mut notes: Vec<LoadedNote> = Vec::new();
@@ -783,10 +1000,6 @@ pub fn load_markdown_notes(auto_save_dir: &Path) -> Result<Vec<LoadedNote>, Stri
             updated_at,
             file_path: file_path.to_string_lossy().to_string(),
         });
-    }
-
-    if index_changed {
-        write_index(auto_save_dir, &index)?;
     }
 
     notes.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
@@ -869,45 +1082,99 @@ pub struct MigrationResult {
     pub index_copied: bool,
 }
 
-/// Copy all .md files and the index from src_dir to dst_dir.
-/// Preserves relative directory structure. Does NOT delete originals.
+/// Merge all .md files from src_dir into dst_dir without overwriting
+/// existing destination notes or replacing the destination index.
+/// Preserves relative directory structure and creates empty folders.
 pub fn migrate_notes(src_dir: &Path, dst_dir: &Path) -> Result<MigrationResult, String> {
     fs::create_dir_all(dst_dir).map_err(|e| format!("Failed to create destination: {}", e))?;
 
-    let md_files = walk_markdown_files(src_dir, src_dir);
+    for folder in list_folders(src_dir)? {
+        fs::create_dir_all(dst_dir.join(folder))
+            .map_err(|e| format!("Failed to create destination folder: {}", e))?;
+    }
+
+    let mut src_index = read_index(src_dir);
+    let src_files = collect_markdown_file_map(src_dir);
+    reconcile_index_with_files(src_dir, &mut src_index, &src_files)?;
+
+    let mut dst_index = read_index(dst_dir);
+    let dst_files = collect_markdown_file_map(dst_dir);
+    reconcile_index_with_files(dst_dir, &mut dst_index, &dst_files)?;
+
+    let mut existing_dst_paths: HashSet<String> =
+        collect_markdown_file_map(dst_dir).into_keys().collect();
+    let mut existing_dst_ids: HashSet<String> = dst_index.entries.keys().cloned().collect();
     let mut files_copied: u32 = 0;
+    let mut index_changed = false;
 
-    for src_file in &md_files {
-        let rel = match src_file.strip_prefix(src_dir) {
-            Ok(r) => r,
-            Err(_) => continue,
+    let mut source_entries: Vec<_> = src_index.entries.iter().collect();
+    source_entries.sort_by(|(left_id, _), (right_id, _)| left_id.cmp(right_id));
+
+    for (src_note_id, src_entry) in source_entries {
+        let Some(src_file) = src_files.get(&src_entry.relative_path) else {
+            continue;
         };
-        let dst_file = dst_dir.join(rel);
 
-        if let Some(parent) = dst_file.parent() {
+        if let Some(existing_entry) = dst_index.entries.get(src_note_id) {
+            let existing_path = dst_dir.join(&existing_entry.relative_path);
+            if existing_path.exists() {
+                continue;
+            }
+        }
+
+        let desired_path = dst_dir.join(&src_entry.relative_path);
+        let parent_dir = desired_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| dst_dir.to_path_buf());
+        let base_name = src_file
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.is_empty())
+            .unwrap_or("untitled");
+
+        let final_path = if existing_dst_paths.contains(&src_entry.relative_path) || desired_path.exists() {
+            ensure_unique_file_path(&parent_dir, base_name, None)
+        } else {
+            desired_path
+        };
+
+        if let Some(parent) = final_path.parent() {
             fs::create_dir_all(parent)
                 .map_err(|e| format!("Failed to create directory {:?}: {}", parent, e))?;
         }
 
-        fs::copy(src_file, &dst_file)
+        fs::copy(src_file, &final_path)
             .map_err(|e| format!("Failed to copy {:?}: {}", src_file, e))?;
         files_copied += 1;
+
+        let final_rel = relative_path(dst_dir, &final_path);
+        let final_note_id = if existing_dst_ids.contains(src_note_id) {
+            ensure_unique_note_id(&existing_dst_ids, &final_rel)
+        } else {
+            src_note_id.clone()
+        };
+
+        dst_index.entries.insert(
+            final_note_id.clone(),
+            NoteIndexEntry {
+                relative_path: final_rel.clone(),
+                created_at: src_entry.created_at,
+                manual_title: src_entry.manual_title.clone(),
+            },
+        );
+        existing_dst_paths.insert(final_rel);
+        existing_dst_ids.insert(final_note_id);
+        index_changed = true;
     }
 
-    // Copy index file if it exists
-    let src_index = src_dir.join(INDEX_FILENAME);
-    let index_copied = if src_index.exists() {
-        let dst_index = dst_dir.join(INDEX_FILENAME);
-        fs::copy(&src_index, &dst_index)
-            .map_err(|e| format!("Failed to copy index: {}", e))?;
-        true
-    } else {
-        false
-    };
+    if index_changed {
+        write_index(dst_dir, &dst_index)?;
+    }
 
     Ok(MigrationResult {
         files_copied,
-        index_copied,
+        index_copied: index_changed,
     })
 }
 
@@ -921,5 +1188,188 @@ pub fn title_from_filename(file_path: &Path) -> String {
         "\u{c81c}\u{baa9} \u{c5c6}\u{c74c}".to_string() // 제목 없음
     } else {
         title
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process;
+
+    fn make_temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "hwan-note-{}-{}-{}",
+            name,
+            process::id(),
+            now_millis()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn cleanup_temp_dir(path: &Path) {
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn sanitize_folder_path_preserves_valid_segments() {
+        assert_eq!(sanitize_folder_path(Some(".folder")).unwrap(), ".folder");
+        assert_eq!(
+            sanitize_folder_path(Some(" inbox/.config/dev ")).unwrap(),
+            ".config/dev"
+        );
+        assert_eq!(sanitize_folder_path(Some("team-alpha")).unwrap(), "team-alpha");
+    }
+
+    #[test]
+    fn sanitize_folder_path_rejects_invalid_segments() {
+        assert!(sanitize_folder_path(Some(".")).is_err());
+        assert!(sanitize_folder_path(Some("..")).is_err());
+        assert!(sanitize_folder_path(Some("bad<name>")).is_err());
+        assert!(sanitize_folder_path(Some("traildot.")).is_err());
+        assert!(sanitize_folder_path(Some("bad|name")).is_err());
+    }
+
+    #[test]
+    fn create_and_list_folders_include_empty_directories() {
+        let dir = make_temp_dir("folder-list");
+        let result = (|| -> Result<(), String> {
+            create_folder(&dir, "alpha")?;
+            create_folder(&dir, "parent/child")?;
+            create_folder(&dir, ".folder")?;
+
+            let folders = list_folders(&dir)?;
+            assert_eq!(
+                folders,
+                vec![".folder".to_string(), "alpha".to_string(), "parent".to_string(), "parent/child".to_string()]
+            );
+            Ok(())
+        })();
+        cleanup_temp_dir(&dir);
+        result.unwrap();
+    }
+
+    #[test]
+    fn rename_folder_moves_directory_and_updates_index() {
+        let dir = make_temp_dir("folder-rename");
+        let result = (|| -> Result<(), String> {
+            auto_save_markdown_note(
+                &dir,
+                &AutoSavePayload {
+                    note_id: "note-1".to_string(),
+                    title: "Alpha".to_string(),
+                    content: "# Alpha".to_string(),
+                    folder_path: Some("alpha".to_string()),
+                    is_title_manual: Some(true),
+                },
+            )?;
+
+            let folders = rename_folder(&dir, "alpha", "beta")?;
+            assert!(folders.contains(&"beta".to_string()));
+            assert!(!folders.contains(&"alpha".to_string()));
+
+            let notes = load_markdown_notes(&dir)?;
+            assert_eq!(notes.len(), 1);
+            assert_eq!(notes[0].folder_path, "beta");
+
+            let index = read_index(&dir);
+            let entry = index.entries.get("note-1").unwrap();
+            assert!(entry.relative_path.starts_with("beta/"));
+            Ok(())
+        })();
+        cleanup_temp_dir(&dir);
+        result.unwrap();
+    }
+
+    #[test]
+    fn delete_folder_moves_notes_to_root_and_removes_directory() {
+        let dir = make_temp_dir("folder-delete");
+        let result = (|| -> Result<(), String> {
+            auto_save_markdown_note(
+                &dir,
+                &AutoSavePayload {
+                    note_id: "note-1".to_string(),
+                    title: "Alpha".to_string(),
+                    content: "# Alpha".to_string(),
+                    folder_path: Some("alpha".to_string()),
+                    is_title_manual: Some(true),
+                },
+            )?;
+            auto_save_markdown_note(
+                &dir,
+                &AutoSavePayload {
+                    note_id: "note-2".to_string(),
+                    title: "Beta".to_string(),
+                    content: "# Beta".to_string(),
+                    folder_path: Some("alpha/child".to_string()),
+                    is_title_manual: Some(true),
+                },
+            )?;
+
+            let result = delete_folder(&dir, "alpha")?;
+            assert_eq!(result.moved_note_ids.len(), 2);
+            assert!(!dir.join("alpha").exists());
+
+            let notes = load_markdown_notes(&dir)?;
+            assert_eq!(notes.len(), 2);
+            assert!(notes.iter().all(|note| note.folder_path.is_empty()));
+
+            let folders = list_folders(&dir)?;
+            assert!(folders.is_empty());
+            Ok(())
+        })();
+        cleanup_temp_dir(&dir);
+        result.unwrap();
+    }
+
+    #[test]
+    fn migrate_notes_preserves_cloud_state_and_imports_local_conflicts_safely() {
+        let src = make_temp_dir("migrate-src");
+        let dst = make_temp_dir("migrate-dst");
+        let result = (|| -> Result<(), String> {
+            auto_save_markdown_note(
+                &dst,
+                &AutoSavePayload {
+                    note_id: "cloud-note".to_string(),
+                    title: "Shared".to_string(),
+                    content: "# Cloud version".to_string(),
+                    folder_path: Some("team".to_string()),
+                    is_title_manual: Some(true),
+                },
+            )?;
+            auto_save_markdown_note(
+                &src,
+                &AutoSavePayload {
+                    note_id: "local-note".to_string(),
+                    title: "Shared".to_string(),
+                    content: "# Local version".to_string(),
+                    folder_path: Some("team".to_string()),
+                    is_title_manual: Some(true),
+                },
+            )?;
+            create_folder(&src, "empty")?;
+
+            let migration = migrate_notes(&src, &dst)?;
+            assert_eq!(migration.files_copied, 1);
+            assert!(migration.index_copied);
+            assert!(dst.join("empty").exists());
+
+            let index = read_index(&dst);
+            let cloud_entry = index.entries.get("cloud-note").unwrap();
+            let local_entry = index.entries.get("local-note").unwrap();
+
+            assert_eq!(cloud_entry.relative_path, "team/Shared.md");
+            assert_ne!(local_entry.relative_path, cloud_entry.relative_path);
+            assert!(local_entry.relative_path.starts_with("team/Shared"));
+
+            let cloud_text = fs::read_to_string(dst.join(&cloud_entry.relative_path)).unwrap();
+            let local_text = fs::read_to_string(dst.join(&local_entry.relative_path)).unwrap();
+            assert!(cloud_text.contains("Cloud version"));
+            assert!(local_text.contains("Local version"));
+            Ok(())
+        })();
+        cleanup_temp_dir(&src);
+        cleanup_temp_dir(&dst);
+        result.unwrap();
     }
 }

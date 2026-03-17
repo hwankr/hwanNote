@@ -2,7 +2,7 @@ import { Editor as TiptapEditor } from "@tiptap/react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { message } from "@tauri-apps/plugin-dialog";
 import { type PointerEvent as ReactPointerEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { hwanNote, type CloudProviderInfo, type LoadedNote } from "./lib/tauriApi";
+import { hwanNote, type CloudProviderInfo, type CloudSyncSource, type LoadedNote } from "./lib/tauriApi";
 import Editor, { restoreEditorFocus } from "./components/Editor";
 import SettingsPanel, { type ThemeMode } from "./components/SettingsPanel";
 import Sidebar, { type SidebarTag } from "./components/Sidebar";
@@ -32,7 +32,6 @@ import {
   type SavedNoteSnapshot
 } from "./stores/noteStore";
 
-const CUSTOM_FOLDERS_KEY = "hwan-note:custom-folders";
 const EDITOR_FONT_SIZE_KEY = "hwan-note:editor-font-size";
 const EDITOR_LINE_HEIGHT_KEY = "hwan-note:editor-line-height";
 const EDITOR_SPELLCHECK_KEY = "hwan-note:editor-spellcheck";
@@ -358,8 +357,6 @@ export default function App() {
   const removeNote = useNoteStore((state) => state.removeNote);
   const togglePinTab = useNoteStore((state) => state.togglePinTab);
   const moveTabToFolder = useNoteStore((state) => state.moveTabToFolder);
-  const renameFolderPath = useNoteStore((state) => state.renameFolderPath);
-  const clearFolderPath = useNoteStore((state) => state.clearFolderPath);
   const updateTabContent = useNoteStore((state) => state.updateTabContent);
   const setTabTitle = useNoteStore((state) => state.setTabTitle);
   const markTabSaved = useNoteStore((state) => state.markTabSaved);
@@ -481,20 +478,7 @@ export default function App() {
   const [selectedFolder, setSelectedFolder] = useState<string | null>(null);
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
   const [sortMode, setSortMode] = useState<SortMode>("updated");
-  const [customFolders, setCustomFolders] = useState<string[]>(() => {
-    try {
-      const raw = window.localStorage.getItem(CUSTOM_FOLDERS_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw) as unknown;
-        if (Array.isArray(parsed)) {
-          return Array.from(new Set(
-            parsed.filter((e): e is string => typeof e === "string").map(normalizeFolderPath)
-          ));
-        }
-      }
-    } catch { /* ignore */ }
-    return [];
-  });
+  const [persistedFolders, setPersistedFolders] = useState<string[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [themeMode, setThemeMode] = useState<ThemeMode>("light");
   const [editorFontSize, setEditorFontSize] = useState(DEFAULT_EDITOR_FONT_SIZE);
@@ -505,6 +489,7 @@ export default function App() {
   const [shortcuts, setShortcuts] = useState<ShortcutMap>(() => createDefaultShortcuts());
   const [tabSize, setTabSize] = useState(DEFAULT_TAB_SIZE);
   const [cloudSyncProvider, setCloudSyncProvider] = useState<string | null>(null);
+  const [cloudSyncSource, setCloudSyncSource] = useState<CloudSyncSource>("local");
   const [cloudProviders, setCloudProviders] = useState<CloudProviderInfo[]>([]);
 
   const noteTags = useMemo(() => {
@@ -536,11 +521,11 @@ export default function App() {
   const folderPaths = useMemo(() => {
     const merged = new Set<string>();
 
-    customFolders.forEach((path) => merged.add(normalizeFolderPath(path)));
+    persistedFolders.forEach((path) => merged.add(normalizeFolderPath(path)));
     allNotes.forEach((tab) => merged.add(normalizeFolderPath(tab.folderPath)));
 
     return Array.from(merged).sort((a, b) => a.localeCompare(b, localeTag));
-  }, [customFolders, localeTag, allNotes]);
+  }, [persistedFolders, localeTag, allNotes]);
 
   const filteredNotes = useMemo(() => {
     const normalizedQuery = searchQuery.trim().toLowerCase();
@@ -643,12 +628,55 @@ export default function App() {
         : [];
 
       hydrateTabs([...loaded.map(mapLoadedNoteToTab), ...preservedOpenOnlyTabs], readTabSessionFromStorage());
-
-      const loadedFolders = loaded.map((note) => normalizeFolderPath(note.folderPath)).filter(Boolean);
-      setCustomFolders((prev) => Array.from(new Set([...prev, ...loadedFolders])));
     },
     [hydrateTabs, mapLoadedNoteToTab]
   );
+
+  const loadLibraryState = useCallback(async () => {
+    const noteApi = hwanNote.note;
+    if (!noteApi?.loadAll) {
+      return null;
+    }
+
+    const folderApi = hwanNote.folder;
+    const [loaded, folderList] = await Promise.all([
+      noteApi.loadAll(),
+      folderApi?.list
+        ? folderApi.list().catch((error) => {
+            console.error("Failed to load folders from file system:", error);
+            return [] as string[];
+          })
+        : Promise.resolve<string[]>([])
+    ]);
+
+    hydrateLoadedNotes(loaded);
+
+    setPersistedFolders(
+      Array.from(
+        new Set(
+          folderList
+            .filter((entry): entry is string => typeof entry === "string")
+            .map(normalizeFolderPath)
+            .filter(Boolean)
+        )
+      ).sort((a, b) => a.localeCompare(b, localeTag))
+    );
+
+    return loaded;
+  }, [hydrateLoadedNotes, localeTag]);
+
+  const refreshLocalAutoSaveDir = useCallback(async () => {
+    const settingsApi = hwanNote.settings;
+    if (!settingsApi?.getAutoSaveDir) {
+      setAutoSaveDir("");
+      setAutoSaveDirIsDefault(true);
+      return;
+    }
+
+    const result = await settingsApi.getAutoSaveDir();
+    setAutoSaveDir(result.effectiveDir);
+    setAutoSaveDirIsDefault(result.isDefault);
+  }, []);
 
   const findExistingTxtTabIdByPath = useCallback((filePath: string) => {
     const targetKey = normalizeIntentPathKey(filePath);
@@ -784,10 +812,6 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    window.localStorage.setItem(CUSTOM_FOLDERS_KEY, JSON.stringify(customFolders));
-  }, [customFolders]);
-
-  useEffect(() => {
     window.localStorage.setItem(THEME_MODE_KEY, themeMode);
   }, [themeMode]);
 
@@ -888,12 +912,13 @@ export default function App() {
 
     const run = async () => {
       try {
-        const loaded = await noteApi.loadAll();
+        const loaded = await loadLibraryState();
         if (disposed) {
           return;
         }
-
-        hydrateLoadedNotes(loaded);
+        if (!loaded) {
+          return;
+        }
 
         const pendingFromBackend = noteApi.drainOpenIntents
           ? await noteApi.drainOpenIntents()
@@ -919,7 +944,7 @@ export default function App() {
       disposed = true;
       stopListening?.();
     };
-  }, [hydrateLoadedNotes, ingestExternalTxtIntent, ingestExternalTxtIntents]);
+  }, [ingestExternalTxtIntent, ingestExternalTxtIntents, loadLibraryState]);
 
   useEffect(() => {
     if (selectedFolder && !folderPaths.includes(selectedFolder)) {
@@ -1320,15 +1345,11 @@ export default function App() {
       setAutoSaveDir(result.effectiveDir);
       setAutoSaveDirIsDefault(result.isDefault);
 
-      const noteApi = hwanNote.note;
-      if (noteApi?.loadAll) {
-        const loaded = await noteApi.loadAll();
-        hydrateLoadedNotes(loaded);
-      }
+      await loadLibraryState();
     } catch (error) {
       console.error("Failed to set auto-save directory:", error);
     }
-  }, [hydrateLoadedNotes, resolveOpenTabsBeforeReload]);
+  }, [loadLibraryState, resolveOpenTabsBeforeReload]);
 
   const handleResetAutoSaveDir = useCallback(async () => {
     const didResolve = await resolveOpenTabsBeforeReload();
@@ -1344,17 +1365,13 @@ export default function App() {
       setAutoSaveDir(result.effectiveDir);
       setAutoSaveDirIsDefault(result.isDefault);
 
-      const noteApi = hwanNote.note;
-      if (noteApi?.loadAll) {
-        const loaded = await noteApi.loadAll();
-        hydrateLoadedNotes(loaded);
-      }
+      await loadLibraryState();
     } catch (error) {
       console.error("Failed to reset auto-save directory:", error);
     }
-  }, [hydrateLoadedNotes, resolveOpenTabsBeforeReload]);
+  }, [loadLibraryState, resolveOpenTabsBeforeReload]);
 
-  const handleCloudSyncChange = useCallback(async (provider: string | null) => {
+  const handleCloudSyncChange = useCallback(async (provider: string | null, options?: { copyLocalNotes: boolean }) => {
     const didResolve = await resolveOpenTabsBeforeReload();
     if (!didResolve) {
       return;
@@ -1362,42 +1379,50 @@ export default function App() {
 
     try {
       if (provider) {
-        const result = await hwanNote.cloud.enable(provider);
+        const result = await hwanNote.cloud.enable(provider, options?.copyLocalNotes ?? false);
         setCloudSyncProvider(result.provider);
-        setAutoSaveDir(result.effectiveDir);
-        setAutoSaveDirIsDefault(false);
+        setCloudSyncSource(result.activeSource);
       } else {
         const result = await hwanNote.cloud.disable();
-        setCloudSyncProvider(null);
-        setAutoSaveDir(result.effectiveDir);
-        setAutoSaveDirIsDefault(true);
+        setCloudSyncProvider(result.provider);
+        setCloudSyncSource(result.activeSource);
       }
-      const loaded = await hwanNote.note.loadAll();
-      hydrateLoadedNotes(loaded);
+      await refreshLocalAutoSaveDir();
+      await loadLibraryState();
       const providers = await hwanNote.cloud.detectProviders();
       setCloudProviders(providers);
     } catch (error) {
       console.error("Failed to change cloud sync:", error);
     }
-  }, [hydrateLoadedNotes, resolveOpenTabsBeforeReload]);
+  }, [loadLibraryState, refreshLocalAutoSaveDir, resolveOpenTabsBeforeReload]);
 
-  useEffect(() => {
-    const settingsApi = hwanNote.settings;
-    if (!settingsApi?.getAutoSaveDir) {
+  const handleCloudSyncSourceChange = useCallback(async (source: CloudSyncSource) => {
+    const didResolve = await resolveOpenTabsBeforeReload();
+    if (!didResolve) {
       return;
     }
 
-    void settingsApi.getAutoSaveDir().then((result) => {
-      setAutoSaveDir(result.effectiveDir);
-      setAutoSaveDirIsDefault(result.isDefault);
-    }).catch(() => {
+    try {
+      const status = await hwanNote.cloud.setActiveSource(source);
+      setCloudSyncProvider(status.provider);
+      setCloudSyncSource(status.activeSource);
+      await loadLibraryState();
+    } catch (error) {
+      console.error("Failed to switch library source:", error);
+    }
+  }, [loadLibraryState, resolveOpenTabsBeforeReload]);
+
+  useEffect(() => {
+    void refreshLocalAutoSaveDir().catch(() => {
       setAutoSaveDir("");
+      setAutoSaveDirIsDefault(true);
     });
-  }, []);
+  }, [refreshLocalAutoSaveDir]);
 
   useEffect(() => {
     void hwanNote.cloud.status().then((s) => {
       setCloudSyncProvider(s.provider);
+      setCloudSyncSource(s.activeSource);
     }).catch(() => { /* ignore */ });
     void hwanNote.cloud.detectProviders().then((providers) => {
       setCloudProviders(providers);
@@ -1746,35 +1771,71 @@ export default function App() {
           onMoveNoteToFolder={(id, folderPath) => {
             moveTabToFolder(id, normalizeFolderPath(folderPath));
           }}
-          onCreateFolder={(folderPath) => {
+          onCreateFolder={async (folderPath) => {
             const normalized = normalizeFolderPath(folderPath);
-            setCustomFolders((prev) => (prev.includes(normalized) ? prev : [...prev, normalized]));
-          }}
-          onRenameFolder={(from, to) => {
-            const normalizedFrom = normalizeFolderPath(from);
-            const normalizedTo = normalizeFolderPath(to);
+            if (!normalized) {
+              return;
+            }
 
-            setCustomFolders((prev) => {
-              const next = prev.map((path) => replaceFolderPrefix(path, normalizedFrom, normalizedTo));
-              return Array.from(new Set(next));
-            });
-
-            renameFolderPath(normalizedFrom, normalizedTo);
-
-            if (selectedFolder) {
-              setSelectedFolder(replaceFolderPrefix(selectedFolder, normalizedFrom, normalizedTo));
+            try {
+              const folders = await hwanNote.folder.create(normalized);
+              setPersistedFolders(
+                Array.from(
+                  new Set(
+                    folders
+                      .filter((entry): entry is string => typeof entry === "string")
+                      .map(normalizeFolderPath)
+                      .filter(Boolean)
+                  )
+                ).sort((a, b) => a.localeCompare(b, localeTag))
+              );
+            } catch (error) {
+              console.error("Failed to create folder:", error);
             }
           }}
-          onDeleteFolder={(folderPath) => {
+          onRenameFolder={async (from, to) => {
+            const normalizedFrom = normalizeFolderPath(from);
+            const normalizedTo = normalizeFolderPath(to);
+            if (!normalizedFrom || !normalizedTo || normalizedFrom === normalizedTo) {
+              return;
+            }
+
+            const didResolve = await resolveOpenTabsBeforeReload();
+            if (!didResolve) {
+              return;
+            }
+
+            try {
+              await hwanNote.folder.rename(normalizedFrom, normalizedTo);
+              await loadLibraryState();
+
+              if (selectedFolder) {
+                setSelectedFolder(replaceFolderPrefix(selectedFolder, normalizedFrom, normalizedTo));
+              }
+            } catch (error) {
+              console.error("Failed to rename folder:", error);
+            }
+          }}
+          onDeleteFolder={async (folderPath) => {
             const normalized = normalizeFolderPath(folderPath);
+            if (!normalized) {
+              return;
+            }
 
-            setCustomFolders((prev) =>
-              prev.filter((path) => path !== normalized && !path.startsWith(`${normalized}/`))
-            );
-            clearFolderPath(normalized);
+            const didResolve = await resolveOpenTabsBeforeReload();
+            if (!didResolve) {
+              return;
+            }
 
-            if (selectedFolder && (selectedFolder === normalized || selectedFolder.startsWith(`${normalized}/`))) {
-              setSelectedFolder(null);
+            try {
+              await hwanNote.folder.delete(normalized);
+              await loadLibraryState();
+
+              if (selectedFolder && (selectedFolder === normalized || selectedFolder.startsWith(`${normalized}/`))) {
+                setSelectedFolder(null);
+              }
+            } catch (error) {
+              console.error("Failed to delete folder:", error);
             }
           }}
         />
@@ -1881,6 +1942,7 @@ export default function App() {
           toggleFileFormat(focusedTab.id);
         }}
         cloudSyncProvider={cloudSyncProvider}
+        cloudSyncSource={cloudSyncSource}
       />
 
       <SettingsPanel
@@ -1895,9 +1957,11 @@ export default function App() {
         onBrowseAutoSaveDir={() => void handleBrowseAutoSaveDir()}
         onResetAutoSaveDir={() => void handleResetAutoSaveDir()}
         cloudSyncProvider={cloudSyncProvider}
+        cloudSyncSource={cloudSyncSource}
         cloudProviders={cloudProviders}
         noteCount={allNotes.length}
         onCloudSyncChange={handleCloudSyncChange}
+        onCloudSyncSourceChange={handleCloudSyncSourceChange}
         shortcuts={shortcuts}
         onThemeModeChange={setThemeMode}
         onEditorLineHeightChange={(value) => setEditorLineHeight(normalizeEditorLineHeight(value))}

@@ -1,4 +1,5 @@
 import { useI18n } from "../i18n/context";
+import type { CloudSyncSource } from "../lib/tauriApi";
 
 interface StatusBarProps {
   line: number;
@@ -9,6 +10,7 @@ interface StatusBarProps {
   fileFormat: "md" | "txt";
   onToggleFileFormat: () => void;
   cloudSyncProvider: string | null;
+  cloudSyncSource: CloudSyncSource;
 }
 
 const PROVIDER_LABELS: Record<string, string> = {
@@ -16,10 +18,12 @@ const PROVIDER_LABELS: Record<string, string> = {
   google_drive: "Google Drive",
 };
 
-export default function StatusBar({ line, column, chars, themeLabel, zoomPercent, fileFormat, onToggleFileFormat, cloudSyncProvider }: StatusBarProps) {
+export default function StatusBar({ line, column, chars, themeLabel, zoomPercent, fileFormat, onToggleFileFormat, cloudSyncProvider, cloudSyncSource }: StatusBarProps) {
   const { t } = useI18n();
 
-  const cloudLabel = cloudSyncProvider ? PROVIDER_LABELS[cloudSyncProvider] ?? cloudSyncProvider : null;
+  const storageLabel = cloudSyncProvider && cloudSyncSource === "cloud"
+    ? PROVIDER_LABELS[cloudSyncProvider] ?? cloudSyncProvider
+    : t("status.localStorage");
 
   return (
     <footer className="statusbar">
@@ -35,7 +39,7 @@ export default function StatusBar({ line, column, chars, themeLabel, zoomPercent
         </button>
       </div>
       <div className="statusbar-right">
-        {cloudLabel && <span className="statusbar-cloud">{cloudLabel} | </span>}
+        <span className="statusbar-cloud">{storageLabel} | </span>
         {t("status.rightInfo", { theme: themeLabel, zoom: zoomPercent })}
       </div>
     </footer>

@@ -7,7 +7,8 @@ use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
 
 use crate::config_manager;
-use crate::file_manager::{self, AutoSavePayload, AutoSaveResult, LoadedNote};
+use crate::config_manager::LibrarySource;
+use crate::file_manager::{self, AutoSavePayload, AutoSaveResult, FolderDeleteResult, LoadedNote};
 
 // ── State for pending update ──
 
@@ -64,8 +65,8 @@ struct UpdateStatusPayload {
 #[serde(rename_all = "camelCase")]
 pub struct CloudSyncResult {
     provider: Option<String>,
-    effective_dir: String,
     files_copied: u32,
+    active_source: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -74,6 +75,7 @@ pub struct CloudSyncStatus {
     enabled: bool,
     provider: Option<String>,
     sync_folder: Option<String>,
+    active_source: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -87,28 +89,41 @@ struct CloudFolderMissingPayload {
 
 fn resolve_effective_dir(app: &AppHandle) -> PathBuf {
     let documents = dirs::document_dir().unwrap_or_else(|| PathBuf::from("."));
-    let default_dir = file_manager::get_auto_save_dir(&documents);
-    let effective = config_manager::get_effective_auto_save_dir(app, &default_dir);
+    let local_dir = config_manager::get_local_auto_save_dir(app, &file_manager::get_auto_save_dir(&documents));
+    let provider = config_manager::get_cloud_sync_provider(app);
+    let active_source = config_manager::get_cloud_sync_source(app);
 
     // Detect cloud folder missing at runtime
-    if config_manager::get_cloud_sync_provider(app).is_some() && !effective.exists() {
-        tracing::warn!(
-            "Cloud sync folder missing: {:?}, falling back to local: {:?}",
-            effective, default_dir
-        );
-        if let Some(window) = app.get_webview_window("main") {
-            let _ = window.emit(
-                "cloud:folder-missing",
-                CloudFolderMissingPayload {
-                    expected_path: effective.to_string_lossy().to_string(),
-                    fallback_path: default_dir.to_string_lossy().to_string(),
-                },
-            );
+    if provider.is_some() && active_source == LibrarySource::Cloud {
+        if let Some(cloud_dir) = config_manager::get_cloud_notes_dir(app) {
+            if !cloud_dir.exists() {
+                tracing::warn!(
+                    "Cloud sync folder missing: {:?}, falling back to local: {:?}",
+                    cloud_dir, local_dir
+                );
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.emit(
+                        "cloud:folder-missing",
+                        CloudFolderMissingPayload {
+                            expected_path: cloud_dir.to_string_lossy().to_string(),
+                            fallback_path: local_dir.to_string_lossy().to_string(),
+                        },
+                    );
+                }
+                return local_dir;
+            }
+            return cloud_dir;
         }
-        return default_dir;
     }
 
-    effective
+    local_dir
+}
+
+fn library_source_to_str(source: LibrarySource) -> &'static str {
+    match source {
+        LibrarySource::Local => "local",
+        LibrarySource::Cloud => "cloud",
+    }
 }
 
 // ── Window commands ──
@@ -170,6 +185,30 @@ pub fn cmd_note_auto_save(
 pub fn cmd_note_load_all(app: AppHandle) -> Result<Vec<LoadedNote>, String> {
     let effective_dir = resolve_effective_dir(&app);
     file_manager::load_markdown_notes(&effective_dir)
+}
+
+#[tauri::command]
+pub fn cmd_folder_list(app: AppHandle) -> Result<Vec<String>, String> {
+    let effective_dir = resolve_effective_dir(&app);
+    file_manager::list_folders(&effective_dir)
+}
+
+#[tauri::command]
+pub fn cmd_folder_create(app: AppHandle, folder_path: String) -> Result<Vec<String>, String> {
+    let effective_dir = resolve_effective_dir(&app);
+    file_manager::create_folder(&effective_dir, &folder_path)
+}
+
+#[tauri::command]
+pub fn cmd_folder_rename(app: AppHandle, from: String, to: String) -> Result<Vec<String>, String> {
+    let effective_dir = resolve_effective_dir(&app);
+    file_manager::rename_folder(&effective_dir, &from, &to)
+}
+
+#[tauri::command]
+pub fn cmd_folder_delete(app: AppHandle, folder_path: String) -> Result<FolderDeleteResult, String> {
+    let effective_dir = resolve_effective_dir(&app);
+    file_manager::delete_folder(&effective_dir, &folder_path)
 }
 
 #[tauri::command]
@@ -318,13 +357,12 @@ pub fn cmd_settings_set_autosave_dir(
     config_manager::set_custom_auto_save_dir(&app, dir.as_deref())?;
 
     let documents = dirs::document_dir().unwrap_or_else(|| PathBuf::from("."));
-    let default_dir = file_manager::get_auto_save_dir(&documents);
-    let effective_dir = config_manager::get_effective_auto_save_dir(&app, &default_dir);
+    let local_dir = config_manager::get_local_auto_save_dir(&app, &file_manager::get_auto_save_dir(&documents));
     let custom_dir = config_manager::get_custom_auto_save_dir(&app);
 
     Ok(AutoSaveDirInfo {
         custom_dir: custom_dir.clone(),
-        effective_dir: effective_dir.to_string_lossy().to_string(),
+        effective_dir: local_dir.to_string_lossy().to_string(),
         is_default: custom_dir.is_none(),
     })
 }
@@ -332,13 +370,12 @@ pub fn cmd_settings_set_autosave_dir(
 #[tauri::command]
 pub fn cmd_settings_get_autosave_dir(app: AppHandle) -> AutoSaveDirInfo {
     let documents = dirs::document_dir().unwrap_or_else(|| PathBuf::from("."));
-    let default_dir = file_manager::get_auto_save_dir(&documents);
-    let effective_dir = config_manager::get_effective_auto_save_dir(&app, &default_dir);
+    let local_dir = config_manager::get_local_auto_save_dir(&app, &file_manager::get_auto_save_dir(&documents));
     let custom_dir = config_manager::get_custom_auto_save_dir(&app);
 
     AutoSaveDirInfo {
         custom_dir: custom_dir.clone(),
-        effective_dir: effective_dir.to_string_lossy().to_string(),
+        effective_dir: local_dir.to_string_lossy().to_string(),
         is_default: custom_dir.is_none(),
     }
 }
@@ -520,6 +557,7 @@ pub fn cmd_cloud_detect_providers() -> Vec<config_manager::CloudProviderInfo> {
 pub async fn cmd_cloud_sync_enable(
     app: AppHandle,
     provider: String,
+    copy_existing: bool,
 ) -> Result<CloudSyncResult, String> {
     let providers = config_manager::detect_cloud_providers();
     let info = providers
@@ -544,58 +582,40 @@ pub async fn cmd_cloud_sync_enable(
     fs::create_dir_all(&cloud_notes_dir)
         .map_err(|e| format!("Failed to create cloud directory: {}", e))?;
 
-    // Migrate notes from current effective dir to cloud dir
-    let src = resolve_effective_dir(&app);
-    let dst = cloud_notes_dir.clone();
+    let migration_result = if copy_existing {
+        let documents = dirs::document_dir().unwrap_or_else(|| PathBuf::from("."));
+        let src = config_manager::get_local_auto_save_dir(&app, &file_manager::get_auto_save_dir(&documents));
+        let dst = cloud_notes_dir.clone();
 
-    let migration_result = tauri::async_runtime::spawn_blocking(move || {
-        file_manager::migrate_notes(&src, &dst)
-    })
-    .await
-    .map_err(|e| e.to_string())??;
+        tauri::async_runtime::spawn_blocking(move || file_manager::migrate_notes(&src, &dst))
+            .await
+            .map_err(|e| e.to_string())??
+    } else {
+        file_manager::MigrationResult {
+            files_copied: 0,
+            index_copied: false,
+        }
+    };
 
-    // Update config: set cloud provider first (so exists() check is bypassed)
     config_manager::set_cloud_sync_provider(&app, Some(&provider))?;
-    config_manager::set_custom_auto_save_dir(&app, Some(&cloud_notes_dir.to_string_lossy()))?;
-
-    let effective_dir = cloud_notes_dir.to_string_lossy().to_string();
+    config_manager::set_cloud_sync_source(&app, LibrarySource::Cloud)?;
 
     Ok(CloudSyncResult {
         provider: Some(provider),
-        effective_dir,
         files_copied: migration_result.files_copied,
+        active_source: library_source_to_str(LibrarySource::Cloud).to_string(),
     })
 }
 
 #[tauri::command]
 pub async fn cmd_cloud_sync_disable(app: AppHandle) -> Result<CloudSyncResult, String> {
-    let documents = dirs::document_dir().unwrap_or_else(|| PathBuf::from("."));
-    let default_dir = file_manager::get_auto_save_dir(&documents);
-
-    // Ensure default dir exists
-    fs::create_dir_all(&default_dir)
-        .map_err(|e| format!("Failed to create local directory: {}", e))?;
-
-    // Migrate notes from cloud dir back to local
-    let src = resolve_effective_dir(&app);
-    let dst = default_dir.clone();
-
-    let migration_result = tauri::async_runtime::spawn_blocking(move || {
-        file_manager::migrate_notes(&src, &dst)
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-
-    // Reset config
     config_manager::set_cloud_sync_provider(&app, None)?;
-    config_manager::set_custom_auto_save_dir(&app, None)?;
-
-    let effective_dir = default_dir.to_string_lossy().to_string();
+    config_manager::set_cloud_sync_source(&app, LibrarySource::Local)?;
 
     Ok(CloudSyncResult {
         provider: None,
-        effective_dir,
-        files_copied: migration_result.files_copied,
+        files_copied: 0,
+        active_source: library_source_to_str(LibrarySource::Local).to_string(),
     })
 }
 
@@ -603,6 +623,7 @@ pub async fn cmd_cloud_sync_disable(app: AppHandle) -> Result<CloudSyncResult, S
 pub fn cmd_cloud_sync_status(app: AppHandle) -> CloudSyncStatus {
     let provider = config_manager::get_cloud_sync_provider(&app);
     let enabled = provider.is_some();
+    let active_source = config_manager::get_cloud_sync_source(&app);
 
     let sync_folder = if enabled {
         let providers = config_manager::detect_cloud_providers();
@@ -618,5 +639,27 @@ pub fn cmd_cloud_sync_status(app: AppHandle) -> CloudSyncStatus {
         enabled,
         provider,
         sync_folder,
+        active_source: library_source_to_str(active_source).to_string(),
     }
+}
+
+#[tauri::command]
+pub fn cmd_cloud_sync_set_active_source(
+    app: AppHandle,
+    source: String,
+) -> Result<CloudSyncStatus, String> {
+    let normalized = source.trim().to_ascii_lowercase();
+    let next_source = match normalized.as_str() {
+        "local" => LibrarySource::Local,
+        "cloud" => {
+            if config_manager::get_cloud_sync_provider(&app).is_none() {
+                return Err("Cloud sync is not enabled.".to_string());
+            }
+            LibrarySource::Cloud
+        }
+        _ => return Err("Invalid library source.".to_string()),
+    };
+
+    config_manager::set_cloud_sync_source(&app, next_source)?;
+    Ok(cmd_cloud_sync_status(app))
 }

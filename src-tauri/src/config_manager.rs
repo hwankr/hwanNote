@@ -11,6 +11,15 @@ struct AppConfig {
     auto_save_dir: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cloud_sync_provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cloud_sync_source: Option<LibrarySource>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LibrarySource {
+    Local,
+    Cloud,
 }
 
 fn get_config_path(app: &AppHandle) -> PathBuf {
@@ -37,16 +46,42 @@ fn write_config(app: &AppHandle, config: &AppConfig) -> Result<(), String> {
     fs::write(&config_path, json).map_err(|e| e.to_string())
 }
 
+fn normalize_path_for_compare(path: &str) -> String {
+    path.trim()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_lowercase()
+}
+
+fn get_cloud_provider_root(provider: &str) -> Option<String> {
+    detect_cloud_providers()
+        .into_iter()
+        .find(|info| info.id == provider)
+        .and_then(|info| info.sync_folder)
+}
+
+fn get_cloud_notes_dir_for_provider(provider: &str) -> Option<PathBuf> {
+    get_cloud_provider_root(provider).map(|root| PathBuf::from(root).join("HwanNote").join("Notes"))
+}
+
+fn is_cloud_notes_dir_for_provider(provider: &str, dir: &str) -> bool {
+    get_cloud_notes_dir_for_provider(provider)
+        .map(|cloud_dir| normalize_path_for_compare(cloud_dir.to_string_lossy().as_ref()) == normalize_path_for_compare(dir))
+        .unwrap_or(false)
+}
+
 pub fn get_custom_auto_save_dir(app: &AppHandle) -> Option<String> {
     let config = read_config(app);
     let dir = config.auto_save_dir?;
     if dir.is_empty() {
         return None;
     }
-    // When cloud_sync_provider is set, bypass exists() check
-    // to preserve config even if cloud folder is temporarily unavailable
-    if config.cloud_sync_provider.as_ref().is_some_and(|p| !p.is_empty()) {
-        return Some(dir);
+    if config
+        .cloud_sync_provider
+        .as_deref()
+        .is_some_and(|provider| is_cloud_notes_dir_for_provider(provider, &dir))
+    {
+        return None;
     }
     if Path::new(&dir).exists() {
         Some(dir)
@@ -56,16 +91,12 @@ pub fn get_custom_auto_save_dir(app: &AppHandle) -> Option<String> {
 }
 
 pub fn set_custom_auto_save_dir(app: &AppHandle, dir: Option<&str>) -> Result<(), String> {
-    let config = read_config(app);
-    let has_cloud_provider = config.cloud_sync_provider.as_ref().is_some_and(|p| !p.is_empty());
-
     if let Some(d) = dir {
         let path = Path::new(d);
         if !path.is_absolute() {
             return Err("Path must be absolute".to_string());
         }
-        // Skip exists() check when cloud provider is set (folder may not exist yet)
-        if !has_cloud_provider && !path.exists() {
+        if !path.exists() {
             return Err("Directory does not exist".to_string());
         }
     }
@@ -81,15 +112,54 @@ pub fn get_cloud_sync_provider(app: &AppHandle) -> Option<String> {
 
 pub fn set_cloud_sync_provider(app: &AppHandle, provider: Option<&str>) -> Result<(), String> {
     let mut config = read_config(app);
+    if let Some(existing_dir) = config.auto_save_dir.clone() {
+        let matches_previous_cloud_path = config
+            .cloud_sync_provider
+            .as_deref()
+            .is_some_and(|current| is_cloud_notes_dir_for_provider(current, &existing_dir));
+        let matches_next_cloud_path = provider
+            .is_some_and(|next| is_cloud_notes_dir_for_provider(next, &existing_dir));
+        if matches_previous_cloud_path || matches_next_cloud_path {
+            config.auto_save_dir = None;
+        }
+    }
     config.cloud_sync_provider = provider.map(String::from);
+    config.cloud_sync_source = Some(match provider {
+        Some(_) => config.cloud_sync_source.unwrap_or(LibrarySource::Cloud),
+        None => LibrarySource::Local,
+    });
     write_config(app, &config)
 }
 
-pub fn get_effective_auto_save_dir(app: &AppHandle, default_dir: &Path) -> PathBuf {
+pub fn get_local_auto_save_dir(app: &AppHandle, default_dir: &Path) -> PathBuf {
     match get_custom_auto_save_dir(app) {
         Some(custom) => PathBuf::from(custom),
         None => default_dir.to_path_buf(),
     }
+}
+
+pub fn get_cloud_sync_source(app: &AppHandle) -> LibrarySource {
+    let config = read_config(app);
+    if config
+        .cloud_sync_provider
+        .as_ref()
+        .is_some_and(|provider| !provider.is_empty())
+    {
+        config.cloud_sync_source.unwrap_or(LibrarySource::Cloud)
+    } else {
+        LibrarySource::Local
+    }
+}
+
+pub fn set_cloud_sync_source(app: &AppHandle, source: LibrarySource) -> Result<(), String> {
+    let mut config = read_config(app);
+    config.cloud_sync_source = Some(source);
+    write_config(app, &config)
+}
+
+pub fn get_cloud_notes_dir(app: &AppHandle) -> Option<PathBuf> {
+    let provider = get_cloud_sync_provider(app)?;
+    get_cloud_notes_dir_for_provider(&provider)
 }
 
 #[derive(Debug, Clone, Serialize)]

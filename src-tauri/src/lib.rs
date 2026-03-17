@@ -72,6 +72,10 @@ pub fn run() {
             cmd_note_auto_save,
             cmd_note_load_all,
             cmd_note_delete,
+            cmd_folder_list,
+            cmd_folder_create,
+            cmd_folder_rename,
+            cmd_folder_delete,
             cmd_note_import_txt,
             cmd_note_read_external_txt,
             cmd_note_drain_open_intents,
@@ -88,6 +92,7 @@ pub fn run() {
             cmd_cloud_sync_enable,
             cmd_cloud_sync_disable,
             cmd_cloud_sync_status,
+            cmd_cloud_sync_set_active_source,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
