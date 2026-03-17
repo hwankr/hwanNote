@@ -60,14 +60,45 @@ fn get_cloud_provider_root(provider: &str) -> Option<String> {
         .and_then(|info| info.sync_folder)
 }
 
+fn get_cloud_hwan_dir_for_provider(provider: &str) -> Option<PathBuf> {
+    get_cloud_provider_root(provider).map(|root| PathBuf::from(root).join("HwanNote"))
+}
+
 fn get_cloud_notes_dir_for_provider(provider: &str) -> Option<PathBuf> {
-    get_cloud_provider_root(provider).map(|root| PathBuf::from(root).join("HwanNote").join("Notes"))
+    get_cloud_hwan_dir_for_provider(provider).map(|dir| dir.join("Notes"))
 }
 
 fn is_cloud_notes_dir_for_provider(provider: &str, dir: &str) -> bool {
     get_cloud_notes_dir_for_provider(provider)
         .map(|cloud_dir| normalize_path_for_compare(cloud_dir.to_string_lossy().as_ref()) == normalize_path_for_compare(dir))
         .unwrap_or(false)
+}
+
+fn classify_legacy_cloud_sync_dir(
+    dir: &str,
+    providers: &[CloudProviderInfo],
+) -> Option<(String, LibrarySource)> {
+    let normalized_dir = normalize_path_for_compare(dir);
+
+    for provider in providers {
+        let Some(root) = provider.sync_folder.as_deref() else {
+            continue;
+        };
+        let hwan_dir = PathBuf::from(root).join("HwanNote");
+        let notes_dir = hwan_dir.join("Notes");
+
+        let normalized_hwan_dir = normalize_path_for_compare(hwan_dir.to_string_lossy().as_ref());
+        if normalized_dir == normalized_hwan_dir {
+            return Some((provider.id.clone(), LibrarySource::Local));
+        }
+
+        let normalized_notes_dir = normalize_path_for_compare(notes_dir.to_string_lossy().as_ref());
+        if normalized_dir == normalized_notes_dir {
+            return Some((provider.id.clone(), LibrarySource::Cloud));
+        }
+    }
+
+    None
 }
 
 pub fn get_custom_auto_save_dir(app: &AppHandle) -> Option<String> {
@@ -277,4 +308,63 @@ pub fn migrate_legacy_electron_config(app: &AppHandle) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+pub fn migrate_legacy_cloud_sync_config(app: &AppHandle) -> Result<(), String> {
+    let mut config = read_config(app);
+    if config
+        .cloud_sync_provider
+        .as_deref()
+        .is_some_and(|provider| !provider.is_empty())
+    {
+        return Ok(());
+    }
+
+    let Some(auto_save_dir) = config.auto_save_dir.as_deref() else {
+        return Ok(());
+    };
+
+    let providers = detect_cloud_providers();
+    let Some((provider, source)) = classify_legacy_cloud_sync_dir(auto_save_dir, &providers) else {
+        return Ok(());
+    };
+
+    config.cloud_sync_provider = Some(provider);
+    config.cloud_sync_source = Some(config.cloud_sync_source.unwrap_or(source));
+    write_config(app, &config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{classify_legacy_cloud_sync_dir, CloudProviderInfo, LibrarySource};
+
+    fn provider(id: &str, path: &str) -> CloudProviderInfo {
+        CloudProviderInfo {
+            id: id.to_string(),
+            name: id.to_string(),
+            available: true,
+            sync_folder: Some(path.to_string()),
+        }
+    }
+
+    #[test]
+    fn classify_legacy_cloud_sync_dir_recognizes_provider_root_hwan_dir_as_local_source() {
+        let providers = vec![provider("google_drive", r"G:\내 드라이브")];
+        let result = classify_legacy_cloud_sync_dir(r"G:\내 드라이브\HwanNote", &providers);
+        assert_eq!(result, Some(("google_drive".to_string(), LibrarySource::Local)));
+    }
+
+    #[test]
+    fn classify_legacy_cloud_sync_dir_recognizes_notes_dir_as_cloud_source() {
+        let providers = vec![provider("google_drive", r"G:\내 드라이브")];
+        let result = classify_legacy_cloud_sync_dir(r"G:\내 드라이브\HwanNote\Notes", &providers);
+        assert_eq!(result, Some(("google_drive".to_string(), LibrarySource::Cloud)));
+    }
+
+    #[test]
+    fn classify_legacy_cloud_sync_dir_ignores_unrelated_custom_paths() {
+        let providers = vec![provider("google_drive", r"G:\내 드라이브")];
+        let result = classify_legacy_cloud_sync_dir(r"D:\Notes", &providers);
+        assert!(result.is_none());
+    }
 }

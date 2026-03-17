@@ -102,6 +102,9 @@ pub fn run() {
             if let Err(e) = config_manager::migrate_legacy_electron_config(&handle) {
                 tracing::warn!("Failed to migrate legacy config: {}", e);
             }
+            if let Err(e) = config_manager::migrate_legacy_cloud_sync_config(&handle) {
+                tracing::warn!("Failed to migrate legacy cloud sync config: {}", e);
+            }
 
             let startup_args: Vec<String> = std::env::args().collect();
             let startup_intents = collect_txt_open_intents(&startup_args, None);

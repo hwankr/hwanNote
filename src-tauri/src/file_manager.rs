@@ -577,7 +577,15 @@ pub fn write_index(auto_save_dir: &Path, index: &NoteIndex) -> Result<(), String
 
 // ── File system helpers ──
 
-fn walk_markdown_files(root_dir: &Path, current_dir: &Path) -> Vec<PathBuf> {
+fn should_skip_subtree(path: &Path, skip_subtree: Option<&Path>) -> bool {
+    skip_subtree.is_some_and(|skip| path.starts_with(skip))
+}
+
+fn walk_markdown_files_skipping(
+    root_dir: &Path,
+    current_dir: &Path,
+    skip_subtree: Option<&Path>,
+) -> Vec<PathBuf> {
     let mut files = Vec::new();
 
     let entries = match fs::read_dir(current_dir) {
@@ -594,8 +602,12 @@ fn walk_markdown_files(root_dir: &Path, current_dir: &Path) -> Vec<PathBuf> {
 
         let path = entry.path();
 
+        if should_skip_subtree(&path, skip_subtree) {
+            continue;
+        }
+
         if path.is_dir() {
-            let nested = walk_markdown_files(root_dir, &path);
+            let nested = walk_markdown_files_skipping(root_dir, &path, skip_subtree);
             files.extend(nested);
         } else if path.is_file() {
             if let Some(ext) = path.extension() {
@@ -609,9 +621,25 @@ fn walk_markdown_files(root_dir: &Path, current_dir: &Path) -> Vec<PathBuf> {
     files
 }
 
+fn walk_markdown_files(root_dir: &Path, current_dir: &Path) -> Vec<PathBuf> {
+    walk_markdown_files_skipping(root_dir, current_dir, None)
+}
+
 fn collect_markdown_file_map(root_dir: &Path) -> HashMap<String, PathBuf> {
     let mut by_relative_path = HashMap::new();
     for file_path in walk_markdown_files(root_dir, root_dir) {
+        let rel = relative_path(root_dir, &file_path);
+        by_relative_path.insert(rel, file_path);
+    }
+    by_relative_path
+}
+
+fn collect_markdown_file_map_skipping(
+    root_dir: &Path,
+    skip_subtree: Option<&Path>,
+) -> HashMap<String, PathBuf> {
+    let mut by_relative_path = HashMap::new();
+    for file_path in walk_markdown_files_skipping(root_dir, root_dir, skip_subtree) {
         let rel = relative_path(root_dir, &file_path);
         by_relative_path.insert(rel, file_path);
     }
@@ -647,7 +675,12 @@ fn ensure_unique_file_path(
     }
 }
 
-fn walk_folder_paths(root_dir: &Path, current_dir: &Path, folders: &mut Vec<String>) {
+fn walk_folder_paths_skipping(
+    root_dir: &Path,
+    current_dir: &Path,
+    folders: &mut Vec<String>,
+    skip_subtree: Option<&Path>,
+) {
     let entries = match fs::read_dir(current_dir) {
         Ok(entries) => entries,
         Err(_) => return,
@@ -659,12 +692,20 @@ fn walk_folder_paths(root_dir: &Path, current_dir: &Path, folders: &mut Vec<Stri
             continue;
         }
 
+        if should_skip_subtree(&path, skip_subtree) {
+            continue;
+        }
+
         let relative = strip_inbox_root_alias(&relative_path(root_dir, &path));
         if !relative.is_empty() {
             folders.push(relative);
         }
-        walk_folder_paths(root_dir, &path, folders);
+        walk_folder_paths_skipping(root_dir, &path, folders, skip_subtree);
     }
+}
+
+fn walk_folder_paths(root_dir: &Path, current_dir: &Path, folders: &mut Vec<String>) {
+    walk_folder_paths_skipping(root_dir, current_dir, folders, None)
 }
 
 fn relative_path(from: &Path, to: &Path) -> String {
@@ -1191,13 +1232,24 @@ pub struct MigrationResult {
 pub fn migrate_notes(src_dir: &Path, dst_dir: &Path) -> Result<MigrationResult, String> {
     fs::create_dir_all(dst_dir).map_err(|e| format!("Failed to create destination: {}", e))?;
 
-    for folder in list_folders(src_dir)? {
+    // When the current local library root is the parent of the cloud library root
+    // (for example `.../HwanNote` -> `.../HwanNote/Notes`), skip the destination
+    // subtree while collecting source files so we do not recursively copy the
+    // cloud library back into itself.
+    let skip_src_subtree = dst_dir.starts_with(src_dir).then_some(dst_dir);
+
+    let mut source_folders = Vec::new();
+    walk_folder_paths_skipping(src_dir, src_dir, &mut source_folders, skip_src_subtree);
+    source_folders.sort();
+    source_folders.dedup();
+
+    for folder in source_folders {
         fs::create_dir_all(dst_dir.join(folder))
             .map_err(|e| format!("Failed to create destination folder: {}", e))?;
     }
 
     let mut src_index = read_index(src_dir);
-    let src_files = collect_markdown_file_map(src_dir);
+    let src_files = collect_markdown_file_map_skipping(src_dir, skip_src_subtree);
     reconcile_index_with_files(src_dir, &mut src_index, &src_files)?;
 
     let mut dst_index = read_index(dst_dir);
@@ -1558,6 +1610,56 @@ mod tests {
         })();
         cleanup_temp_dir(&src);
         cleanup_temp_dir(&dst);
+        result.unwrap();
+    }
+
+    #[test]
+    fn migrate_notes_skips_nested_destination_subtree_when_source_contains_it() {
+        let root = make_temp_dir("migrate-nested-root");
+        let src = root.join("HwanNote");
+        let dst = src.join("Notes");
+        let result = (|| -> Result<(), String> {
+            fs::create_dir_all(&src).unwrap();
+
+            auto_save_markdown_note(
+                &src,
+                &AutoSavePayload {
+                    note_id: "local-note".to_string(),
+                    title: "Local Root".to_string(),
+                    content: "# Local root version".to_string(),
+                    folder_path: Some("team".to_string()),
+                    is_title_manual: Some(true),
+                },
+            )?;
+            auto_save_markdown_note(
+                &dst,
+                &AutoSavePayload {
+                    note_id: "cloud-note".to_string(),
+                    title: "Cloud Existing".to_string(),
+                    content: "# Cloud version".to_string(),
+                    folder_path: Some("team".to_string()),
+                    is_title_manual: Some(true),
+                },
+            )?;
+
+            let migration = migrate_notes(&src, &dst)?;
+            assert_eq!(migration.files_copied, 1);
+            assert!(!dst.join("Notes").exists());
+
+            let index = read_index(&dst);
+            assert!(index.entries.contains_key("cloud-note"));
+            assert!(index.entries.contains_key("local-note"));
+            assert_eq!(
+                index.entries.get("local-note").unwrap().relative_path,
+                "team/Local-Root.md"
+            );
+            assert_eq!(
+                index.entries.get("cloud-note").unwrap().relative_path,
+                "team/Cloud-Existing.md"
+            );
+            Ok(())
+        })();
+        cleanup_temp_dir(&root);
         result.unwrap();
     }
 }

@@ -540,6 +540,7 @@ export default function App() {
   const [tabSize, setTabSize] = useState(DEFAULT_TAB_SIZE);
   const [cloudSyncProvider, setCloudSyncProvider] = useState<string | null>(null);
   const [cloudSyncSource, setCloudSyncSource] = useState<CloudSyncSource>("local");
+  const [cloudSyncFolder, setCloudSyncFolder] = useState<string | null>(null);
   const [cloudProviders, setCloudProviders] = useState<CloudProviderInfo[]>([]);
 
   const noteTags = useMemo(() => {
@@ -726,6 +727,18 @@ export default function App() {
     const result = await settingsApi.getAutoSaveDir();
     setAutoSaveDir(result.effectiveDir);
     setAutoSaveDirIsDefault(result.isDefault);
+  }, []);
+
+  const refreshCloudSyncState = useCallback(async () => {
+    const [status, providers] = await Promise.all([
+      hwanNote.cloud.status(),
+      hwanNote.cloud.detectProviders()
+    ]);
+
+    setCloudSyncProvider(status.provider);
+    setCloudSyncSource(status.activeSource);
+    setCloudSyncFolder(status.syncFolder);
+    setCloudProviders(providers);
   }, []);
 
   const findExistingTxtTabIdByPath = useCallback((filePath: string) => {
@@ -1434,22 +1447,17 @@ export default function App() {
 
     try {
       if (provider) {
-        const result = await hwanNote.cloud.enable(provider, options?.copyLocalNotes ?? false);
-        setCloudSyncProvider(result.provider);
-        setCloudSyncSource(result.activeSource);
+        await hwanNote.cloud.enable(provider, options?.copyLocalNotes ?? false);
       } else {
-        const result = await hwanNote.cloud.disable();
-        setCloudSyncProvider(result.provider);
-        setCloudSyncSource(result.activeSource);
+        await hwanNote.cloud.disable();
       }
       await refreshLocalAutoSaveDir();
       await loadLibraryState();
-      const providers = await hwanNote.cloud.detectProviders();
-      setCloudProviders(providers);
+      await refreshCloudSyncState();
     } catch (error) {
       console.error("Failed to change cloud sync:", error);
     }
-  }, [loadLibraryState, refreshLocalAutoSaveDir, resolveOpenTabsBeforeReload]);
+  }, [loadLibraryState, refreshCloudSyncState, refreshLocalAutoSaveDir, resolveOpenTabsBeforeReload]);
 
   const handleCloudSyncSourceChange = useCallback(async (source: CloudSyncSource) => {
     const didResolve = await resolveOpenTabsBeforeReload();
@@ -1458,14 +1466,13 @@ export default function App() {
     }
 
     try {
-      const status = await hwanNote.cloud.setActiveSource(source);
-      setCloudSyncProvider(status.provider);
-      setCloudSyncSource(status.activeSource);
+      await hwanNote.cloud.setActiveSource(source);
       await loadLibraryState();
+      await refreshCloudSyncState();
     } catch (error) {
       console.error("Failed to switch library source:", error);
     }
-  }, [loadLibraryState, resolveOpenTabsBeforeReload]);
+  }, [loadLibraryState, refreshCloudSyncState, resolveOpenTabsBeforeReload]);
 
   const handleInstallUpdate = useCallback(async () => {
     const didResolve = await resolveOpenTabsBeforeReload();
@@ -1490,14 +1497,8 @@ export default function App() {
   }, [refreshLocalAutoSaveDir]);
 
   useEffect(() => {
-    void hwanNote.cloud.status().then((s) => {
-      setCloudSyncProvider(s.provider);
-      setCloudSyncSource(s.activeSource);
-    }).catch(() => { /* ignore */ });
-    void hwanNote.cloud.detectProviders().then((providers) => {
-      setCloudProviders(providers);
-    }).catch(() => { /* ignore */ });
-  }, []);
+    void refreshCloudSyncState().catch(() => { /* ignore */ });
+  }, [refreshCloudSyncState]);
 
   useEffect(() => {
     const unlisten = hwanNote.cloud.onFolderMissing((data) => {
@@ -2029,6 +2030,7 @@ export default function App() {
         onResetAutoSaveDir={() => void handleResetAutoSaveDir()}
         cloudSyncProvider={cloudSyncProvider}
         cloudSyncSource={cloudSyncSource}
+        cloudSyncFolder={cloudSyncFolder}
         cloudProviders={cloudProviders}
         noteCount={allNotes.length}
         onCloudSyncChange={handleCloudSyncChange}

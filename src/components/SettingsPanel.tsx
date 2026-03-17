@@ -28,6 +28,7 @@ interface SettingsPanelProps {
   onResetAutoSaveDir: () => void;
   cloudSyncProvider: string | null;
   cloudSyncSource: CloudSyncSource;
+  cloudSyncFolder: string | null;
   cloudProviders: CloudProviderInfo[];
   noteCount: number;
   onCloudSyncChange: (provider: string | null, options?: { copyLocalNotes: boolean }) => Promise<void>;
@@ -56,6 +57,7 @@ export default function SettingsPanel({
   onResetAutoSaveDir,
   cloudSyncProvider,
   cloudSyncSource,
+  cloudSyncFolder,
   cloudProviders,
   noteCount,
   onCloudSyncChange,
@@ -73,6 +75,23 @@ export default function SettingsPanel({
   const { t, language, setLanguage } = useI18n();
   const [listeningAction, setListeningAction] = useState<ShortcutAction | null>(null);
   const [shortcutHint, setShortcutHint] = useState("");
+  const providerLabels: Record<string, string> = {
+    onedrive: "OneDrive",
+    google_drive: "Google Drive",
+  };
+
+  const activeProvider = cloudSyncProvider
+    ? cloudProviders.find((provider) => provider.id === cloudSyncProvider) ?? {
+        id: cloudSyncProvider,
+        name: providerLabels[cloudSyncProvider] ?? cloudSyncProvider,
+        available: false,
+        syncFolder: cloudSyncFolder,
+      }
+    : null;
+
+  const providerOptions = activeProvider && !cloudProviders.some((provider) => provider.id === activeProvider.id)
+    ? [activeProvider, ...cloudProviders]
+    : cloudProviders;
 
   if (!open) {
     return null;
@@ -297,17 +316,19 @@ export default function SettingsPanel({
               }}
             >
               <option value="">{t("settings.cloudSyncOff")}</option>
-              {cloudProviders.map((provider) => (
+              {providerOptions.map((provider) => (
                 <option key={provider.id} value={provider.id} disabled={!provider.available}>
-                  {provider.available ? provider.name : t("settings.cloudSyncNotInstalled", { provider: provider.name })}
+                  {provider.available || provider.id === cloudSyncProvider
+                    ? provider.name
+                    : t("settings.cloudSyncNotInstalled", { provider: provider.name })}
                 </option>
               ))}
             </select>
             {cloudSyncProvider && (() => {
-              const active = cloudProviders.find((p) => p.id === cloudSyncProvider);
-              return active?.syncFolder ? (
+              const syncFolder = cloudSyncFolder ?? activeProvider?.syncFolder;
+              return syncFolder ? (
                 <div className="settings-subtext">
-                  {t("settings.cloudSyncFolder", { path: `${active.syncFolder}/HwanNote/Notes` })}
+                  {t("settings.cloudSyncFolder", { path: `${syncFolder}/HwanNote/Notes` })}
                 </div>
               ) : null;
             })()}
@@ -329,7 +350,7 @@ export default function SettingsPanel({
                 }}
               >
                 <option value="cloud">
-                  {cloudProviders.find((provider) => provider.id === cloudSyncProvider)?.name ?? t("settings.cloudSyncSourceCloud")}
+                  {activeProvider?.name ?? t("settings.cloudSyncSourceCloud")}
                 </option>
                 <option value="local">{t("settings.cloudSyncSourceLocal")}</option>
               </select>
