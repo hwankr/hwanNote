@@ -98,9 +98,18 @@ fn now_millis() -> u64 {
 
 // ── String helpers ──
 
-pub fn to_windows_crlf(text: &str) -> String {
+pub fn to_platform_line_endings(text: &str) -> String {
     let normalized = text.replace("\r\n", "\n");
-    normalized.replace('\n', "\r\n")
+
+    #[cfg(windows)]
+    {
+        normalized.replace('\n', "\r\n")
+    }
+
+    #[cfg(not(windows))]
+    {
+        normalized
+    }
 }
 
 fn to_posix(path: &str) -> String {
@@ -1028,7 +1037,8 @@ pub fn auto_save_markdown_note(
     };
     let stored_markdown = embed_manual_title_metadata(&payload.content, manual_title.as_deref());
 
-    fs::write(&next_file_path, to_windows_crlf(&stored_markdown)).map_err(|e| e.to_string())?;
+    fs::write(&next_file_path, to_platform_line_endings(&stored_markdown))
+        .map_err(|e| e.to_string())?;
 
     // Remove old file if path changed
     if let Some(ref old_path) = existing_path {
@@ -1216,7 +1226,7 @@ pub fn save_text_file(file_path: &Path, content: &str) -> Result<(), String> {
     if let Some(parent) = file_path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    fs::write(file_path, to_windows_crlf(content)).map_err(|e| e.to_string())
+    fs::write(file_path, to_platform_line_endings(content)).map_err(|e| e.to_string())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1505,6 +1515,12 @@ mod tests {
             assert!(raw_markdown.starts_with(MANUAL_TITLE_META_PREFIX));
             assert!(raw_markdown.contains("Body first line"));
 
+            #[cfg(windows)]
+            assert!(raw_markdown.contains("\r\n"));
+
+            #[cfg(not(windows))]
+            assert!(!raw_markdown.contains("\r\n"));
+
             let notes = load_markdown_notes(&dir)?;
             assert_eq!(notes.len(), 1);
             assert_eq!(notes[0].title, "Project Launch");
@@ -1527,7 +1543,7 @@ mod tests {
 
             fs::write(
                 dir.join(&relative_path),
-                to_windows_crlf(&format!(
+                to_platform_line_endings(&format!(
                     "{}\nBody first line",
                     embed_manual_title_metadata("", Some(manual_title))
                 )),
@@ -1660,6 +1676,37 @@ mod tests {
             Ok(())
         })();
         cleanup_temp_dir(&root);
+        result.unwrap();
+    }
+
+    #[test]
+    fn to_platform_line_endings_are_explicit_per_host() {
+        let converted = to_platform_line_endings("alpha\r\nbeta\n");
+
+        #[cfg(windows)]
+        assert_eq!(converted, "alpha\r\nbeta\r\n");
+
+        #[cfg(not(windows))]
+        assert_eq!(converted, "alpha\nbeta\n");
+    }
+
+    #[test]
+    fn save_text_file_uses_host_platform_line_endings() {
+        let dir = make_temp_dir("save-text-line-endings");
+        let path = dir.join("note.txt");
+        let result = (|| -> Result<(), String> {
+            save_text_file(&path, "line 1\r\nline 2\nline 3")?;
+            let raw = fs::read_to_string(&path).unwrap();
+
+            #[cfg(windows)]
+            assert!(raw.contains("\r\n"));
+
+            #[cfg(not(windows))]
+            assert!(!raw.contains("\r\n"));
+
+            Ok(())
+        })();
+        cleanup_temp_dir(&dir);
         result.unwrap();
     }
 }

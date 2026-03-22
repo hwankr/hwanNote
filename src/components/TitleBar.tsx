@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../i18n/context";
+import { hwanNote } from "../lib/tauriApi";
 import type { NoteTab } from "../stores/noteStore";
 import ContextMenu, { type ContextMenuEntry } from "./ContextMenu";
 
@@ -112,6 +113,21 @@ export default function TitleBar({
 
   const menuTarget = useMemo(() => tabs.find((tab) => tab.id === menu?.tabId), [tabs, menu]);
   const draggingTab = useMemo(() => tabs.find((tab) => tab.id === draggingTabId) ?? null, [tabs, draggingTabId]);
+
+  const handleWindowDragStart = (event: React.PointerEvent<HTMLElement>) => {
+    if (event.button !== 0) return;
+
+    const target = event.target as HTMLElement | null;
+    if (
+      target?.closest(
+        ".no-drag, .tab, .tab-drag-ghost, .context-menu, button, a, input, select, textarea, [role='button']"
+      )
+    ) {
+      return;
+    }
+
+    void hwanNote.window.startDragging();
+  };
 
   useEffect(() => {
     const resetDragState = () => {
@@ -256,7 +272,7 @@ export default function TitleBar({
   }, [menu, menuTarget, t, onCloseTab, onCloseOtherTabs, onTogglePinTab]);
 
   return (
-    <header className="titlebar">
+    <header className="titlebar" onPointerDown={handleWindowDragStart}>
       <div className="titlebar-left">
         <button
           type="button"

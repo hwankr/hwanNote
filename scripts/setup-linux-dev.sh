@@ -53,9 +53,22 @@ echo "[setup-linux] Installing npm dependencies..."
 cd "$ROOT_DIR"
 npm ci
 
+echo "[setup-linux] Running frontend typecheck..."
+npm run typecheck
+
 echo "[setup-linux] Running Tauri environment check..."
 npm exec tauri info
 
+echo "[setup-linux] Running cargo check..."
+(
+  cd "$ROOT_DIR/src-tauri"
+  cargo check
+)
+
 echo
 echo "[setup-linux] Done."
+echo "[setup-linux] Verified command set:"
+echo "  - npm run typecheck"
+echo "  - npm exec tauri info"
+echo "  - cd src-tauri && cargo check"
 echo "[setup-linux] If you are on WSL, GUI execution of 'npm run dev' requires WSLg or another X/Wayland-capable GUI session."
