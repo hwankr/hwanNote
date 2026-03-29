@@ -863,18 +863,31 @@ body.tab-dragging .tab:not(.dragging):hover {
   background: var(--bg-elevated);
   text-align: left;
   padding: 8px;
-  cursor: pointer;
+  cursor: grab;
   min-width: 0;
   overflow: hidden;
+  transition: border-color 120ms ease, background 120ms ease, opacity 120ms ease, transform 120ms ease;
 }
 
 .note-list-item:hover {
   border-color: var(--accent);
 }
 
+.note-list-item:active {
+  cursor: grabbing;
+}
+
 .note-list-item.active {
   border-color: var(--accent);
   background: var(--bg-active);
+}
+
+.note-list-item.dragging {
+  opacity: 0.58;
+  border-color: var(--accent);
+  background: var(--bg-active);
+  transform: scale(0.99);
+  cursor: grabbing;
 }
 
 .note-item-head {

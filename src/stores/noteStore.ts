@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { normalizeFolderPath } from "../lib/folderPaths";
 
 export const OPEN_TAB_IDS_KEY = "hwan-note:open-tab-ids";
 export const ACTIVE_TAB_ID_KEY = "hwan-note:active-tab-id";
@@ -490,11 +491,15 @@ export const useNoteStore = create<NoteStore>((set, get) => {
       });
     },
     moveTabToFolder: (id, folderPath) => {
-      const normalized = folderPath.trim();
+      const normalized = normalizeFolderPath(folderPath);
 
       set((state) => {
         const target = state.notesById[id];
         if (!target) {
+          return state;
+        }
+
+        if (normalizeFolderPath(target.folderPath) === normalized) {
           return state;
         }
 
@@ -512,8 +517,8 @@ export const useNoteStore = create<NoteStore>((set, get) => {
       });
     },
     renameFolderPath: (from, to) => {
-      const fromPath = from.trim();
-      const toPath = to.trim();
+      const fromPath = normalizeFolderPath(from);
+      const toPath = normalizeFolderPath(to);
       if (!fromPath || fromPath === toPath) {
         return;
       }
@@ -553,7 +558,7 @@ export const useNoteStore = create<NoteStore>((set, get) => {
       });
     },
     clearFolderPath: (folderPath) => {
-      const normalized = folderPath.trim();
+      const normalized = normalizeFolderPath(folderPath);
       if (!normalized) {
         return;
       }

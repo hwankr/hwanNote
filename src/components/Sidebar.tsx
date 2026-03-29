@@ -93,6 +93,7 @@ export default function Sidebar({
 }: SidebarProps) {
   const { t, localeTag } = useI18n();
   const [noteMenu, setNoteMenu] = useState<{ noteId: string; x: number; y: number } | null>(null);
+  const [draggingNoteId, setDraggingNoteId] = useState<string | null>(null);
 
   const noteMenuTarget = useMemo(
     () => notes.find((n) => n.id === noteMenu?.noteId),
@@ -230,16 +231,21 @@ export default function Sidebar({
             <button
               type="button"
               key={note.id}
-              className={`note-list-item ${note.id === activeTabId ? "active" : ""}`}
+              className={`note-list-item ${note.id === activeTabId ? "active" : ""} ${draggingNoteId === note.id ? "dragging" : ""}`}
               onClick={() => onSelectNote(note.id)}
               onContextMenu={(event) => {
                 event.preventDefault();
                 setNoteMenu({ noteId: note.id, x: event.clientX, y: event.clientY });
               }}
               draggable
+              aria-grabbed={draggingNoteId === note.id}
               onDragStart={(event) => {
                 event.dataTransfer.effectAllowed = "move";
                 event.dataTransfer.setData("text/note-id", note.id);
+                setDraggingNoteId(note.id);
+              }}
+              onDragEnd={() => {
+                setDraggingNoteId((current) => (current === note.id ? null : current));
               }}
             >
               <div className="note-item-head">
