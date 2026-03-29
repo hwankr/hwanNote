@@ -51,6 +51,7 @@ const VALID_TAB_SIZES = [2, 4, 8];
 const MIN_SPLIT_RATIO = 0.25;
 const MAX_SPLIT_RATIO = 0.75;
 const DEFAULT_SPLIT_RATIO = 0.5;
+const AUTO_SAVE_DELAY_MS = 1750;
 
 type SortMode = "updated" | "title" | "created";
 type PaneId = "primary" | "secondary";
@@ -391,6 +392,10 @@ export default function App() {
   const guardedFlowRef = useRef(false);
   const allowImmediateCloseRef = useRef(false);
   const pendingTitleDraftsRef = useRef<Record<string, string>>({});
+  const autoSaveTimerRef = useRef<number | null>(null);
+  const pendingAutoSaveTabIdRef = useRef<string | null>(null);
+  const savingAutoSaveTabIdsRef = useRef<Set<string>>(new Set());
+  const saveTabRef = useRef<((tabId: string) => Promise<boolean>) | null>(null);
 
   const tabById = useMemo(() => {
     const map = new Map<string, NoteTab>();
@@ -417,6 +422,95 @@ export default function App() {
   const getTabById = useCallback((tabId: string) => {
     return useNoteStore.getState().notesById[tabId] ?? null;
   }, []);
+
+  const clearAutoSaveTimer = useCallback(() => {
+    if (autoSaveTimerRef.current !== null) {
+      window.clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
+    }
+  }, []);
+
+  const saveLibraryTabIfEligible = useCallback(async (tabId: string) => {
+    const noteApi = hwanNote.note;
+    if (!noteApi?.autoSave) {
+      return false;
+    }
+
+    const tab = getTabById(tabId);
+    if (!tab || tab.persistence !== "library" || !tab.isDirty) {
+      return false;
+    }
+
+    if (savingAutoSaveTabIdsRef.current.has(tabId)) {
+      return false;
+    }
+
+    const saveTab = saveTabRef.current;
+    if (!saveTab) {
+      return false;
+    }
+
+    savingAutoSaveTabIdsRef.current.add(tabId);
+    try {
+      return await saveTab(tabId);
+    } finally {
+      savingAutoSaveTabIdsRef.current.delete(tabId);
+    }
+  }, [getTabById]);
+
+  const flushPendingAutoSave = useCallback(async () => {
+    clearAutoSaveTimer();
+
+    const pendingTabId = pendingAutoSaveTabIdRef.current;
+    pendingAutoSaveTabIdRef.current = null;
+
+    if (!pendingTabId) {
+      return false;
+    }
+
+    if (savingAutoSaveTabIdsRef.current.has(pendingTabId)) {
+      pendingAutoSaveTabIdRef.current = pendingTabId;
+      autoSaveTimerRef.current = window.setTimeout(() => {
+        void flushPendingAutoSave();
+      }, AUTO_SAVE_DELAY_MS);
+      return false;
+    }
+
+    return saveLibraryTabIfEligible(pendingTabId);
+  }, [clearAutoSaveTimer, saveLibraryTabIfEligible]);
+
+  const queuePendingAutoSave = useCallback((tabId: string) => {
+    clearAutoSaveTimer();
+    pendingAutoSaveTabIdRef.current = tabId;
+    autoSaveTimerRef.current = window.setTimeout(() => {
+      void flushPendingAutoSave();
+    }, AUTO_SAVE_DELAY_MS);
+  }, [clearAutoSaveTimer, flushPendingAutoSave]);
+
+  const armAutoSaveForTab = useCallback((tabId: string | null | undefined) => {
+    if (!tabId) {
+      return;
+    }
+
+    const noteApi = hwanNote.note;
+    if (!noteApi?.autoSave) {
+      return;
+    }
+
+    const tab = getTabById(tabId);
+    if (!tab || tab.persistence !== "library" || !tab.isDirty) {
+      return;
+    }
+
+    const previousPendingTabId = pendingAutoSaveTabIdRef.current;
+    if (previousPendingTabId && previousPendingTabId !== tabId) {
+      clearAutoSaveTimer();
+      pendingAutoSaveTabIdRef.current = null;
+      void saveLibraryTabIfEligible(previousPendingTabId);
+    }
+
+    queuePendingAutoSave(tabId);
+  }, [clearAutoSaveTimer, getTabById, queuePendingAutoSave, saveLibraryTabIfEligible]);
 
   const handleTitleDraftChange = useCallback((tabId: string, title: string) => {
     if (!tabId) {
@@ -453,10 +547,17 @@ export default function App() {
     setTabTitle(tabId, pendingTitle);
   }, [getTabById, setTabTitle]);
 
+  const flushAutoSaveBeforeFocusChange = useCallback((tabId: string | null | undefined) => {
+    flushTitleDraft(tabId);
+    armAutoSaveForTab(tabId);
+    void flushPendingAutoSave();
+  }, [armAutoSaveForTab, flushPendingAutoSave, flushTitleDraft]);
+
   const handleTitleCommit = useCallback((tabId: string, title: string) => {
     handleTitleDraftChange(tabId, title);
     flushTitleDraft(tabId);
-  }, [flushTitleDraft, handleTitleDraftChange]);
+    armAutoSaveForTab(tabId);
+  }, [armAutoSaveForTab, flushTitleDraft, handleTitleDraftChange]);
 
   const setPaneTab = useCallback(
     (pane: PaneId, nextTabId: string) => {
@@ -482,7 +583,7 @@ export default function App() {
       }
 
       if (pane !== focusedPane) {
-        flushTitleDraft(focusedTabId);
+        flushAutoSaveBeforeFocusChange(focusedTabId);
       }
 
       setFocusedPane(pane);
@@ -491,7 +592,7 @@ export default function App() {
         setActiveTab(paneTabId);
       }
     },
-    [activeTabId, flushTitleDraft, focusedPane, focusedTabId, isSplit, primaryTabId, secondaryTabId, setActiveTab]
+    [activeTabId, flushAutoSaveBeforeFocusChange, focusedPane, focusedTabId, isSplit, primaryTabId, secondaryTabId, setActiveTab]
   );
 
   const handleCursorChange = useCallback((pane: PaneId, line: number, column: number, chars: number) => {
@@ -508,7 +609,14 @@ export default function App() {
     }
 
     updateTabContent(targetTabId, content, plainText);
-  }, [isSplit, primaryTabId, secondaryTabId, updateTabContent]);
+    armAutoSaveForTab(targetTabId);
+  }, [armAutoSaveForTab, isSplit, primaryTabId, secondaryTabId, updateTabContent]);
+
+  useEffect(() => {
+    return () => {
+      clearAutoSaveTimer();
+    };
+  }, [clearAutoSaveTimer]);
 
   const [searchQuery, setSearchQuery] = useState("");
   const [searchMode, setSearchMode] = useState<"all" | "title" | "content">("all");
@@ -1009,20 +1117,20 @@ export default function App() {
   }, [selectedTag, tags]);
 
   const handleSelectTabInFocusedPane = useCallback((tabId: string) => {
-    flushTitleDraft(focusedTabId);
+    flushAutoSaveBeforeFocusChange(focusedTabId);
     setPaneTab(focusedPane, tabId);
     setActiveTab(tabId);
-  }, [flushTitleDraft, focusedPane, focusedTabId, setActiveTab, setPaneTab]);
+  }, [flushAutoSaveBeforeFocusChange, focusedPane, focusedTabId, setActiveTab, setPaneTab]);
 
   const handleSelectNoteInFocusedPane = useCallback((tabId: string) => {
-    flushTitleDraft(focusedTabId);
+    flushAutoSaveBeforeFocusChange(focusedTabId);
     openNote(tabId);
     setPaneTab(focusedPane, tabId);
     setActiveTab(tabId);
-  }, [flushTitleDraft, focusedPane, focusedTabId, openNote, setActiveTab, setPaneTab]);
+  }, [flushAutoSaveBeforeFocusChange, focusedPane, focusedTabId, openNote, setActiveTab, setPaneTab]);
 
   const handleCreateTabInFocusedPane = useCallback((targetFolderPath?: string | null) => {
-    flushTitleDraft(focusedTabId);
+    flushAutoSaveBeforeFocusChange(focusedTabId);
     const normalizedTargetFolder = targetFolderPath ? normalizeFolderPath(targetFolderPath) : "";
     const prevIds = new Set(openTabIds);
     createTab();
@@ -1042,7 +1150,15 @@ export default function App() {
       setPaneTab(focusedPane, createdId);
       setActiveTab(createdId);
     });
-  }, [createTab, flushTitleDraft, focusedPane, focusedTabId, moveTabToFolder, openTabIds, setActiveTab, setPaneTab]);
+  }, [createTab, flushAutoSaveBeforeFocusChange, focusedPane, focusedTabId, moveTabToFolder, openTabIds, setActiveTab, setPaneTab]);
+
+  const handleMoveNoteToFolder = useCallback((noteId: string, folderPath: string) => {
+    const normalizedFolder = normalizeFolderPath(folderPath);
+    moveTabToFolder(noteId, normalizedFolder);
+    queueMicrotask(() => {
+      armAutoSaveForTab(noteId);
+    });
+  }, [armAutoSaveForTab, moveTabToFolder]);
 
   const resolveCurrentFolderContext = useCallback(() => {
     if (selectedFolder) {
@@ -1086,6 +1202,7 @@ export default function App() {
   }, []);
 
   const handleDropTabOutside = useCallback((tabId: string, clientX: number, clientY: number) => {
+    flushAutoSaveBeforeFocusChange(focusedTabId);
     setSplitDropTarget(null);
     if (openTabIds.length <= 1) {
       return;
@@ -1111,7 +1228,7 @@ export default function App() {
       setPrimaryTabId(fallbackTabId);
     }
     setActiveTab(tabId);
-  }, [openTabIds, primaryTabId, resolveWorkspaceDropTarget, secondaryTabId, setActiveTab]);
+  }, [flushAutoSaveBeforeFocusChange, focusedTabId, openTabIds, primaryTabId, resolveWorkspaceDropTarget, secondaryTabId, setActiveTab]);
 
   const handleCycleTabInFocusedPane = useCallback((direction: 1 | -1) => {
     const currentTabId = focusedPane === "secondary" && isSplit ? secondaryTabId : primaryTabId;
@@ -1126,9 +1243,10 @@ export default function App() {
 
     const nextIndex = (currentIndex + direction + openTabIds.length) % openTabIds.length;
     const nextTabId = openTabIds[nextIndex];
+    flushAutoSaveBeforeFocusChange(currentTabId);
     setPaneTab(focusedPane, nextTabId);
     setActiveTab(nextTabId);
-  }, [focusedPane, isSplit, openTabIds, primaryTabId, secondaryTabId, setActiveTab, setPaneTab]);
+  }, [flushAutoSaveBeforeFocusChange, focusedPane, isSplit, openTabIds, primaryTabId, secondaryTabId, setActiveTab, setPaneTab]);
 
   const handleSplitDividerPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     if (!isSplit || !editorWorkspaceRef.current) {
@@ -1217,6 +1335,11 @@ export default function App() {
   }, [getTabById, t]);
 
   const handleSaveTab = useCallback(async (tabId: string) => {
+    if (pendingAutoSaveTabIdRef.current === tabId) {
+      pendingAutoSaveTabIdRef.current = null;
+      clearAutoSaveTimer();
+    }
+
     flushTitleDraft(tabId);
     const tab = getTabById(tabId);
     if (!tab) {
@@ -1282,7 +1405,11 @@ export default function App() {
       console.error("Save failed:", error);
       return false;
     }
-  }, [flushTitleDraft, getTabById, markTabSaved, t]);
+  }, [clearAutoSaveTimer, flushTitleDraft, getTabById, markTabSaved, t]);
+
+  useEffect(() => {
+    saveTabRef.current = handleSaveTab;
+  }, [handleSaveTab]);
 
   const handleManualSave = useCallback(async () => {
     if (!focusedTabId) {
@@ -1332,13 +1459,16 @@ export default function App() {
       return false;
     }
 
+    clearAutoSaveTimer();
+    pendingAutoSaveTabIdRef.current = null;
+
     guardedFlowRef.current = true;
     try {
       return await action();
     } finally {
       guardedFlowRef.current = false;
     }
-  }, []);
+  }, [clearAutoSaveTimer]);
 
   const handleRequestCloseTab = useCallback(async (tabId: string) => {
     return runGuardedFlow(() => resolveDirtyTabs([tabId], { closeResolvedTabs: true }));
@@ -1848,9 +1978,7 @@ export default function App() {
           onCreateNoteInFolder={(folderPath) => {
             handleCreateTabInFocusedPane(folderPath);
           }}
-          onMoveNoteToFolder={(id, folderPath) => {
-            moveTabToFolder(id, normalizeFolderPath(folderPath));
-          }}
+          onMoveNoteToFolder={handleMoveNoteToFolder}
           onCreateFolder={async (folderPath) => {
             const normalized = normalizeFolderPath(folderPath);
             if (!normalized) {
