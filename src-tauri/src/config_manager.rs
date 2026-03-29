@@ -70,10 +70,14 @@ fn get_cloud_notes_dir_for_provider(provider: &str) -> Option<PathBuf> {
 
 fn is_cloud_notes_dir_for_provider(provider: &str, dir: &str) -> bool {
     get_cloud_notes_dir_for_provider(provider)
-        .map(|cloud_dir| normalize_path_for_compare(cloud_dir.to_string_lossy().as_ref()) == normalize_path_for_compare(dir))
+        .map(|cloud_dir| {
+            normalize_path_for_compare(cloud_dir.to_string_lossy().as_ref())
+                == normalize_path_for_compare(dir)
+        })
         .unwrap_or(false)
 }
 
+#[cfg(any(test, windows))]
 fn classify_legacy_cloud_sync_dir(
     dir: &str,
     providers: &[CloudProviderInfo],
@@ -148,8 +152,8 @@ pub fn set_cloud_sync_provider(app: &AppHandle, provider: Option<&str>) -> Resul
             .cloud_sync_provider
             .as_deref()
             .is_some_and(|current| is_cloud_notes_dir_for_provider(current, &existing_dir));
-        let matches_next_cloud_path = provider
-            .is_some_and(|next| is_cloud_notes_dir_for_provider(next, &existing_dir));
+        let matches_next_cloud_path =
+            provider.is_some_and(|next| is_cloud_notes_dir_for_provider(next, &existing_dir));
         if matches_previous_cloud_path || matches_next_cloud_path {
             config.auto_save_dir = None;
         }
@@ -238,17 +242,20 @@ fn detect_google_drive() -> Option<String> {
         }
     }
 
-    // Modern "Google Drive Desktop" (DriveFS): virtual drive letter (e.g. G:\내 드라이브)
-    // Only scan drive letters when DriveFS installation is confirmed
-    if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-        let drivefs = Path::new(&local_app_data).join("Google").join("DriveFS");
-        if drivefs.exists() {
-            for letter in b'D'..=b'Z' {
-                let root = format!("{}:\\", letter as char);
-                for subfolder in &["My Drive", "내 드라이브"] {
-                    let candidate = PathBuf::from(&root).join(subfolder);
-                    if candidate.exists() {
-                        return Some(candidate.to_string_lossy().to_string());
+    // Modern "Google Drive Desktop" (DriveFS) only exists on Windows.
+    // Keep the heuristic out of the Linux runtime path.
+    #[cfg(windows)]
+    {
+        if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+            let drivefs = Path::new(&local_app_data).join("Google").join("DriveFS");
+            if drivefs.exists() {
+                for letter in b'D'..=b'Z' {
+                    let root = format!("{}:\\", letter as char);
+                    for subfolder in &["My Drive", "내 드라이브"] {
+                        let candidate = PathBuf::from(&root).join(subfolder);
+                        if candidate.exists() {
+                            return Some(candidate.to_string_lossy().to_string());
+                        }
                     }
                 }
             }
@@ -281,6 +288,7 @@ pub fn detect_cloud_providers() -> Vec<CloudProviderInfo> {
 /// One-time migration: copy legacy Electron config to Tauri config directory.
 /// Electron stored config at `%APPDATA%/hwan-note/config.json`.
 /// Tauri stores config at `%APPDATA%/com.hwankr.hwannote/config.json`.
+#[cfg(windows)]
 pub fn migrate_legacy_electron_config(app: &AppHandle) -> Result<(), String> {
     let tauri_config_path = get_config_path(app);
 
@@ -290,9 +298,7 @@ pub fn migrate_legacy_electron_config(app: &AppHandle) -> Result<(), String> {
     }
 
     if let Some(appdata) = std::env::var_os("APPDATA") {
-        let legacy_path = PathBuf::from(appdata)
-            .join("hwan-note")
-            .join("config.json");
+        let legacy_path = PathBuf::from(appdata).join("hwan-note").join("config.json");
 
         if legacy_path.exists() {
             if let Some(parent) = tauri_config_path.parent() {
@@ -310,6 +316,12 @@ pub fn migrate_legacy_electron_config(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(not(windows))]
+pub fn migrate_legacy_electron_config(_app: &AppHandle) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(windows)]
 pub fn migrate_legacy_cloud_sync_config(app: &AppHandle) -> Result<(), String> {
     let mut config = read_config(app);
     if config
@@ -334,6 +346,11 @@ pub fn migrate_legacy_cloud_sync_config(app: &AppHandle) -> Result<(), String> {
     write_config(app, &config)
 }
 
+#[cfg(not(windows))]
+pub fn migrate_legacy_cloud_sync_config(_app: &AppHandle) -> Result<(), String> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{classify_legacy_cloud_sync_dir, CloudProviderInfo, LibrarySource};
@@ -351,14 +368,20 @@ mod tests {
     fn classify_legacy_cloud_sync_dir_recognizes_provider_root_hwan_dir_as_local_source() {
         let providers = vec![provider("google_drive", r"G:\내 드라이브")];
         let result = classify_legacy_cloud_sync_dir(r"G:\내 드라이브\HwanNote", &providers);
-        assert_eq!(result, Some(("google_drive".to_string(), LibrarySource::Local)));
+        assert_eq!(
+            result,
+            Some(("google_drive".to_string(), LibrarySource::Local))
+        );
     }
 
     #[test]
     fn classify_legacy_cloud_sync_dir_recognizes_notes_dir_as_cloud_source() {
         let providers = vec![provider("google_drive", r"G:\내 드라이브")];
         let result = classify_legacy_cloud_sync_dir(r"G:\내 드라이브\HwanNote\Notes", &providers);
-        assert_eq!(result, Some(("google_drive".to_string(), LibrarySource::Cloud)));
+        assert_eq!(
+            result,
+            Some(("google_drive".to_string(), LibrarySource::Cloud))
+        );
     }
 
     #[test]

@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 // -- Types (matching Rust serde output) --
 
@@ -102,6 +103,7 @@ export const hwanNote = {
     toggleMaximize: () => invoke<boolean>("cmd_window_toggle_maximize"),
     close: () => invoke("cmd_window_close"),
     exit: () => invoke("cmd_app_exit"),
+    startDragging: () => getCurrentWindow().startDragging(),
   },
 
   note: {

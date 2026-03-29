@@ -16,6 +16,7 @@
     "build:frontend": "vite build",
     "preview": "vite preview",
     "setup:linux": "bash ./scripts/setup-linux-dev.sh",
+    "verify:ubuntu": "npm run typecheck && npm exec tauri info && bash -lc 'cd src-tauri && cargo check'",
     "typecheck": "tsc --noEmit",
     "tauri": "tauri"
   },

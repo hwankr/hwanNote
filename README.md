@@ -158,6 +158,18 @@ Linux에서 사전 점검:
 npm exec tauri info
 ```
 
+Ubuntu 안정 운영 기준 검증:
+
+```bash
+npm run verify:ubuntu
+```
+
+이 검증은 아래를 순서대로 확인합니다.
+
+- TypeScript 타입 검사
+- Tauri/Linux prerequisite 점검
+- Rust `cargo check`
+
 ### Windows 체크리스트
 
 1. **Node.js 확인**
@@ -195,6 +207,7 @@ npm exec tauri info
 | `npm run dev` | 개발 모드 실행 (Tauri + Vite) |
 | `npm run build` | 프로덕션 빌드 |
 | `npm run typecheck` | TypeScript 타입 검사 |
+| `npm run verify:ubuntu` | Ubuntu 개발/빌드 baseline 검증 |
 
 ---
 
