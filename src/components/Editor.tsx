@@ -160,6 +160,11 @@ export default function Editor({
         tabSize
       })
     ],
+    coreExtensionOptions: {
+      clipboardTextSerializer: {
+        blockSeparator: "\n"
+      }
+    },
     content,
     autofocus: initialAutofocusRef.current ? "end" : false,
     editorProps: {
