@@ -1057,6 +1057,18 @@ export default function App() {
     });
   }, [createTab, flushTitleDraft, focusedPane, focusedTabId, moveTabToFolder, openTabIds, setActiveTab, setPaneTab]);
 
+  const resolveCurrentFolderContext = useCallback(() => {
+    if (selectedFolder) {
+      return normalizeFolderPath(selectedFolder);
+    }
+
+    return normalizeFolderPath(focusedTab?.folderPath ?? "");
+  }, [focusedTab?.folderPath, selectedFolder]);
+
+  const handleCreateTabFromCurrentContext = useCallback(() => {
+    handleCreateTabInFocusedPane(resolveCurrentFolderContext());
+  }, [handleCreateTabInFocusedPane, resolveCurrentFolderContext]);
+
   const resolveWorkspaceDropTarget = useCallback((clientX: number, clientY: number) => {
     const workspace = editorWorkspaceRef.current;
     if (!workspace) {
@@ -1808,7 +1820,7 @@ export default function App() {
         onDropTabOutside={handleDropTabOutside}
         onTabDragPreview={handleTabDragPreview}
         onTabDragEnd={handleTabDragEnd}
-        onCreateTab={handleCreateTabInFocusedPane}
+        onCreateTab={handleCreateTabFromCurrentContext}
         onMinimize={() => void hwanNote.window.minimize()}
         onToggleMaximize={() => void handleToggleMaximize()}
         onCloseWindow={() => void handleRequestCloseWindow()}
