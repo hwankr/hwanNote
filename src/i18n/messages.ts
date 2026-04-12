@@ -25,6 +25,8 @@ const messages = {
     "titlebar.context.closeOthers": "다른 탭 닫기",
     "titlebar.context.pin": "고정",
     "titlebar.context.unpin": "고정 해제",
+    "titlebar.context.unsplit": "분할 해제",
+    "titlebar.splitBadge": "분할",
     "titlebar.closeDirty.saveAsClose": "다른 이름으로 저장 후 닫기",
     "titlebar.closeDirty.temporaryClose": "임시 닫기",
     "titlebar.closeDirty.cancel": "취소",
@@ -220,6 +222,8 @@ const messages = {
     "titlebar.context.closeOthers": "Close others",
     "titlebar.context.pin": "Pin",
     "titlebar.context.unpin": "Unpin",
+    "titlebar.context.unsplit": "Unsplit",
+    "titlebar.splitBadge": "Split",
     "titlebar.closeDirty.saveAsClose": "Save As and Close",
     "titlebar.closeDirty.temporaryClose": "Temporary Close",
     "titlebar.closeDirty.cancel": "Cancel",
@@ -428,5 +432,4 @@ export function translate(
   const localized = messages[language][key] ?? messages.ko[key] ?? key;
   return interpolate(localized, vars);
 }
-
 

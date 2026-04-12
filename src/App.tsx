@@ -411,6 +411,21 @@ export default function App() {
   }, [openTabs]);
 
   const openTabIds = useMemo(() => openTabs.map((tab) => tab.id), [openTabs]);
+  const splitTabIds = useMemo(() => {
+    const nextIds = new Set<string>();
+    if (!isSplit) {
+      return nextIds;
+    }
+
+    if (primaryTabId && openTabIds.includes(primaryTabId)) {
+      nextIds.add(primaryTabId);
+    }
+    if (secondaryTabId && openTabIds.includes(secondaryTabId) && secondaryTabId !== primaryTabId) {
+      nextIds.add(secondaryTabId);
+    }
+
+    return nextIds;
+  }, [isSplit, openTabIds, primaryTabId, secondaryTabId]);
   const focusedTabId = useMemo(() => {
     if (isSplit && focusedPane === "secondary") {
       return secondaryTabId ?? primaryTabId;
@@ -1272,6 +1287,43 @@ export default function App() {
     setActiveTab(tabId);
   }, [flushAutoSaveBeforeFocusChange, focusedTabId, openTabIds, primaryTabId, resolveWorkspaceDropTarget, secondaryTabId, setActiveTab]);
 
+  const handleUnsplit = useCallback((targetTabId: string) => {
+    if (!isSplit) {
+      return;
+    }
+
+    const nextPrimaryTabId =
+      (openTabIds.includes(targetTabId) ? targetTabId : null) ??
+      (focusedTabId && openTabIds.includes(focusedTabId) ? focusedTabId : null) ??
+      (primaryTabId && openTabIds.includes(primaryTabId) ? primaryTabId : null) ??
+      (secondaryTabId && openTabIds.includes(secondaryTabId) ? secondaryTabId : null) ??
+      openTabIds[0] ??
+      null;
+
+    if (!nextPrimaryTabId) {
+      return;
+    }
+
+    flushAutoSaveBeforeFocusChange(focusedTabId);
+    setSplitDropTarget(null);
+    setPrimaryTabId(nextPrimaryTabId);
+    setSecondaryTabId(null);
+    setFocusedPane("primary");
+    setIsSplit(false);
+    if (activeTabId !== nextPrimaryTabId) {
+      setActiveTab(nextPrimaryTabId);
+    }
+  }, [
+    activeTabId,
+    flushAutoSaveBeforeFocusChange,
+    focusedTabId,
+    isSplit,
+    openTabIds,
+    primaryTabId,
+    secondaryTabId,
+    setActiveTab
+  ]);
+
   const handleCycleTabInFocusedPane = useCallback((direction: 1 | -1) => {
     const currentTabId = focusedPane === "secondary" && isSplit ? secondaryTabId : primaryTabId;
     if (!currentTabId || openTabIds.length <= 1) {
@@ -1980,6 +2032,7 @@ export default function App() {
       <TitleBar
         tabs={openTabs}
         activeTabId={activeTabId}
+        splitTabIds={splitTabIds}
         activeView={activeView}
         onViewChange={(view) => void handleViewChange(view)}
         isMaximized={isMaximized}
@@ -1992,6 +2045,7 @@ export default function App() {
         onDropTabOutside={handleDropTabOutside}
         onTabDragPreview={handleTabDragPreview}
         onTabDragEnd={handleTabDragEnd}
+        onUnsplit={handleUnsplit}
         onCreateTab={handleCreateTabFromCurrentContext}
         onMinimize={() => void hwanNote.window.minimize()}
         onToggleMaximize={() => void handleToggleMaximize()}
@@ -2259,4 +2313,3 @@ export default function App() {
     </div>
   );
 }
-

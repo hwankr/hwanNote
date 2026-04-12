@@ -57,6 +57,7 @@ const CloseWindowIcon = (
 interface TitleBarProps {
   tabs: NoteTab[];
   activeTabId: string | null;
+  splitTabIds: ReadonlySet<string>;
   activeView: AppView;
   onViewChange: (view: AppView) => void;
   isMaximized: boolean;
@@ -69,6 +70,7 @@ interface TitleBarProps {
   onDropTabOutside: (tabId: string, clientX: number, clientY: number) => void;
   onTabDragPreview: (tabId: string, clientX: number, clientY: number) => void;
   onTabDragEnd: () => void;
+  onUnsplit: (tabId: string) => void;
   onCreateTab: () => void;
   onMinimize: () => void;
   onToggleMaximize: () => void;
@@ -78,6 +80,7 @@ interface TitleBarProps {
 export default function TitleBar({
   tabs,
   activeTabId,
+  splitTabIds,
   activeView,
   onViewChange,
   isMaximized,
@@ -90,6 +93,7 @@ export default function TitleBar({
   onDropTabOutside,
   onTabDragPreview,
   onTabDragEnd,
+  onUnsplit,
   onCreateTab,
   onMinimize,
   onToggleMaximize,
@@ -118,6 +122,7 @@ export default function TitleBar({
 
   const menuTarget = useMemo(() => tabs.find((tab) => tab.id === menu?.tabId), [tabs, menu]);
   const draggingTab = useMemo(() => tabs.find((tab) => tab.id === draggingTabId) ?? null, [tabs, draggingTabId]);
+  const menuTargetIsSplit = Boolean(menuTarget && splitTabIds.has(menuTarget.id));
 
   const handleWindowDragStart = (event: React.PointerEvent<HTMLElement>) => {
     if (event.button !== 0) return;
@@ -269,12 +274,19 @@ export default function TitleBar({
 
   const menuItems = useMemo<ContextMenuEntry[]>(() => {
     if (!menu || !menuTarget) return [];
-    return [
+    const items: ContextMenuEntry[] = [
       { key: "close", label: t("titlebar.context.close"), onClick: () => { onCloseTab(menu.tabId); setMenu(null); } },
       { key: "closeOthers", label: t("titlebar.context.closeOthers"), onClick: () => { onCloseOtherTabs(menu.tabId); setMenu(null); } },
       { key: "pin", label: menuTarget.isPinned ? t("titlebar.context.unpin") : t("titlebar.context.pin"), onClick: () => { onTogglePinTab(menu.tabId); setMenu(null); } },
     ];
-  }, [menu, menuTarget, t, onCloseTab, onCloseOtherTabs, onTogglePinTab]);
+    if (menuTargetIsSplit) {
+      items.push(
+        { key: "separator-unsplit", separator: true },
+        { key: "unsplit", label: t("titlebar.context.unsplit"), onClick: () => { onUnsplit(menu.tabId); setMenu(null); } }
+      );
+    }
+    return items;
+  }, [menu, menuTarget, menuTargetIsSplit, t, onCloseTab, onCloseOtherTabs, onTogglePinTab, onUnsplit]);
 
   return (
     <header className="titlebar" onPointerDown={handleWindowDragStart}>
@@ -291,68 +303,72 @@ export default function TitleBar({
 
       <div className="titlebar-center">
         <div ref={tabsRef} className="tabs">
-          {tabs.map((tab) => (
-            <button
-              type="button"
-              key={tab.id}
-              className={`tab no-drag ${tab.id === activeTabId ? "active" : ""} ${
-                tab.id === draggingTabId ? "dragging" : ""
-              } ${tab.id === dragOverTabId ? "drag-over" : ""} ${
-                tab.id === dragOverTabId && dragOverPosition === "before" ? "drag-over-before" : ""
-              } ${tab.id === dragOverTabId && dragOverPosition === "after" ? "drag-over-after" : ""}`}
-              data-tab-id={tab.id}
-              onClick={() => {
-                if (didDragRef.current) {
-                  didDragRef.current = false;
-                  return;
-                }
-                if (activeView !== "notes") {
-                  onViewChange("notes");
-                }
-                onSelectTab(tab.id);
-              }}
-              onContextMenu={(event) => {
-                event.preventDefault();
-                setMenu({ tabId: tab.id, x: event.clientX, y: event.clientY });
-              }}
-              onPointerDown={(event) => {
-                if (event.button !== 0) return;
-                const target = event.target as HTMLElement | null;
-                if (
-                  target?.closest(
-                    ".tab-close, [data-tab-control], a, input, select, textarea, [role='button']"
-                  )
-                ) {
-                  return;
-                }
-                dragRef.current = {
-                  tabId: tab.id,
-                  startX: event.clientX,
-                  startY: event.clientY,
-                  active: false
-                };
-                lastPointerRef.current = { x: event.clientX, y: event.clientY };
-              }}
-              title={tab.title}
-            >
-              {tab.isPinned ? <span className="tab-pin">{PinIcon}</span> : null}
-              <span className="tab-title">{tab.title}</span>
-              {tab.isDirty ? <span className="tab-dirty">*</span> : null}
-              <span
-                role="button"
-                className="tab-close"
-                data-tab-control="close"
-                aria-label={t("titlebar.closeTab", { title: tab.title })}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  setMenu(null);
-                  onCloseTab(tab.id);
+          {tabs.map((tab) => {
+            const isSplitMember = splitTabIds.has(tab.id);
+            return (
+              <button
+                type="button"
+                key={tab.id}
+                className={`tab no-drag ${tab.id === activeTabId ? "active" : ""} ${
+                  tab.id === draggingTabId ? "dragging" : ""
+                } ${isSplitMember ? "split-member" : ""} ${tab.id === dragOverTabId ? "drag-over" : ""} ${
+                  tab.id === dragOverTabId && dragOverPosition === "before" ? "drag-over-before" : ""
+                } ${tab.id === dragOverTabId && dragOverPosition === "after" ? "drag-over-after" : ""}`}
+                data-tab-id={tab.id}
+                onClick={() => {
+                  if (didDragRef.current) {
+                    didDragRef.current = false;
+                    return;
+                  }
+                  if (activeView !== "notes") {
+                    onViewChange("notes");
+                  }
+                  onSelectTab(tab.id);
                 }}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  setMenu({ tabId: tab.id, x: event.clientX, y: event.clientY });
+                }}
+                onPointerDown={(event) => {
+                  if (event.button !== 0) return;
+                  const target = event.target as HTMLElement | null;
+                  if (
+                    target?.closest(
+                      ".tab-close, [data-tab-control], a, input, select, textarea, [role='button']"
+                    )
+                  ) {
+                    return;
+                  }
+                  dragRef.current = {
+                    tabId: tab.id,
+                    startX: event.clientX,
+                    startY: event.clientY,
+                    active: false
+                  };
+                  lastPointerRef.current = { x: event.clientX, y: event.clientY };
+                }}
+                title={tab.title}
               >
-                {CloseTabIcon}
-              </span>
-            </button>
-          ))}
+                {tab.isPinned ? <span className="tab-pin">{PinIcon}</span> : null}
+                {isSplitMember ? <span className="tab-split-badge">{t("titlebar.splitBadge")}</span> : null}
+                <span className="tab-title">{tab.title}</span>
+                {tab.isDirty ? <span className="tab-dirty">*</span> : null}
+                <span
+                  role="button"
+                  className="tab-close"
+                  data-tab-control="close"
+                  aria-label={t("titlebar.closeTab", { title: tab.title })}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setMenu(null);
+                    onCloseTab(tab.id);
+                  }}
+                >
+                  {CloseTabIcon}
+                </span>
+              </button>
+            );
+          })}
           <button
             type="button"
             className={`tab calendar-tab no-drag ${activeView === "calendar" ? "active" : ""}`}
@@ -380,6 +396,7 @@ export default function TitleBar({
             }}
           >
             {draggingTab.isPinned ? <span className="tab-pin">{PinIcon}</span> : null}
+            {splitTabIds.has(draggingTab.id) ? <span className="tab-split-badge">{t("titlebar.splitBadge")}</span> : null}
             <span className="tab-title">{draggingTab.title}</span>
             {draggingTab.isDirty ? <span className="tab-dirty">*</span> : null}
           </div>
