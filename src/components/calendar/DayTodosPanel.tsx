@@ -1,74 +1,63 @@
-import { useCallback, useState } from "react";
+﻿import { useCallback, useState } from "react";
 import { useI18n } from "../../i18n/context";
-import { parseDateKey } from "../../lib/calendarData";
-import type { CalendarData } from "../../lib/calendarData";
+import type { TodoItem as CalendarTodoItem } from "../../lib/calendarData";
+import type { PinnedNote } from "./CalendarSidebar";
 import TodoItem from "./TodoItem";
 
-interface PinnedNote {
-  id: string;
-  title: string;
-}
-
-interface TodoPanelProps {
+interface DayTodosPanelProps {
   selectedDate: string;
-  data: CalendarData;
+  dayTodos: CalendarTodoItem[];
+  linkedNoteIds: string[];
+  pinnedNotes: PinnedNote[];
   onCreateTodo: (dateKey: string, text: string) => void;
   onToggleTodo: (dateKey: string, todoId: string) => void;
   onUpdateTodo: (dateKey: string, todoId: string, text: string) => void;
   onDeleteTodo: (dateKey: string, todoId: string) => void;
-  linkedNoteIds: string[];
+  onSetTodoDueDate?: (dateKey: string, todoId: string, dueDateKey: string | null) => void;
   onNavigateToNote: (noteId: string) => void;
   noteTitle: (noteId: string) => string;
-  pinnedNotes?: PinnedNote[];
 }
 
-export default function TodoPanel({
+export default function DayTodosPanel({
   selectedDate,
-  data,
+  dayTodos,
+  linkedNoteIds,
+  pinnedNotes,
   onCreateTodo,
   onToggleTodo,
   onUpdateTodo,
   onDeleteTodo,
-  linkedNoteIds,
+  onSetTodoDueDate,
   onNavigateToNote,
   noteTitle,
-  pinnedNotes = [],
-}: TodoPanelProps) {
-  const { t, localeTag } = useI18n();
+}: DayTodosPanelProps) {
+  const { t } = useI18n();
   const [newTodoText, setNewTodoText] = useState("");
   const [pinnedCollapsed, setPinnedCollapsed] = useState(false);
 
-  const dayTodos = data.todos[selectedDate]?.items ?? [];
-
-  const dateLabel = parseDateKey(selectedDate).toLocaleDateString(localeTag, {
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-    weekday: "short",
-  });
-
   const handleAddTodo = useCallback(() => {
     const trimmed = newTodoText.trim();
-    if (!trimmed) return;
+    if (!trimmed) {
+      return;
+    }
+
     onCreateTodo(selectedDate, trimmed);
     setNewTodoText("");
-  }, [newTodoText, selectedDate, onCreateTodo]);
+  }, [newTodoText, onCreateTodo, selectedDate]);
 
   return (
-    <div className="todo-panel">
-      <div className="todo-panel-header">
-        <h3 className="todo-date-label">{dateLabel}</h3>
-      </div>
-
+    <>
       <div className="todo-add-row">
         <input
           type="text"
           className="todo-add-input"
           placeholder={t("calendar.todoAdd")}
           value={newTodoText}
-          onChange={(e) => setNewTodoText(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") handleAddTodo();
+          onChange={(event) => setNewTodoText(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              handleAddTodo();
+            }
           }}
         />
       </div>
@@ -84,6 +73,11 @@ export default function TodoPanel({
               onToggle={() => onToggleTodo(selectedDate, item.id)}
               onUpdate={(text) => onUpdateTodo(selectedDate, item.id, text)}
               onDelete={() => onDeleteTodo(selectedDate, item.id)}
+              onSetDueDate={
+                onSetTodoDueDate
+                  ? (dueDateKey) => onSetTodoDueDate(selectedDate, item.id, dueDateKey)
+                  : undefined
+              }
             />
           ))
         )}
@@ -91,12 +85,14 @@ export default function TodoPanel({
 
       {pinnedNotes.length > 0 && (
         <div className="todo-linked-notes">
-          <h4
+          <button
+            type="button"
             className="todo-section-toggle"
-            onClick={() => setPinnedCollapsed((v) => !v)}
+            onClick={() => setPinnedCollapsed((value) => !value)}
           >
-            {pinnedCollapsed ? "\u25b6" : "\u25bc"} {t("calendar.pinnedNotes")}
-          </h4>
+            <span aria-hidden="true">{pinnedCollapsed ? "▶" : "▼"}</span>
+            <span>{t("calendar.pinnedNotes")}</span>
+          </button>
           {!pinnedCollapsed &&
             pinnedNotes.map((note) => (
               <button
@@ -126,6 +122,6 @@ export default function TodoPanel({
           ))}
         </div>
       )}
-    </div>
+    </>
   );
 }

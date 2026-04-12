@@ -1,4 +1,4 @@
-export const SUPPORTED_LANGUAGES = ["ko", "en"] as const;
+﻿export const SUPPORTED_LANGUAGES = ["ko", "en"] as const;
 
 export type AppLanguage = (typeof SUPPORTED_LANGUAGES)[number];
 
@@ -182,7 +182,25 @@ const messages = {
     "calendar.todoDelete": "삭제",
     "calendar.linkedNotes": "연결된 메모",
     "calendar.noLinkedNotes": "연결된 메모가 없습니다.",
-    "calendar.pinnedNotes": "고정된 메모"
+    "calendar.pinnedNotes": "고정된 메모",
+    "calendar.viewDay": "일별 보기",
+    "calendar.viewAll": "전체 보기",
+    "calendar.dayViewSubtitle": "선택한 날짜의 할 일과 메모",
+    "calendar.allViewTitle": "전체 할 일",
+    "calendar.allViewSubtitle": "날짜를 가로질러 할 일을 정리하세요",
+    "calendar.allTodosEmpty": "아직 등록된 할 일이 없습니다.",
+    "calendar.setDueDate": "마감일 설정",
+    "calendar.noDueDate": "마감일 없음",
+    "calendar.dueDate": "마감",
+    "calendar.dueDateSave": "저장",
+    "calendar.dueDateClear": "제거",
+    "calendar.sourceDate": "배치일",
+    "calendar.openSourceDate": "해당 날짜 열기",
+    "calendar.groupOverdue": "지난 마감",
+    "calendar.groupDueSoon": "곧 마감",
+    "calendar.groupUpcoming": "예정된 마감",
+    "calendar.groupNoDueDate": "마감일 없음",
+    "calendar.groupDone": "완료"
   },
   en: {
     "common.untitled": "Untitled",
@@ -359,7 +377,25 @@ const messages = {
     "calendar.todoDelete": "Delete",
     "calendar.linkedNotes": "Linked notes",
     "calendar.noLinkedNotes": "No linked notes.",
-    "calendar.pinnedNotes": "Pinned notes"
+    "calendar.pinnedNotes": "Pinned notes",
+    "calendar.viewDay": "Day view",
+    "calendar.viewAll": "All tasks",
+    "calendar.dayViewSubtitle": "Tasks and linked notes for the selected day",
+    "calendar.allViewTitle": "All tasks",
+    "calendar.allViewSubtitle": "Review tasks across every scheduled day",
+    "calendar.allTodosEmpty": "No tasks yet.",
+    "calendar.setDueDate": "Set due date",
+    "calendar.noDueDate": "No due date",
+    "calendar.dueDate": "Due",
+    "calendar.dueDateSave": "Save",
+    "calendar.dueDateClear": "Clear",
+    "calendar.sourceDate": "Day",
+    "calendar.openSourceDate": "Open this day",
+    "calendar.groupOverdue": "Overdue",
+    "calendar.groupDueSoon": "Due soon",
+    "calendar.groupUpcoming": "Upcoming",
+    "calendar.groupNoDueDate": "No due date",
+    "calendar.groupDone": "Done"
   }
 } as const satisfies Record<AppLanguage, MessageDictionary>;
 
@@ -392,3 +428,5 @@ export function translate(
   const localized = messages[language][key] ?? messages.ko[key] ?? key;
   return interpolate(localized, vars);
 }
+
+

@@ -1,15 +1,22 @@
-import { useCallback, useEffect } from "react";
-import { useCalendarStore } from "../../stores/calendarStore";
+import { useCallback, useEffect, useMemo } from "react";
+import { formatDateKey, parseDateKey, type TodoItem } from "../../lib/calendarData";
 import { useNoteStore } from "../../stores/noteStore";
-import { formatDateKey } from "../../lib/calendarData";
+import { selectTodoRowsByGroup, useCalendarStore } from "../../stores/calendarStore";
+import CalendarSidebar from "./CalendarSidebar";
 import MonthGrid from "./MonthGrid";
-import TodoPanel from "./TodoPanel";
 
 interface CalendarPageProps {
   onNavigateToNote: (noteId: string) => void;
 }
 
+type TodoUpdateFn = (
+  dateKey: string,
+  todoId: string,
+  updates: Partial<Pick<TodoItem, "text" | "done">>
+) => void;
+
 export default function CalendarPage({ onNavigateToNote }: CalendarPageProps) {
+  const todayDateKey = formatDateKey(new Date());
   const data = useCalendarStore((s) => s.data);
   const selectedDate = useCalendarStore((s) => s.selectedDate);
   const currentMonth = useCalendarStore((s) => s.currentMonth);
@@ -19,10 +26,12 @@ export default function CalendarPage({ onNavigateToNote }: CalendarPageProps) {
   const setCurrentMonth = useCalendarStore((s) => s.setCurrentMonth);
   const createTodo = useCalendarStore((s) => s.createTodo);
   const toggleTodo = useCalendarStore((s) => s.toggleTodo);
-  const updateTodo = useCalendarStore((s) => s.updateTodo);
+  const updateTodo = useCalendarStore((s) => s.updateTodo) as TodoUpdateFn;
   const deleteTodo = useCalendarStore((s) => s.deleteTodo);
+  const setTodoDueDate = useCalendarStore((s) => s.setTodoDueDate);
 
   const notesById = useNoteStore((s) => s.notesById);
+  const allNotes = useNoteStore((s) => s.allNotes);
 
   useEffect(() => {
     if (!loaded) {
@@ -44,6 +53,15 @@ export default function CalendarPage({ onNavigateToNote }: CalendarPageProps) {
     setSelectedDate(formatDateKey(now));
   }, [setCurrentMonth, setSelectedDate]);
 
+  const handleOpenDay = useCallback(
+    (dateKey: string) => {
+      const sourceDate = parseDateKey(dateKey);
+      setSelectedDate(dateKey);
+      setCurrentMonth(new Date(sourceDate.getFullYear(), sourceDate.getMonth(), 1));
+    },
+    [setCurrentMonth, setSelectedDate]
+  );
+
   const handleUpdateTodo = useCallback(
     (dateKey: string, todoId: string, text: string) => {
       updateTodo(dateKey, todoId, { text });
@@ -51,12 +69,22 @@ export default function CalendarPage({ onNavigateToNote }: CalendarPageProps) {
     [updateTodo]
   );
 
-  const linkedNoteIds = data.noteLinks[selectedDate] ?? [];
+  const handleSetTodoDueDate = useCallback(
+    (dateKey: string, todoId: string, dueDateKey: string | null) => {
+      setTodoDueDate(dateKey, todoId, dueDateKey);
+    },
+    [setTodoDueDate]
+  );
 
-  const allNotes = useNoteStore((s) => s.allNotes);
-  const pinnedNotes = allNotes
-    .filter((n) => n.isPinned)
-    .map((n) => ({ id: n.id, title: n.title }));
+  const linkedNoteIds = data.noteLinks[selectedDate] ?? [];
+  const pinnedNotes = useMemo(
+    () =>
+      allNotes.filter((note) => note.isPinned).map((note) => ({
+        id: note.id,
+        title: note.title,
+      })),
+    [allNotes]
+  );
 
   const getNoteTitle = useCallback(
     (noteId: string) => {
@@ -64,6 +92,13 @@ export default function CalendarPage({ onNavigateToNote }: CalendarPageProps) {
     },
     [notesById]
   );
+
+  const groupedTodoRows = useMemo(
+    () => selectTodoRowsByGroup({ data }, { todayDateKey }),
+    [data, todayDateKey]
+  );
+
+  const dayTodos = data.todos[selectedDate]?.items ?? [];
 
   return (
     <div className="calendar-page">
@@ -76,17 +111,20 @@ export default function CalendarPage({ onNavigateToNote }: CalendarPageProps) {
         onNextMonth={handleNextMonth}
         onToday={handleToday}
       />
-      <TodoPanel
+      <CalendarSidebar
         selectedDate={selectedDate}
-        data={data}
-        onCreateTodo={createTodo}
-        onToggleTodo={toggleTodo}
-        onUpdateTodo={handleUpdateTodo}
-        onDeleteTodo={deleteTodo}
+        dayTodos={dayTodos}
+        groupedTodoRows={groupedTodoRows}
         linkedNoteIds={linkedNoteIds}
         onNavigateToNote={onNavigateToNote}
         noteTitle={getNoteTitle}
         pinnedNotes={pinnedNotes}
+        onCreateTodo={createTodo}
+        onToggleTodo={toggleTodo}
+        onUpdateTodo={handleUpdateTodo}
+        onDeleteTodo={deleteTodo}
+        onOpenDay={handleOpenDay}
+        onSetTodoDueDate={handleSetTodoDueDate}
       />
     </div>
   );

@@ -1,4 +1,4 @@
-/* ── Calendar Page Layout ── */
+﻿/* —— Calendar Page Layout —— */
 
 .calendar-page {
   flex: 1;
@@ -7,7 +7,7 @@
   overflow: hidden;
 }
 
-/* ── Month Grid Container ── */
+/* —— Month Grid Container —— */
 
 .month-grid-container {
   flex: 1;
@@ -69,7 +69,7 @@
   color: var(--text-primary);
 }
 
-/* ── Grid ── */
+/* —— Grid —— */
 
 .month-grid {
   flex: 1;
@@ -109,7 +109,7 @@
   flex: 1;
 }
 
-/* ── Day Cell ── */
+/* —— Day Cell —— */
 
 .day-cell {
   display: flex;
@@ -187,40 +187,101 @@
   background: var(--text-muted);
 }
 
-/* ── Todo Panel ── */
+/* —— Sidebar —— */
 
-.todo-panel {
-  width: 320px;
-  min-width: 280px;
+.calendar-sidebar {
+  width: 360px;
+  min-width: 320px;
   border-left: 1px solid var(--border-soft);
   background: var(--bg-surface);
   display: flex;
   flex-direction: column;
-  overflow-y: auto;
+  overflow: hidden;
 }
 
-.todo-panel-header {
-  padding: 16px 16px 8px;
+.calendar-sidebar-header {
+  padding: 18px 16px 12px;
+  border-bottom: 1px solid var(--border-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
 }
 
-.todo-date-label {
+.calendar-sidebar-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.calendar-sidebar-eyebrow {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.calendar-sidebar-title {
   margin: 0;
-  font-size: 15px;
-  font-weight: 600;
+  font-size: 16px;
+  font-weight: 700;
   color: var(--text-primary);
 }
 
-/* ── Todo Add ── */
+.calendar-sidebar-subtitle {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+
+.calendar-view-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  align-self: flex-start;
+  padding: 4px;
+  border-radius: 999px;
+  background: var(--bg-editor);
+}
+
+.calendar-view-switch-btn {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  padding: 7px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.calendar-view-switch-btn.active {
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+.calendar-sidebar-content {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+/* —— Todo Add —— */
 
 .todo-add-row {
-  padding: 0 16px 12px;
+  padding: 16px 16px 12px;
 }
 
 .todo-add-input {
   width: 100%;
-  padding: 8px 10px;
+  padding: 9px 11px;
   border: 1px solid var(--border-soft);
-  border-radius: 6px;
+  border-radius: 8px;
   background: var(--bg-editor);
   color: var(--text-primary);
   font-size: 13px;
@@ -237,11 +298,13 @@
   color: var(--text-muted);
 }
 
-/* ── Todo List ── */
+/* —— Lists / sections —— */
 
-.todo-list {
+.todo-list,
+.calendar-all-panel {
   flex: 1;
-  padding: 0 16px;
+  min-height: 0;
+  padding: 0 16px 16px;
 }
 
 .todo-empty {
@@ -252,18 +315,66 @@
   margin: 0;
 }
 
-/* ── Todo Item ── */
+.calendar-all-empty {
+  padding-top: 36px;
+}
+
+.calendar-task-section + .calendar-task-section {
+  margin-top: 20px;
+}
+
+.calendar-task-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.calendar-task-section-header h4 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.calendar-task-section-count {
+  min-width: 22px;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--bg-editor);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.calendar-task-section-list {
+  display: flex;
+  flex-direction: column;
+}
+
+/* —— Todo Item —— */
 
 .todo-item {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 0;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 0;
   border-bottom: 1px solid var(--border-soft);
 }
 
 .todo-item:last-child {
   border-bottom: none;
+}
+
+.todo-item.overdue {
+  border-bottom-color: color-mix(in srgb, #e57373 35%, var(--border-soft));
 }
 
 .todo-checkbox-label {
@@ -275,6 +386,7 @@
   height: 18px;
   flex-shrink: 0;
   cursor: pointer;
+  margin-top: 3px;
 }
 
 .todo-checkbox {
@@ -312,12 +424,27 @@
   transform: rotate(45deg) translateY(-1px);
 }
 
-.todo-text {
+.todo-item-body {
   flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.todo-text-button {
+  border: none;
+  background: transparent;
+  padding: 0;
+  margin: 0;
+  text-align: left;
+  cursor: text;
+}
+
+.todo-text {
+  display: block;
   font-size: 13px;
   color: var(--text-primary);
-  cursor: text;
-  min-width: 0;
   word-break: break-word;
 }
 
@@ -327,15 +454,116 @@
 }
 
 .todo-edit-input {
-  flex: 1;
-  padding: 2px 6px;
+  width: 100%;
+  padding: 6px 8px;
   border: 1px solid var(--accent);
-  border-radius: 4px;
+  border-radius: 6px;
   background: var(--bg-editor);
   color: var(--text-primary);
   font-size: 13px;
   outline: none;
-  min-width: 0;
+  box-sizing: border-box;
+}
+
+.todo-meta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.todo-meta-chip,
+.todo-state-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border-soft);
+  background: var(--bg-editor);
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+button.todo-meta-chip {
+  cursor: pointer;
+}
+
+button.todo-meta-chip.readonly {
+  cursor: default;
+}
+
+.todo-meta-chip.editable:hover {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.todo-meta-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+
+.todo-due-chip.empty {
+  color: var(--text-muted);
+}
+
+.todo-due-chip.overdue,
+.todo-state-chip.overdue {
+  border-color: rgba(229, 115, 115, 0.38);
+  background: rgba(229, 115, 115, 0.12);
+  color: #d65d5d;
+}
+
+.todo-due-editor {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  padding: 8px 10px;
+  border-radius: 12px;
+  background: var(--bg-editor);
+  border: 1px solid var(--border-soft);
+}
+
+.todo-due-input {
+  min-width: 138px;
+  padding: 6px 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.todo-due-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.todo-inline-btn {
+  border: 1px solid var(--border-soft);
+  background: var(--bg-surface);
+  color: var(--text-muted);
+  border-radius: 999px;
+  padding: 5px 9px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.todo-inline-btn.primary {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.todo-inline-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
 }
 
 .todo-delete-btn {
@@ -352,6 +580,7 @@
   opacity: 0;
   transition: opacity 120ms ease, background 120ms ease, color 120ms ease;
   flex-shrink: 0;
+  margin-top: 2px;
 }
 
 .todo-item:hover .todo-delete-btn {
@@ -363,10 +592,10 @@
   color: #e57373;
 }
 
-/* ── Linked Notes ── */
+/* —— Linked Notes —— */
 
 .todo-linked-notes {
-  padding: 12px 16px;
+  padding: 12px 16px 16px;
   border-top: 1px solid var(--border-soft);
 }
 
@@ -380,8 +609,19 @@
 }
 
 .todo-section-toggle {
+  width: 100%;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
   cursor: pointer;
-  user-select: none;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
 }
 
 .linked-note-btn {
@@ -389,7 +629,7 @@
   width: 100%;
   padding: 6px 8px;
   border: none;
-  border-radius: 4px;
+  border-radius: 6px;
   background: transparent;
   color: var(--accent);
   font-size: 13px;
