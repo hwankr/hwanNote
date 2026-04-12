@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { hwanNote } from "../lib/tauriApi";
 import { normalizeFolderPath } from "../lib/folderPaths";
 
 export const OPEN_TAB_IDS_KEY = "hwan-note:open-tab-ids";
@@ -173,6 +174,10 @@ function canUseStorage() {
 }
 
 function persistSession(openTabIds: string[], activeTabId: string | null) {
+  // Save to file (primary) — fire-and-forget
+  hwanNote.session?.save(openTabIds, activeTabId).catch(() => {});
+
+  // Keep localStorage as fallback
   if (!canUseStorage()) {
     return;
   }

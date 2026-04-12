@@ -53,6 +53,11 @@ export default function CalendarPage({ onNavigateToNote }: CalendarPageProps) {
 
   const linkedNoteIds = data.noteLinks[selectedDate] ?? [];
 
+  const allNotes = useNoteStore((s) => s.allNotes);
+  const pinnedNotes = allNotes
+    .filter((n) => n.isPinned)
+    .map((n) => ({ id: n.id, title: n.title }));
+
   const getNoteTitle = useCallback(
     (noteId: string) => {
       return notesById[noteId]?.title ?? noteId;
@@ -81,6 +86,7 @@ export default function CalendarPage({ onNavigateToNote }: CalendarPageProps) {
         linkedNoteIds={linkedNoteIds}
         onNavigateToNote={onNavigateToNote}
         noteTitle={getNoteTitle}
+        pinnedNotes={pinnedNotes}
       />
     </div>
   );

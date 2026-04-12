@@ -379,6 +379,11 @@
   letter-spacing: 0.05em;
 }
 
+.todo-section-toggle {
+  cursor: pointer;
+  user-select: none;
+}
+
 .linked-note-btn {
   display: block;
   width: 100%;

@@ -181,7 +181,8 @@ const messages = {
     "calendar.todoAdd": "할 일 추가...",
     "calendar.todoDelete": "삭제",
     "calendar.linkedNotes": "연결된 메모",
-    "calendar.noLinkedNotes": "연결된 메모가 없습니다."
+    "calendar.noLinkedNotes": "연결된 메모가 없습니다.",
+    "calendar.pinnedNotes": "고정된 메모"
   },
   en: {
     "common.untitled": "Untitled",
@@ -357,7 +358,8 @@ const messages = {
     "calendar.todoAdd": "Add a todo...",
     "calendar.todoDelete": "Delete",
     "calendar.linkedNotes": "Linked notes",
-    "calendar.noLinkedNotes": "No linked notes."
+    "calendar.noLinkedNotes": "No linked notes.",
+    "calendar.pinnedNotes": "Pinned notes"
   }
 } as const satisfies Record<AppLanguage, MessageDictionary>;
 

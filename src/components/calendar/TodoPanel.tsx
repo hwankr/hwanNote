@@ -4,6 +4,11 @@ import { parseDateKey } from "../../lib/calendarData";
 import type { CalendarData } from "../../lib/calendarData";
 import TodoItem from "./TodoItem";
 
+interface PinnedNote {
+  id: string;
+  title: string;
+}
+
 interface TodoPanelProps {
   selectedDate: string;
   data: CalendarData;
@@ -14,6 +19,7 @@ interface TodoPanelProps {
   linkedNoteIds: string[];
   onNavigateToNote: (noteId: string) => void;
   noteTitle: (noteId: string) => string;
+  pinnedNotes?: PinnedNote[];
 }
 
 export default function TodoPanel({
@@ -26,9 +32,11 @@ export default function TodoPanel({
   linkedNoteIds,
   onNavigateToNote,
   noteTitle,
+  pinnedNotes = [],
 }: TodoPanelProps) {
   const { t, localeTag } = useI18n();
   const [newTodoText, setNewTodoText] = useState("");
+  const [pinnedCollapsed, setPinnedCollapsed] = useState(false);
 
   const dayTodos = data.todos[selectedDate]?.items ?? [];
 
@@ -80,6 +88,28 @@ export default function TodoPanel({
           ))
         )}
       </div>
+
+      {pinnedNotes.length > 0 && (
+        <div className="todo-linked-notes">
+          <h4
+            className="todo-section-toggle"
+            onClick={() => setPinnedCollapsed((v) => !v)}
+          >
+            {pinnedCollapsed ? "\u25b6" : "\u25bc"} {t("calendar.pinnedNotes")}
+          </h4>
+          {!pinnedCollapsed &&
+            pinnedNotes.map((note) => (
+              <button
+                key={note.id}
+                type="button"
+                className="linked-note-btn"
+                onClick={() => onNavigateToNote(note.id)}
+              >
+                {note.title}
+              </button>
+            ))}
+        </div>
+      )}
 
       {linkedNoteIds.length > 0 && (
         <div className="todo-linked-notes">

@@ -32,6 +32,7 @@ import {
   useNoteStore,
   type NotePersistence,
   type NoteTab,
+  type PersistedTabSession,
   type SavedNoteSnapshot
 } from "./stores/noteStore";
 
@@ -349,7 +350,7 @@ export default function App() {
   const closeTab = useNoteStore((state) => state.closeTab);
   const reorderTabs = useNoteStore((state) => state.reorderTabs);
   const removeNote = useNoteStore((state) => state.removeNote);
-  const togglePinTab = useNoteStore((state) => state.togglePinTab);
+  const togglePinTabStore = useNoteStore((state) => state.togglePinTab);
   const moveTabToFolder = useNoteStore((state) => state.moveTabToFolder);
   const updateTabContent = useNoteStore((state) => state.updateTabContent);
   const setTabTitle = useNoteStore((state) => state.setTabTitle);
@@ -426,6 +427,19 @@ export default function App() {
   const getTabById = useCallback((tabId: string) => {
     return useNoteStore.getState().notesById[tabId] ?? null;
   }, []);
+
+  const handleTogglePinTab = useCallback((id: string) => {
+    togglePinTabStore(id);
+    // Immediately save the pin state to index
+    const tab = useNoteStore.getState().notesById[id];
+    if (tab && tab.persistence === "library") {
+      const markdown = toMarkdownDocument(tab.title, tab.plainText, tab.content, t("common.untitled"));
+      void hwanNote.note.autoSave(
+        tab.id, tab.title, markdown,
+        normalizeFolderPath(tab.folderPath), tab.isTitleManual, tab.isPinned
+      );
+    }
+  }, [togglePinTabStore, t]);
 
   const clearAutoSaveTimer = useCallback(() => {
     if (autoSaveTimerRef.current !== null) {
@@ -752,7 +766,7 @@ export default function App() {
         content: note.content,
         plainText: note.plainText,
         isDirty: false,
-        isPinned: false,
+        isPinned: note.isPinned ?? false,
         folderPath,
         createdAt: note.createdAt,
         updatedAt: note.updatedAt,
@@ -775,7 +789,7 @@ export default function App() {
   );
 
   const hydrateLoadedNotes = useCallback(
-    (loaded: LoadedNote[]) => {
+    async (loaded: LoadedNote[]) => {
       const preservedOpenOnlyTabs = hydrationCompleteRef.current
         ? (() => {
             const state = useNoteStore.getState();
@@ -785,7 +799,19 @@ export default function App() {
           })()
         : [];
 
-      hydrateTabs([...loaded.map(mapLoadedNoteToTab), ...preservedOpenOnlyTabs], readTabSessionFromStorage());
+      let session: PersistedTabSession;
+      try {
+        const fileSession = await hwanNote.session.load();
+        if (fileSession && fileSession.openTabIds.length > 0) {
+          session = fileSession;
+        } else {
+          session = readTabSessionFromStorage();
+        }
+      } catch {
+        session = readTabSessionFromStorage();
+      }
+
+      hydrateTabs([...loaded.map(mapLoadedNoteToTab), ...preservedOpenOnlyTabs], session);
     },
     [hydrateTabs, mapLoadedNoteToTab]
   );
@@ -1409,7 +1435,8 @@ export default function App() {
         tab.title,
         markdown,
         normalizeFolderPath(tab.folderPath),
-        tab.isTitleManual
+        tab.isTitleManual,
+        tab.isPinned
       );
 
       markTabSaved(tab.id, {
@@ -1960,7 +1987,7 @@ export default function App() {
         onSelectTab={handleSelectTabInFocusedPane}
         onCloseTab={(tabId) => void handleRequestCloseTab(tabId)}
         onCloseOtherTabs={(tabId) => void handleRequestCloseOtherTabs(tabId)}
-        onTogglePinTab={togglePinTab}
+        onTogglePinTab={handleTogglePinTab}
         onReorderTabs={reorderTabs}
         onDropTabOutside={handleDropTabOutside}
         onTabDragPreview={handleTabDragPreview}
@@ -2005,7 +2032,7 @@ export default function App() {
           onSelectTag={setSelectedTag}
           onSortModeChange={setSortMode}
           onSelectNote={handleSelectNoteInFocusedPane}
-          onTogglePinNote={togglePinTab}
+          onTogglePinNote={handleTogglePinTab}
           onDeleteNote={(id) => { void handleDeleteNote(id); }}
           onCreateNoteInFolder={(folderPath) => {
             handleCreateTabInFocusedPane(folderPath);

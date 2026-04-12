@@ -37,6 +37,8 @@ pub struct NoteIndexEntry {
     pub created_at: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manual_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_pinned: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,6 +54,8 @@ pub struct AutoSavePayload {
     pub content: String,
     pub folder_path: Option<String>,
     pub is_title_manual: Option<bool>,
+    #[serde(default)]
+    pub is_pinned: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +79,7 @@ pub struct LoadedNote {
     pub created_at: u64,
     pub updated_at: u64,
     pub file_path: String,
+    pub is_pinned: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -580,8 +585,10 @@ pub fn read_index(auto_save_dir: &Path) -> NoteIndex {
 
 pub fn write_index(auto_save_dir: &Path, index: &NoteIndex) -> Result<(), String> {
     let index_path = get_index_path(auto_save_dir);
+    let tmp_path = index_path.with_extension("json.tmp");
     let json = serde_json::to_string_pretty(index).map_err(|e| e.to_string())?;
-    fs::write(&index_path, json).map_err(|e| e.to_string())
+    fs::write(&tmp_path, &json).map_err(|e| e.to_string())?;
+    fs::rename(&tmp_path, &index_path).map_err(|e| e.to_string())
 }
 
 // ── File system helpers ──
@@ -776,6 +783,7 @@ fn reconcile_index_with_files(
                     relative_path: rel_path.clone(),
                     created_at,
                     manual_title,
+                    is_pinned: None,
                 },
             );
             used_paths.insert(rel_path.clone());
@@ -1061,6 +1069,7 @@ pub fn auto_save_markdown_note(
             relative_path: rel,
             created_at,
             manual_title,
+            is_pinned: payload.is_pinned,
         },
     );
 
@@ -1149,6 +1158,7 @@ pub fn load_markdown_notes(auto_save_dir: &Path) -> Result<Vec<LoadedNote>, Stri
             created_at: entry.created_at,
             updated_at,
             file_path: file_path.to_string_lossy().to_string(),
+            is_pinned: entry.is_pinned.unwrap_or(false),
         });
     }
 
@@ -1327,6 +1337,7 @@ pub fn migrate_notes(src_dir: &Path, dst_dir: &Path) -> Result<MigrationResult, 
                 relative_path: final_rel.clone(),
                 created_at: src_entry.created_at,
                 manual_title: src_entry.manual_title.clone(),
+                is_pinned: src_entry.is_pinned,
             },
         );
         existing_dst_paths.insert(final_rel);
@@ -1559,6 +1570,7 @@ mod tests {
                             relative_path: relative_path.clone(),
                             created_at: now_millis(),
                             manual_title: None,
+                            is_pinned: None,
                         },
                     )]),
                 },

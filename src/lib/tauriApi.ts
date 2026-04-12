@@ -21,6 +21,12 @@ export interface LoadedNote {
   createdAt: number;
   updatedAt: number;
   filePath: string;
+  isPinned: boolean;
+}
+
+export interface SessionData {
+  openTabIds: string[];
+  activeTabId: string | null;
 }
 
 export interface ImportedFile {
@@ -121,10 +127,11 @@ export const hwanNote = {
       title: string,
       content: string,
       folderPath: string,
-      isTitleManual: boolean
+      isTitleManual: boolean,
+      isPinned?: boolean
     ) =>
       invoke<AutoSaveResult>("cmd_note_auto_save", {
-        payload: { noteId, title, content, folderPath, isTitleManual },
+        payload: { noteId, title, content, folderPath, isTitleManual, isPinned: isPinned ?? false },
       }),
 
     loadAll: () => invoke<LoadedNote[]>("cmd_note_load_all"),
@@ -198,6 +205,14 @@ export const hwanNote = {
 
     save: (data: string) =>
       invoke("cmd_calendar_save", { data }),
+  },
+
+  session: {
+    save: (openTabIds: string[], activeTabId: string | null) =>
+      invoke("cmd_session_save", { payload: { openTabIds, activeTabId } }),
+
+    load: () =>
+      invoke<SessionData>("cmd_session_load"),
   },
 
   cloud: {

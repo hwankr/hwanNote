@@ -296,6 +296,55 @@ pub fn cmd_calendar_save(app: AppHandle, data: String) -> Result<(), String> {
     Ok(())
 }
 
+// ── Session commands ──
+
+const SESSION_FILE: &str = ".hwan-session.json";
+
+#[derive(Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionData {
+    pub open_tab_ids: Vec<String>,
+    pub active_tab_id: Option<String>,
+}
+
+fn get_session_dir(app: &AppHandle) -> PathBuf {
+    app.path().app_config_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+#[tauri::command]
+pub fn cmd_session_save(app: AppHandle, payload: SessionData) -> Result<(), String> {
+    let dir = get_session_dir(&app);
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    let path = dir.join(SESSION_FILE);
+    let tmp_path = dir.join(".hwan-session.json.tmp");
+
+    let json = serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?;
+
+    fs::write(&tmp_path, json.as_bytes()).map_err(|e| e.to_string())?;
+    fs::rename(&tmp_path, &path).map_err(|e| {
+        let _ = fs::remove_file(&tmp_path);
+        e.to_string()
+    })?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn cmd_session_load(app: AppHandle) -> SessionData {
+    let dir = get_session_dir(&app);
+    let path = dir.join(SESSION_FILE);
+
+    if !path.exists() {
+        return SessionData::default();
+    }
+
+    match fs::read_to_string(&path) {
+        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+        Err(_) => SessionData::default(),
+    }
+}
+
 #[tauri::command]
 pub fn cmd_note_import_txt(window: WebviewWindow) -> Result<Option<Vec<ImportedFile>>, String> {
     let result = window
