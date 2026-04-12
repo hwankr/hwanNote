@@ -5,7 +5,9 @@ import { type PointerEvent as ReactPointerEvent, useCallback, useEffect, useMemo
 import { hwanNote, type CloudProviderInfo, type CloudSyncSource, type LoadedNote } from "./lib/tauriApi";
 import Editor, { restoreEditorFocus } from "./components/Editor";
 import SettingsPanel, { type ThemeMode } from "./components/SettingsPanel";
-import Sidebar, { type SidebarTag } from "./components/Sidebar";
+import Sidebar, { type AppView, type SidebarTag } from "./components/Sidebar";
+import CalendarPage from "./components/calendar/CalendarPage";
+import { useCalendarStore } from "./stores/calendarStore";
 import StatusBar from "./components/StatusBar";
 import TitleBar from "./components/TitleBar";
 import Toolbar from "./components/Toolbar";
@@ -357,6 +359,8 @@ export default function App() {
   const toggleSidebar = useNoteStore((state) => state.toggleSidebar);
   const addImportedTab = useNoteStore((state) => state.addImportedTab);
 
+  const [activeView, setActiveView] = useState<AppView>("notes");
+
   const [isSplit, setIsSplit] = useState(false);
   const [splitRatio, setSplitRatio] = useState(() => {
     try {
@@ -486,6 +490,14 @@ export default function App() {
       void flushPendingAutoSave();
     }, AUTO_SAVE_DELAY_MS);
   }, [clearAutoSaveTimer, flushPendingAutoSave]);
+
+  const handleViewChange = useCallback(async (view: AppView) => {
+    if (view === activeView) return;
+    if (activeView === "notes") {
+      await flushPendingAutoSave();
+    }
+    setActiveView(view);
+  }, [activeView, flushPendingAutoSave]);
 
   const armAutoSaveForTab = useCallback((tabId: string | null | undefined) => {
     if (!tabId) {
@@ -1078,6 +1090,10 @@ export default function App() {
           return;
         }
 
+        // Load calendar data and clean orphan noteLinks after notes are available
+        await useCalendarStore.getState().loadCalendarData();
+        useCalendarStore.getState().cleanOrphanNoteLinks();
+
         const pendingFromBackend = noteApi.drainOpenIntents
           ? await noteApi.drainOpenIntents()
           : [];
@@ -1496,6 +1512,7 @@ export default function App() {
         return false;
       }
 
+      await useCalendarStore.getState().saveCalendarData();
       await hwanNote.window.exit();
       return true;
     });
@@ -1523,6 +1540,7 @@ export default function App() {
       try {
         await hwanNote.note.delete(id);
         removeNote(id);
+        useCalendarStore.getState().removeNoteLinks(id);
         return true;
       } catch (error) {
         console.error("Failed to delete note:", error);
@@ -1727,6 +1745,12 @@ export default function App() {
         target?.closest(".note-editor, .editor-shell") ?? activeElement?.closest(".note-editor")
       );
 
+      if (event.ctrlKey && event.shiftKey && !event.altKey && event.key.toLowerCase() === "c") {
+        event.preventDefault();
+        void handleViewChange(activeView === "notes" ? "calendar" : "notes");
+        return;
+      }
+
       for (const action of SHORTCUT_ACTIONS) {
         const shortcut = shortcuts[action];
         if (!matchesShortcut(event, shortcut)) {
@@ -1838,6 +1862,7 @@ export default function App() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [
+    activeView,
     focusPane,
     focusedEditor,
     focusedTabId,
@@ -1845,6 +1870,7 @@ export default function App() {
     handleCycleTabInFocusedPane,
     handleManualSave,
     handleRequestCloseTab,
+    handleViewChange,
     localeTag,
     settingsOpen,
     shortcuts,
@@ -1927,6 +1953,8 @@ export default function App() {
       <TitleBar
         tabs={openTabs}
         activeTabId={activeTabId}
+        activeView={activeView}
+        onViewChange={(view) => void handleViewChange(view)}
         isMaximized={isMaximized}
         onToggleSidebar={toggleSidebar}
         onSelectTab={handleSelectTabInFocusedPane}
@@ -1943,21 +1971,25 @@ export default function App() {
         onCloseWindow={() => void handleRequestCloseWindow()}
       />
 
-      <Toolbar
-        editor={focusedEditor}
-        activeTitle={focusedTab?.title ?? ""}
-        activeTabId={focusedTab?.id ?? ""}
-        isTitleManual={Boolean(focusedTab?.isTitleManual)}
-        onTitleDraftChange={handleTitleDraftChange}
-        onChangeTitle={handleTitleCommit}
-        lastSavedAt={focusedTab?.lastSavedAt ?? 0}
-        onOpenSettings={() => setSettingsOpen(true)}
-        onImportTxt={() => void handleImportTxt()}
-      />
+      {activeView === "notes" && (
+        <Toolbar
+          editor={focusedEditor}
+          activeTitle={focusedTab?.title ?? ""}
+          activeTabId={focusedTab?.id ?? ""}
+          isTitleManual={Boolean(focusedTab?.isTitleManual)}
+          onTitleDraftChange={handleTitleDraftChange}
+          onChangeTitle={handleTitleCommit}
+          lastSavedAt={focusedTab?.lastSavedAt ?? 0}
+          onOpenSettings={() => setSettingsOpen(true)}
+          onImportTxt={() => void handleImportTxt()}
+        />
+      )}
 
       <div className="workspace">
         <Sidebar
           visible={sidebarVisible}
+          activeView={activeView}
+          onViewChange={(view) => void handleViewChange(view)}
           activeTabId={activeTabId}
           folders={folderPaths}
           tags={tags}
@@ -2048,21 +2080,62 @@ export default function App() {
           }}
         />
 
-        <main ref={editorWorkspaceRef} className={`editor-workspace ${isSplit ? "split" : ""}`}>
-          {isSplit && primaryTab && secondaryTab ? (
-            <>
-              <section
-                className={`editor-pane ${focusedPane === "primary" ? "focused" : ""}`}
-                data-pane="primary"
-                style={{ flexBasis: `${splitRatio * 100}%` }}
-                onMouseDown={() => focusPane("primary")}
-              >
+        {activeView === "notes" ? (
+          <main ref={editorWorkspaceRef} className={`editor-workspace ${isSplit ? "split" : ""}`}>
+            {isSplit && primaryTab && secondaryTab ? (
+              <>
+                <section
+                  className={`editor-pane ${focusedPane === "primary" ? "focused" : ""}`}
+                  data-pane="primary"
+                  style={{ flexBasis: `${splitRatio * 100}%` }}
+                  onMouseDown={() => focusPane("primary")}
+                >
+                  <Editor
+                    key={`primary-${primaryTab.id}`}
+                    content={primaryTab.content}
+                    tabSize={tabSize}
+                    spellcheck={editorSpellcheck}
+                    autofocus={focusedPane === "primary"}
+                    onFocus={() => focusPane("primary")}
+                    onEditorReady={(nextEditor) => {
+                      setPaneEditors((prev) => ({ ...prev, primary: nextEditor }));
+                    }}
+                    onChange={(content, plainText) => handleEditorChange("primary", content, plainText)}
+                    onCursorChange={(line, column, chars) => handleCursorChange("primary", line, column, chars)}
+                  />
+                </section>
+
+                <div className="split-divider" onPointerDown={handleSplitDividerPointerDown} />
+
+                <section
+                  className={`editor-pane ${focusedPane === "secondary" ? "focused" : ""}`}
+                  data-pane="secondary"
+                  style={{ flexBasis: `${(1 - splitRatio) * 100}%` }}
+                  onMouseDown={() => focusPane("secondary")}
+                >
+                  <Editor
+                    key={`secondary-${secondaryTab.id}`}
+                    content={secondaryTab.content}
+                    tabSize={tabSize}
+                    spellcheck={editorSpellcheck}
+                    autofocus={focusedPane === "secondary"}
+                    onFocus={() => focusPane("secondary")}
+                    onEditorReady={(nextEditor) => {
+                      setPaneEditors((prev) => ({ ...prev, secondary: nextEditor }));
+                    }}
+                    onChange={(content, plainText) => handleEditorChange("secondary", content, plainText)}
+                    onCursorChange={(line, column, chars) => handleCursorChange("secondary", line, column, chars)}
+                  />
+                </section>
+              </>
+            ) : primaryTab ? (
+              <section className="editor-pane focused" data-pane="primary" onMouseDown={() => focusPane("primary")}>
                 <Editor
                   key={`primary-${primaryTab.id}`}
                   content={primaryTab.content}
                   tabSize={tabSize}
                   spellcheck={editorSpellcheck}
-                  autofocus={focusedPane === "primary"}
+                  autofocus
                   onFocus={() => focusPane("primary")}
                   onEditorReady={(nextEditor) => {
                     setPaneEditors((prev) => ({ ...prev, primary: nextEditor }));
@@ -2071,61 +2144,30 @@ export default function App() {
                   onCursorChange={(line, column, chars) => handleCursorChange("primary", line, column, chars)}
                 />
               </section>
-
-              <div className="split-divider" onPointerDown={handleSplitDividerPointerDown} />
-
-              <section
-                className={`editor-pane ${focusedPane === "secondary" ? "focused" : ""}`}
-                data-pane="secondary"
-                style={{ flexBasis: `${(1 - splitRatio) * 100}%` }}
-                onMouseDown={() => focusPane("secondary")}
-              >
-                <Editor
-                  key={`secondary-${secondaryTab.id}`}
-                  content={secondaryTab.content}
-                  tabSize={tabSize}
-                  spellcheck={editorSpellcheck}
-                  autofocus={focusedPane === "secondary"}
-                  onFocus={() => focusPane("secondary")}
-                  onEditorReady={(nextEditor) => {
-                    setPaneEditors((prev) => ({ ...prev, secondary: nextEditor }));
-                  }}
-                  onChange={(content, plainText) => handleEditorChange("secondary", content, plainText)}
-                  onCursorChange={(line, column, chars) => handleCursorChange("secondary", line, column, chars)}
-                />
-              </section>
-            </>
-          ) : primaryTab ? (
-            <section className="editor-pane focused" data-pane="primary" onMouseDown={() => focusPane("primary")}>
-              <Editor
-                key={`primary-${primaryTab.id}`}
-                content={primaryTab.content}
-                tabSize={tabSize}
-                spellcheck={editorSpellcheck}
-                autofocus
-                onFocus={() => focusPane("primary")}
-                onEditorReady={(nextEditor) => {
-                  setPaneEditors((prev) => ({ ...prev, primary: nextEditor }));
-                }}
-                onChange={(content, plainText) => handleEditorChange("primary", content, plainText)}
-                onCursorChange={(line, column, chars) => handleCursorChange("primary", line, column, chars)}
-              />
-            </section>
-          ) : null}
-          {splitDropTarget ? (
-            <div className="split-drop-preview" aria-hidden="true">
-              <div className={`split-drop-zone ${splitDropTarget === "primary" ? "active" : ""}`}>
-                <span>{splitDropLeftLabel}</span>
+            ) : null}
+            {splitDropTarget ? (
+              <div className="split-drop-preview" aria-hidden="true">
+                <div className={`split-drop-zone ${splitDropTarget === "primary" ? "active" : ""}`}>
+                  <span>{splitDropLeftLabel}</span>
+                </div>
+                <div className={`split-drop-zone ${splitDropTarget === "secondary" ? "active" : ""}`}>
+                  <span>{splitDropRightLabel}</span>
+                </div>
               </div>
-              <div className={`split-drop-zone ${splitDropTarget === "secondary" ? "active" : ""}`}>
-                <span>{splitDropRightLabel}</span>
-              </div>
-            </div>
-          ) : null}
-        </main>
+            ) : null}
+          </main>
+        ) : (
+          <CalendarPage
+            onNavigateToNote={(noteId) => {
+              setActiveView("notes");
+              handleSelectNoteInFocusedPane(noteId);
+            }}
+          />
+        )}
       </div>
 
-      <StatusBar
+      {activeView === "notes" && (
+        <StatusBar
         line={cursor.line}
         column={cursor.column}
         chars={cursor.chars}
@@ -2152,6 +2194,7 @@ export default function App() {
         cloudSyncProvider={cloudSyncProvider}
         cloudSyncSource={cloudSyncSource}
       />
+      )}
 
       <SettingsPanel
         open={settingsOpen}

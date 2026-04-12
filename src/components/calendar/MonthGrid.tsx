@@ -1,0 +1,127 @@
+import { useMemo } from "react";
+import { useI18n } from "../../i18n/context";
+import { formatDateKey } from "../../lib/calendarData";
+import type { CalendarData } from "../../lib/calendarData";
+import DayCell from "./DayCell";
+
+interface MonthGridProps {
+  currentMonth: Date;
+  selectedDate: string;
+  data: CalendarData;
+  onSelectDate: (dateKey: string) => void;
+  onPrevMonth: () => void;
+  onNextMonth: () => void;
+  onToday: () => void;
+}
+
+function getMonthGrid(year: number, month: number): Date[][] {
+  const firstDay = new Date(year, month, 1);
+  const startOffset = firstDay.getDay(); // Sunday = 0
+
+  const weeks: Date[][] = [];
+  let current = new Date(year, month, 1 - startOffset);
+
+  for (let w = 0; w < 6; w++) {
+    const week: Date[] = [];
+    for (let d = 0; d < 7; d++) {
+      week.push(new Date(current));
+      current.setDate(current.getDate() + 1);
+    }
+    weeks.push(week);
+  }
+
+  return weeks;
+}
+
+export default function MonthGrid({
+  currentMonth,
+  selectedDate,
+  data,
+  onSelectDate,
+  onPrevMonth,
+  onNextMonth,
+  onToday,
+}: MonthGridProps) {
+  const { t } = useI18n();
+
+  const year = currentMonth.getFullYear();
+  const month = currentMonth.getMonth();
+
+  const weeks = useMemo(() => getMonthGrid(year, month), [year, month]);
+
+  const today = useMemo(() => formatDateKey(new Date()), []);
+
+  const monthLabel = useMemo(() => {
+    return currentMonth.toLocaleDateString(undefined, {
+      year: "numeric",
+      month: "long",
+    });
+  }, [currentMonth]);
+
+  const dayHeaders = [
+    t("calendar.sunday"),
+    t("calendar.monday"),
+    t("calendar.tuesday"),
+    t("calendar.wednesday"),
+    t("calendar.thursday"),
+    t("calendar.friday"),
+    t("calendar.saturday"),
+  ];
+
+  return (
+    <div className="month-grid-container">
+      <div className="month-header">
+        <button type="button" className="month-nav-btn" onClick={onPrevMonth} title={t("calendar.prevMonth")}>
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path d="M10 3L5 8l5 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+        </button>
+        <h2 className="month-title">{monthLabel}</h2>
+        <button type="button" className="month-nav-btn" onClick={onNextMonth} title={t("calendar.nextMonth")}>
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path d="M6 3l5 5-5 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+        </button>
+        <button type="button" className="month-today-btn" onClick={onToday}>
+          {t("calendar.today")}
+        </button>
+      </div>
+
+      <div className="month-grid">
+        <div className="day-headers">
+          {dayHeaders.map((label, i) => (
+            <div key={i} className={`day-header ${i === 0 ? "sunday" : i === 6 ? "saturday" : ""}`}>
+              {label}
+            </div>
+          ))}
+        </div>
+
+        {weeks.map((week, wi) => (
+          <div key={wi} className="week-row">
+            {week.map((date) => {
+              const dateKey = formatDateKey(date);
+              const dayTodos = data.todos[dateKey];
+              const todoCount = dayTodos?.items.length ?? 0;
+              const doneCount = dayTodos?.items.filter((t) => t.done).length ?? 0;
+              const hasNoteLinks = (data.noteLinks[dateKey]?.length ?? 0) > 0;
+
+              return (
+                <DayCell
+                  key={dateKey}
+                  date={date}
+                  isCurrentMonth={date.getMonth() === month}
+                  isToday={dateKey === today}
+                  isSelected={dateKey === selectedDate}
+                  todoCount={todoCount}
+                  doneCount={doneCount}
+                  hasNoteLinks={hasNoteLinks}
+                  onClick={() => onSelectDate(dateKey)}
+                />
+              );
+            })}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}

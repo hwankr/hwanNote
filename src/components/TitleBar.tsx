@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../i18n/context";
 import { hwanNote } from "../lib/tauriApi";
 import type { NoteTab } from "../stores/noteStore";
+import type { AppView } from "./Sidebar";
 import ContextMenu, { type ContextMenuEntry } from "./ContextMenu";
 
 const MenuIcon = (
@@ -56,6 +57,8 @@ const CloseWindowIcon = (
 interface TitleBarProps {
   tabs: NoteTab[];
   activeTabId: string | null;
+  activeView: AppView;
+  onViewChange: (view: AppView) => void;
   isMaximized: boolean;
   onToggleSidebar: () => void;
   onSelectTab: (id: string) => void;
@@ -75,6 +78,8 @@ interface TitleBarProps {
 export default function TitleBar({
   tabs,
   activeTabId,
+  activeView,
+  onViewChange,
   isMaximized,
   onToggleSidebar,
   onSelectTab,
@@ -301,6 +306,9 @@ export default function TitleBar({
                   didDragRef.current = false;
                   return;
                 }
+                if (activeView !== "notes") {
+                  onViewChange("notes");
+                }
                 onSelectTab(tab.id);
               }}
               onContextMenu={(event) => {
@@ -345,6 +353,17 @@ export default function TitleBar({
               </span>
             </button>
           ))}
+          <button
+            type="button"
+            className={`tab calendar-tab no-drag ${activeView === "calendar" ? "active" : ""}`}
+            onClick={() => onViewChange("calendar")}
+            title={t("view.calendar")}
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="M5 1v1H3a1 1 0 00-1 1v10a1 1 0 001 1h10a1 1 0 001-1V3a1 1 0 00-1-1h-2V1h-1v1H6V1H5zm-2 4v8h10V5H3zm2 1h2v2H5V6zm3 0h2v2H8V6zm-3 3h2v2H5V9z" fill="currentColor"/>
+            </svg>
+            <span className="tab-title">{t("view.calendar")}</span>
+          </button>
           <button type="button" className="titlebar-btn add-tab-btn no-drag" onClick={onCreateTab}>
             {AddTabIcon}
           </button>

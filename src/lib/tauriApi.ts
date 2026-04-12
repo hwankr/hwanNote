@@ -192,6 +192,14 @@ export const hwanNote = {
       invoke<AutoSaveDirInfo>("cmd_settings_get_autosave_dir"),
   },
 
+  calendar: {
+    load: () =>
+      invoke<string>("cmd_calendar_load"),
+
+    save: (data: string) =>
+      invoke("cmd_calendar_save", { data }),
+  },
+
   cloud: {
     detectProviders: () =>
       invoke<CloudProviderInfo[]>("cmd_cloud_detect_providers"),

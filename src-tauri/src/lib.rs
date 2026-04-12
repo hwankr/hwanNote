@@ -94,6 +94,8 @@ pub fn run() {
             cmd_cloud_sync_disable,
             cmd_cloud_sync_status,
             cmd_cloud_sync_set_active_source,
+            cmd_calendar_load,
+            cmd_calendar_save,
         ])
         .setup(|app| {
             let handle = app.handle().clone();

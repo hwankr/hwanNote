@@ -245,6 +245,57 @@ pub async fn cmd_note_delete(app: AppHandle, note_id: String) -> Result<bool, St
     Ok(true)
 }
 
+// ── Calendar commands ──
+
+const CALENDAR_FILE: &str = "calendar.json";
+
+#[tauri::command]
+pub fn cmd_calendar_load(app: AppHandle) -> Result<String, String> {
+    let dir = resolve_effective_dir(&app);
+    let path = dir.join(CALENDAR_FILE);
+
+    if !path.exists() {
+        return Ok(String::new());
+    }
+
+    match fs::read_to_string(&path) {
+        Ok(content) => Ok(content),
+        Err(e) => {
+            tracing::error!("Failed to read calendar.json: {}", e);
+            // Create backup of corrupted file
+            let bak = dir.join("calendar.json.bak");
+            let _ = fs::copy(&path, &bak);
+            Ok(String::new())
+        }
+    }
+}
+
+#[tauri::command]
+pub fn cmd_calendar_save(app: AppHandle, data: String) -> Result<(), String> {
+    let dir = resolve_effective_dir(&app);
+    if !dir.exists() {
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    }
+
+    let path = dir.join(CALENDAR_FILE);
+    let tmp_path = dir.join(".calendar.json.tmp");
+
+    // Atomic write: write to temp file, then rename
+    fs::write(&tmp_path, data.as_bytes()).map_err(|e| {
+        tracing::error!("Failed to write calendar temp file: {}", e);
+        e.to_string()
+    })?;
+
+    fs::rename(&tmp_path, &path).map_err(|e| {
+        tracing::error!("Failed to rename calendar temp file: {}", e);
+        // Clean up temp file on failure
+        let _ = fs::remove_file(&tmp_path);
+        e.to_string()
+    })?;
+
+    Ok(())
+}
+
 #[tauri::command]
 pub fn cmd_note_import_txt(window: WebviewWindow) -> Result<Option<Vec<ImportedFile>>, String> {
     let result = window

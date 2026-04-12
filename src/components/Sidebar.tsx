@@ -13,8 +13,12 @@ export interface SidebarTag {
 type SortMode = "updated" | "title" | "created";
 type SearchMode = "all" | "title" | "content";
 
+export type AppView = "notes" | "calendar";
+
 interface SidebarProps {
   visible: boolean;
+  activeView: AppView;
+  onViewChange: (view: AppView) => void;
   activeTabId: string | null;
   folders: string[];
   tags: SidebarTag[];
@@ -68,6 +72,8 @@ function buildPreview(note: NoteTab, emptyLabel: string) {
 
 export default function Sidebar({
   visible,
+  activeView,
+  onViewChange,
   activeTabId,
   folders,
   tags,
@@ -147,6 +153,33 @@ export default function Sidebar({
 
   return (
     <aside className={`sidebar ${visible ? "visible" : "hidden"}`}>
+      <div className="sidebar-view-toggle">
+        <button
+          type="button"
+          className={`view-toggle-btn ${activeView === "notes" ? "active" : ""}`}
+          onClick={() => onViewChange("notes")}
+          title={t("view.switchToNotes")}
+          aria-label={t("view.notes")}
+        >
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path d="M3 2h10a1 1 0 011 1v10a1 1 0 01-1 1H3a1 1 0 01-1-1V3a1 1 0 011-1zm1 2v2h8V4H4zm0 4v1h8V8H4zm0 3v1h5v-1H4z" fill="currentColor"/>
+          </svg>
+          <span>{t("view.notes")}</span>
+        </button>
+        <button
+          type="button"
+          className={`view-toggle-btn ${activeView === "calendar" ? "active" : ""}`}
+          onClick={() => onViewChange("calendar")}
+          title={t("view.switchToCalendar")}
+          aria-label={t("view.calendar")}
+        >
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path d="M5 1v1H3a1 1 0 00-1 1v10a1 1 0 001 1h10a1 1 0 001-1V3a1 1 0 00-1-1h-2V1h-1v1H6V1H5zm-2 4v8h10V5H3zm2 1h2v2H5V6zm3 0h2v2H8V6zm-3 3h2v2H5V9z" fill="currentColor"/>
+          </svg>
+          <span>{t("view.calendar")}</span>
+        </button>
+      </div>
+
       <div className="sidebar-section">
         <h3>{t("sidebar.search")}</h3>
         <input
