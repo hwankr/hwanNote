@@ -100,9 +100,9 @@ export default function MonthGrid({
           <div key={wi} className="week-row">
             {week.map((date) => {
               const dateKey = formatDateKey(date);
-              const dayTodos = data.todos[dateKey];
-              const todoCount = dayTodos?.items.length ?? 0;
-              const doneCount = dayTodos?.items.filter((t) => t.done).length ?? 0;
+              const items = data.todos[dateKey]?.items ?? [];
+              const doneCount = items.filter((t) => t.done).length;
+              const openCount = items.length - doneCount;
               const hasNoteLinks = (data.noteLinks[dateKey]?.length ?? 0) > 0;
 
               return (
@@ -112,7 +112,7 @@ export default function MonthGrid({
                   isCurrentMonth={date.getMonth() === month}
                   isToday={dateKey === today}
                   isSelected={dateKey === selectedDate}
-                  todoCount={todoCount}
+                  openCount={openCount}
                   doneCount={doneCount}
                   hasNoteLinks={hasNoteLinks}
                   onClick={() => onSelectDate(dateKey)}

@@ -3,23 +3,29 @@ interface DayCellProps {
   isCurrentMonth: boolean;
   isToday: boolean;
   isSelected: boolean;
-  todoCount: number;
+  openCount: number;
   doneCount: number;
   hasNoteLinks: boolean;
   onClick: () => void;
 }
+
+const MAX_DOTS = 3;
 
 export default function DayCell({
   date,
   isCurrentMonth,
   isToday,
   isSelected,
-  todoCount,
+  openCount,
   doneCount,
   hasNoteLinks,
   onClick,
 }: DayCellProps) {
-  const allDone = todoCount > 0 && doneCount === todoCount;
+  const total = openCount + doneCount;
+  const doneCap = openCount > 0 ? MAX_DOTS - 1 : MAX_DOTS;
+  const renderedDone = Math.min(doneCount, doneCap);
+  const renderedOpen = Math.min(openCount, MAX_DOTS - renderedDone);
+  const overflow = total - (renderedDone + renderedOpen);
 
   return (
     <button
@@ -36,8 +42,16 @@ export default function DayCell({
     >
       <span className="day-number">{date.getDate()}</span>
       <div className="day-indicators">
-        {todoCount > 0 && (
-          <span className={`day-dot todo-dot ${allDone ? "all-done" : ""}`} />
+        {Array.from({ length: renderedDone }).map((_, i) => (
+          <span key={`d${i}`} className="day-dot todo-dot done" />
+        ))}
+        {Array.from({ length: renderedOpen }).map((_, i) => (
+          <span key={`o${i}`} className="day-dot todo-dot" />
+        ))}
+        {overflow > 0 && (
+          <span className="day-dot-overflow">
+            {overflow > 9 ? "+9+" : `+${overflow}`}
+          </span>
         )}
         {hasNoteLinks && <span className="day-dot note-dot" />}
       </div>

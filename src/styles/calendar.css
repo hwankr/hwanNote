@@ -179,12 +179,23 @@
   background: var(--accent);
 }
 
+.todo-dot.done {
+  background: var(--todo-done-bg);
+}
+
 .todo-dot.all-done {
   background: #66bb6a;
 }
 
 .note-dot {
   background: var(--text-muted);
+}
+
+.day-dot-overflow {
+  font-size: 9px;
+  line-height: 1;
+  color: var(--text-muted);
+  margin-left: 2px;
 }
 
 /* —— Sidebar —— */
