@@ -97,8 +97,11 @@ export function selectPeriodTodos(
   }
 
   done.sort((a, b) => {
-    const keyCmp = b.sourceDateKey.localeCompare(a.sourceDateKey);
-    if (keyCmp !== 0) return keyCmp;
+    const aCompleted = a.completedAt ?? -Infinity;
+    const bCompleted = b.completedAt ?? -Infinity;
+    if (aCompleted !== bCompleted) {
+      return bCompleted - aCompleted;
+    }
     return b.updatedAt - a.updatedAt;
   });
 
@@ -117,8 +120,9 @@ export function selectPeriodTodos(
 }
 
 /**
- * Keep only rows whose `sourceDateKey` is within the last `RECENT_DONE_DAYS`
- * inclusive of `todayDateKey`.
+ * Keep only rows whose `completedAt` timestamp falls within the last
+ * `RECENT_DONE_DAYS` inclusive of `todayDateKey`. Rows with a null
+ * `completedAt` (i.e., not done) are excluded.
  */
 export function filterRowsWithinRecentDays(
   rows: CalendarTodoRow[],
@@ -126,7 +130,9 @@ export function filterRowsWithinRecentDays(
   windowDays = RECENT_DONE_DAYS
 ): CalendarTodoRow[] {
   const today = parseDateKey(todayDateKey);
-  const cutoff = addDays(today, -(windowDays - 1));
-  const cutoffKey = formatDateKey(cutoff);
-  return rows.filter((row) => row.sourceDateKey >= cutoffKey);
+  const startOfCutoff = addDays(today, -(windowDays - 1));
+  const cutoffMs = startOfCutoff.getTime(); // midnight of the first included day
+  return rows.filter(
+    (row) => row.completedAt !== null && row.completedAt >= cutoffMs
+  );
 }
