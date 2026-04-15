@@ -109,6 +109,7 @@ export default function CalendarPage({ onNavigateToNote }: CalendarPageProps) {
         selectedDate={selectedDate}
         data={data}
         onSelectDate={setSelectedDate}
+        onOpenDay={handleOpenDay}
         onPrevMonth={handlePrevMonth}
         onNextMonth={handleNextMonth}
         onToday={handleToday}

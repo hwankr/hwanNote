@@ -7,6 +7,7 @@ interface DayCellProps {
   doneCount: number;
   hasNoteLinks: boolean;
   onClick: () => void;
+  onDoubleClick: () => void;
 }
 
 const MAX_DOTS = 3;
@@ -20,6 +21,7 @@ export default function DayCell({
   doneCount,
   hasNoteLinks,
   onClick,
+  onDoubleClick,
 }: DayCellProps) {
   const total = openCount + doneCount;
   const doneCap = openCount > 0 ? MAX_DOTS - 1 : MAX_DOTS;
@@ -39,6 +41,7 @@ export default function DayCell({
         .filter(Boolean)
         .join(" ")}
       onClick={onClick}
+      onDoubleClick={onDoubleClick}
     >
       <span className="day-number">{date.getDate()}</span>
       <div className="day-indicators">

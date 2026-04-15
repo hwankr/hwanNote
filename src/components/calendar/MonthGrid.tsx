@@ -9,6 +9,7 @@ interface MonthGridProps {
   selectedDate: string;
   data: CalendarData;
   onSelectDate: (dateKey: string) => void;
+  onOpenDay: (dateKey: string) => void;
   onPrevMonth: () => void;
   onNextMonth: () => void;
   onToday: () => void;
@@ -38,6 +39,7 @@ export default function MonthGrid({
   selectedDate,
   data,
   onSelectDate,
+  onOpenDay,
   onPrevMonth,
   onNextMonth,
   onToday,
@@ -116,6 +118,7 @@ export default function MonthGrid({
                   doneCount={doneCount}
                   hasNoteLinks={hasNoteLinks}
                   onClick={() => onSelectDate(dateKey)}
+                  onDoubleClick={() => onOpenDay(dateKey)}
                 />
               );
             })}
