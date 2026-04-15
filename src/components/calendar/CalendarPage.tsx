@@ -62,7 +62,7 @@ export default function CalendarPage({ onNavigateToNote }: CalendarPageProps) {
       setCurrentMonth(new Date(sourceDate.getFullYear(), sourceDate.getMonth(), 1));
       setSidebarMode("day");
     },
-    [setCurrentMonth, setSelectedDate]
+    [setCurrentMonth, setSelectedDate, setSidebarMode]
   );
 
   const handleUpdateTodo = useCallback(
