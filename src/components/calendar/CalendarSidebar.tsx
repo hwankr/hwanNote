@@ -123,10 +123,7 @@ export default function CalendarSidebar({
             onUpdateTodo={onUpdateTodo}
             onDeleteTodo={onDeleteTodo}
             onSetTodoDueDate={onSetTodoDueDate}
-            onOpenSourceDate={(dateKey) => {
-              onOpenDay(dateKey);
-              onModeChange("day");
-            }}
+            onOpenSourceDate={onOpenDay}
           />
         )}
       </div>
