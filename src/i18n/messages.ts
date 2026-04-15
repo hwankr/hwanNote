@@ -202,7 +202,14 @@ const messages = {
     "calendar.groupDueSoon": "곧 마감",
     "calendar.groupUpcoming": "예정된 마감",
     "calendar.groupNoDueDate": "마감일 없음",
-    "calendar.groupDone": "완료"
+    "calendar.groupDone": "완료",
+    "calendar.doneCollapsed": "완료됨 ({{count}})",
+    "calendar.doneExpanded": "완료됨 ({{count}})",
+    "calendar.doneFilterLabel": "완료 항목 필터",
+    "calendar.doneRecent": "최근 {{days}}일",
+    "calendar.doneAll": "전체",
+    "calendar.doneCountRatio": "{{shown}} / {{total}}개",
+    "calendar.doneCountTotal": "총 {{total}}개"
   },
   en: {
     "common.untitled": "Untitled",
@@ -399,7 +406,14 @@ const messages = {
     "calendar.groupDueSoon": "Due soon",
     "calendar.groupUpcoming": "Upcoming",
     "calendar.groupNoDueDate": "No due date",
-    "calendar.groupDone": "Done"
+    "calendar.groupDone": "Done",
+    "calendar.doneCollapsed": "Done ({{count}})",
+    "calendar.doneExpanded": "Done ({{count}})",
+    "calendar.doneFilterLabel": "Done filter",
+    "calendar.doneRecent": "Last {{days}} days",
+    "calendar.doneAll": "All",
+    "calendar.doneCountRatio": "{{shown}} of {{total}}",
+    "calendar.doneCountTotal": "{{total}} total"
   }
 } as const satisfies Record<AppLanguage, MessageDictionary>;
 
