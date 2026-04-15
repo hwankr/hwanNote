@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import { useI18n } from "../../i18n/context";
 import {
   filterRowsWithinRecentDays,
@@ -32,6 +32,8 @@ export default function DoneSection({
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(false);
   const [filter, setFilter] = useState<"recent" | "all">("recent");
+  const bodyId = `done-section-body-${useId()}`;
+  const showSourceDate = Boolean(onSelectSourceDate);
 
   const visibleRows = useMemo(() => {
     if (!enableRecencyFilter || filter === "all") {
@@ -57,7 +59,7 @@ export default function DoneSection({
         type="button"
         className="done-section-toggle"
         aria-expanded={expanded}
-        aria-controls="done-section-body"
+        aria-controls={bodyId}
         onClick={() => setExpanded((value) => !value)}
       >
         <span aria-hidden="true">{expanded ? "▼" : "▶"}</span>
@@ -65,7 +67,7 @@ export default function DoneSection({
       </button>
 
       {expanded && (
-        <div id="done-section-body" className="done-section-body">
+        <div id={bodyId} className="done-section-body">
           {enableRecencyFilter && (
             <div className="done-section-filter" role="tablist" aria-label={t("calendar.doneFilterLabel")}>
               <button
@@ -100,7 +102,7 @@ export default function DoneSection({
                 key={`${row.sourceDateKey}:${row.id}`}
                 item={row}
                 sourceDateKey={row.sourceDateKey}
-                showSourceDate
+                showSourceDate={showSourceDate}
                 isOverdue={false}
                 onToggle={() => onToggleTodo(row.sourceDateKey, row.id)}
                 onUpdate={(text) => onUpdateTodo(row.sourceDateKey, row.id, text)}
