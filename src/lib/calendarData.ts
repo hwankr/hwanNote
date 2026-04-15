@@ -32,7 +32,13 @@ export interface CalendarDataV2 {
   noteLinks: Record<string, string[]>;
 }
 
-export type CalendarData = CalendarDataV2;
+export interface CalendarDataV3 {
+  version: 3;
+  todos: Record<string, DayTodos>;
+  noteLinks: Record<string, string[]>;
+}
+
+export type CalendarData = CalendarDataV3;
 
 export type CalendarTodoGroup = "overdue" | "dueSoon" | "upcoming" | "noDueDate" | "done";
 
@@ -54,7 +60,7 @@ export interface CalendarTodoQueryOptions {
   dueSoonDays?: number;
 }
 
-export const CALENDAR_DATA_VERSION = 2;
+export const CALENDAR_DATA_VERSION = 3;
 export const DEFAULT_DUE_SOON_DAYS = 7;
 export const CALENDAR_TODO_GROUP_ORDER: CalendarTodoGroup[] = [
   "overdue",
@@ -82,15 +88,19 @@ export function parseCalendarData(raw: string): CalendarData {
     }
 
     if (parsed.version === 1) {
-      return migrateCalendarDataV1ToV2(parsed);
+      return migrateCalendarDataV2ToV3(migrateCalendarDataV1ToV2(parsed));
+    }
+
+    if (parsed.version === 2) {
+      return migrateCalendarDataV2ToV3(parsed);
     }
 
     if (parsed.version === CALENDAR_DATA_VERSION) {
-      return normalizeCalendarDataV2(parsed);
+      return normalizeCalendarDataV3(parsed);
     }
 
     if (parsed.version === undefined && ("todos" in parsed || "noteLinks" in parsed)) {
-      return migrateCalendarDataV1ToV2(parsed);
+      return migrateCalendarDataV2ToV3(migrateCalendarDataV1ToV2(parsed));
     }
 
     if (typeof parsed.version !== "number") {
@@ -98,12 +108,8 @@ export function parseCalendarData(raw: string): CalendarData {
       return createEmptyCalendarData();
     }
 
-    if (parsed.version !== CALENDAR_DATA_VERSION) {
-      console.error(`calendar.json: unsupported version ${parsed.version}, returning empty data`);
-      return createEmptyCalendarData();
-    }
-
-    return normalizeCalendarDataV2(parsed);
+    console.error(`calendar.json: unsupported version ${parsed.version}, returning empty data`);
+    return createEmptyCalendarData();
   } catch (error) {
     console.error("calendar.json: parse error, returning empty data", error);
     return createEmptyCalendarData();
@@ -266,15 +272,23 @@ function createEmptyCalendarTodoGroups(): Record<CalendarTodoGroup, CalendarTodo
   };
 }
 
-function migrateCalendarDataV1ToV2(value: unknown): CalendarData {
+function migrateCalendarDataV1ToV2(value: unknown): CalendarDataV2 {
   return {
-    version: CALENDAR_DATA_VERSION,
+    version: 2,
     todos: normalizeTodosRecord(value, normalizeLegacyTodoItem),
     noteLinks: normalizeNoteLinksRecord(value),
   };
 }
 
-function normalizeCalendarDataV2(value: unknown): CalendarData {
+function migrateCalendarDataV2ToV3(value: unknown): CalendarData {
+  return {
+    version: CALENDAR_DATA_VERSION,
+    todos: normalizeTodosRecord(value, normalizeTodoItem),
+    noteLinks: normalizeNoteLinksRecord(value),
+  };
+}
+
+function normalizeCalendarDataV3(value: unknown): CalendarData {
   return {
     version: CALENDAR_DATA_VERSION,
     todos: normalizeTodosRecord(value, normalizeTodoItem),
