@@ -209,7 +209,8 @@ const messages = {
     "calendar.doneRecent": "최근 {{days}}일",
     "calendar.doneAll": "전체",
     "calendar.doneCountRatio": "{{shown}} / {{total}}개",
-    "calendar.doneCountTotal": "총 {{total}}개"
+    "calendar.doneCountTotal": "총 {{total}}개",
+    "calendar.periodEmpty": "이 기간에 할 일이 없습니다."
   },
   en: {
     "common.untitled": "Untitled",
@@ -413,7 +414,8 @@ const messages = {
     "calendar.doneRecent": "Last {{days}} days",
     "calendar.doneAll": "All",
     "calendar.doneCountRatio": "{{shown}} of {{total}}",
-    "calendar.doneCountTotal": "{{total}} total"
+    "calendar.doneCountTotal": "{{total}} total",
+    "calendar.periodEmpty": "No tasks in this period."
   }
 } as const satisfies Record<AppLanguage, MessageDictionary>;
 
