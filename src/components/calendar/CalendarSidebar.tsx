@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { useI18n } from "../../i18n/context";
 import {
   parseDateKey,
@@ -18,6 +18,8 @@ export type CalendarSidebarMode = "day" | "all";
 
 interface CalendarSidebarProps {
   selectedDate: string;
+  mode: CalendarSidebarMode;
+  onModeChange: (mode: CalendarSidebarMode) => void;
   dayTodos: TodoItem[];
   groupedTodoRows: Record<CalendarTodoGroup, CalendarTodoRow[]>;
   linkedNoteIds: string[];
@@ -34,6 +36,8 @@ interface CalendarSidebarProps {
 
 export default function CalendarSidebar({
   selectedDate,
+  mode,
+  onModeChange,
   dayTodos,
   groupedTodoRows,
   linkedNoteIds,
@@ -48,7 +52,6 @@ export default function CalendarSidebar({
   onOpenDay,
 }: CalendarSidebarProps) {
   const { t, localeTag } = useI18n();
-  const [mode, setMode] = useState<CalendarSidebarMode>("day");
 
   const selectedDateLabel = useMemo(
     () =>
@@ -82,7 +85,7 @@ export default function CalendarSidebar({
             role="tab"
             aria-selected={mode === "day"}
             className={`calendar-view-switch-btn ${mode === "day" ? "active" : ""}`}
-            onClick={() => setMode("day")}
+            onClick={() => onModeChange("day")}
           >
             {t("calendar.viewDay")}
           </button>
@@ -91,7 +94,7 @@ export default function CalendarSidebar({
             role="tab"
             aria-selected={mode === "all"}
             className={`calendar-view-switch-btn ${mode === "all" ? "active" : ""}`}
-            onClick={() => setMode("all")}
+            onClick={() => onModeChange("all")}
           >
             {t("calendar.viewAll")}
           </button>
@@ -122,7 +125,7 @@ export default function CalendarSidebar({
             onSetTodoDueDate={onSetTodoDueDate}
             onOpenSourceDate={(dateKey) => {
               onOpenDay(dateKey);
-              setMode("day");
+              onModeChange("day");
             }}
           />
         )}

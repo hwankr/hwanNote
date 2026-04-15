@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { formatDateKey, parseDateKey, type TodoItem } from "../../lib/calendarData";
 import { useNoteStore } from "../../stores/noteStore";
 import { selectTodoRowsByGroup, useCalendarStore } from "../../stores/calendarStore";
-import CalendarSidebar from "./CalendarSidebar";
+import CalendarSidebar, { type CalendarSidebarMode } from "./CalendarSidebar";
 import MonthGrid from "./MonthGrid";
 
 interface CalendarPageProps {
@@ -32,6 +32,8 @@ export default function CalendarPage({ onNavigateToNote }: CalendarPageProps) {
 
   const notesById = useNoteStore((s) => s.notesById);
   const allNotes = useNoteStore((s) => s.allNotes);
+
+  const [sidebarMode, setSidebarMode] = useState<CalendarSidebarMode>("day");
 
   useEffect(() => {
     if (!loaded) {
@@ -113,6 +115,8 @@ export default function CalendarPage({ onNavigateToNote }: CalendarPageProps) {
       />
       <CalendarSidebar
         selectedDate={selectedDate}
+        mode={sidebarMode}
+        onModeChange={setSidebarMode}
         dayTodos={dayTodos}
         groupedTodoRows={groupedTodoRows}
         linkedNoteIds={linkedNoteIds}
