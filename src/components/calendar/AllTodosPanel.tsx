@@ -4,10 +4,12 @@ import {
   type CalendarTodoGroup,
   type CalendarTodoRow,
 } from "../../lib/calendarData";
+import DoneSection from "./DoneSection";
 import TodoItem from "./TodoItem";
 
 interface AllTodosPanelProps {
   groupedRows: Record<CalendarTodoGroup, CalendarTodoRow[]>;
+  todayDateKey: string;
   onToggleTodo: (dateKey: string, todoId: string) => void;
   onUpdateTodo: (dateKey: string, todoId: string, text: string) => void;
   onDeleteTodo: (dateKey: string, todoId: string) => void;
@@ -15,8 +17,13 @@ interface AllTodosPanelProps {
   onOpenSourceDate: (dateKey: string) => void;
 }
 
+const OPEN_GROUPS = CALENDAR_TODO_GROUP_ORDER.filter(
+  (group): group is Exclude<CalendarTodoGroup, "done"> => group !== "done"
+);
+
 export default function AllTodosPanel({
   groupedRows,
+  todayDateKey,
   onToggleTodo,
   onUpdateTodo,
   onDeleteTodo,
@@ -30,22 +37,24 @@ export default function AllTodosPanel({
     dueSoon: t("calendar.groupDueSoon"),
     upcoming: t("calendar.groupUpcoming"),
     noDueDate: t("calendar.groupNoDueDate"),
-    done: t("calendar.groupDone"),
   } as const;
 
-  const sections = CALENDAR_TODO_GROUP_ORDER.map((key) => ({
+  const openSections = OPEN_GROUPS.map((key) => ({
     key,
     title: sectionTitleByKey[key],
     items: groupedRows[key],
   })).filter((section) => section.items.length > 0);
 
-  if (sections.length === 0) {
+  const doneRows = groupedRows.done;
+  const hasAnything = openSections.length > 0 || doneRows.length > 0;
+
+  if (!hasAnything) {
     return <p className="todo-empty calendar-all-empty">{t("calendar.allTodosEmpty")}</p>;
   }
 
   return (
     <div className="calendar-all-panel">
-      {sections.map((section) => (
+      {openSections.map((section) => (
         <section key={section.key} className="calendar-task-section">
           <div className="calendar-task-section-header">
             <h4>{section.title}</h4>
@@ -74,6 +83,17 @@ export default function AllTodosPanel({
           </div>
         </section>
       ))}
+
+      <DoneSection
+        rows={doneRows}
+        todayDateKey={todayDateKey}
+        enableRecencyFilter
+        onToggleTodo={onToggleTodo}
+        onUpdateTodo={onUpdateTodo}
+        onDeleteTodo={onDeleteTodo}
+        onSetTodoDueDate={onSetTodoDueDate}
+        onSelectSourceDate={onOpenSourceDate}
+      />
     </div>
   );
 }
