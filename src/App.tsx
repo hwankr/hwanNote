@@ -7,6 +7,7 @@ import Editor, { restoreEditorFocus } from "./components/Editor";
 import SettingsPanel, { type ThemeMode } from "./components/SettingsPanel";
 import Sidebar, { type AppView, type SidebarTag } from "./components/Sidebar";
 import CalendarPage from "./components/calendar/CalendarPage";
+import { DEFAULT_WEEK_STARTS_ON, isWeekStart, type WeekStart } from "./lib/calendarRange";
 import { useCalendarStore } from "./stores/calendarStore";
 import StatusBar from "./components/StatusBar";
 import TitleBar from "./components/TitleBar";
@@ -43,6 +44,7 @@ const SHORTCUTS_KEY = "hwan-note:shortcuts";
 const SPLIT_RATIO_KEY = "hwan-note:split-ratio";
 const TAB_SIZE_KEY = "hwan-note:tab-size";
 const THEME_MODE_KEY = "hwan-note:theme-mode";
+const WEEK_STARTS_ON_KEY = "hwan-note:week-starts-on";
 const MIN_EDITOR_FONT_SIZE = 10;
 const MAX_EDITOR_FONT_SIZE = 24;
 const DEFAULT_EDITOR_FONT_SIZE = 14;
@@ -667,6 +669,7 @@ export default function App() {
   const [persistedFolders, setPersistedFolders] = useState<string[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [themeMode, setThemeMode] = useState<ThemeMode>("light");
+  const [weekStartsOn, setWeekStartsOn] = useState<WeekStart>(DEFAULT_WEEK_STARTS_ON);
   const [editorFontSize, setEditorFontSize] = useState(DEFAULT_EDITOR_FONT_SIZE);
   const [editorLineHeight, setEditorLineHeight] = useState(DEFAULT_EDITOR_LINE_HEIGHT);
   const [editorSpellcheck, setEditorSpellcheck] = useState(true);
@@ -1020,6 +1023,18 @@ export default function App() {
     } catch (error) {
       console.warn("Failed to load editor spellcheck", error);
     }
+
+    try {
+      const rawWeekStartsOn = window.localStorage.getItem(WEEK_STARTS_ON_KEY);
+      if (rawWeekStartsOn !== null) {
+        const parsed = Number.parseInt(rawWeekStartsOn, 10);
+        if (isWeekStart(parsed)) {
+          setWeekStartsOn(parsed);
+        }
+      }
+    } catch (error) {
+      console.warn("Failed to load week-starts-on", error);
+    }
   }, []);
 
   useEffect(() => {
@@ -1047,6 +1062,10 @@ export default function App() {
   useEffect(() => {
     window.localStorage.setItem(EDITOR_SPELLCHECK_KEY, String(editorSpellcheck));
   }, [editorSpellcheck]);
+
+  useEffect(() => {
+    window.localStorage.setItem(WEEK_STARTS_ON_KEY, String(weekStartsOn));
+  }, [weekStartsOn]);
 
   useEffect(() => {
     window.localStorage.setItem(SPLIT_RATIO_KEY, String(splitRatio));
@@ -2239,6 +2258,7 @@ export default function App() {
           </main>
         ) : (
           <CalendarPage
+            weekStartsOn={weekStartsOn}
             onNavigateToNote={(noteId) => {
               setActiveView("notes");
               handleSelectNoteInFocusedPane(noteId);
@@ -2303,6 +2323,8 @@ export default function App() {
         onTabSizeChange={(size) => setTabSize(VALID_TAB_SIZES.includes(size) ? size : DEFAULT_TAB_SIZE)}
         onShortcutChange={handleShortcutChange}
         onResetShortcuts={handleShortcutReset}
+        weekStartsOn={weekStartsOn}
+        onWeekStartsOnChange={setWeekStartsOn}
         onClose={() => {
           setSettingsOpen(false);
           restoreEditorFocus(focusedEditor);
