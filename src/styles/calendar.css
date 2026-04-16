@@ -652,3 +652,124 @@ button.todo-meta-chip.readonly {
 .linked-note-btn:hover {
   background: var(--bg-hover);
 }
+
+/* 4-mode switch: allow more room */
+.calendar-view-switch {
+  flex-wrap: wrap;
+}
+
+.calendar-view-switch-btn {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+/* Date-grouped layout for week/month */
+.calendar-period-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.calendar-day-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.day-group-header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 0 2px;
+}
+
+.day-group-header h4 {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.day-group-count {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  background: var(--bg-subtle);
+  padding: 1px 6px;
+  border-radius: 10px;
+}
+
+.calendar-day-group-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* Collapsible done section */
+.done-section {
+  margin-top: 12px;
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 8px;
+}
+
+.done-section-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 8px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  border-radius: 6px;
+}
+
+.done-section-toggle:hover {
+  background: var(--bg-subtle);
+}
+
+.done-section-body {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.done-section-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px;
+  background: var(--bg-subtle);
+  border-radius: 6px;
+  align-self: flex-start;
+  margin-bottom: 4px;
+}
+
+.done-section-filter-btn {
+  border: none;
+  background: transparent;
+  padding: 3px 8px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.done-section-filter-btn.active {
+  background: var(--bg-surface);
+  color: var(--text-primary);
+}
+
+.done-section-filter-count {
+  margin-left: 6px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.done-section-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
