@@ -111,6 +111,7 @@ export default function CalendarPage({ onNavigateToNote, weekStartsOn }: Calenda
         currentMonth={currentMonth}
         selectedDate={selectedDate}
         data={data}
+        weekStartsOn={weekStartsOn}
         onSelectDate={setSelectedDate}
         onOpenDay={handleOpenDay}
         onPrevMonth={handlePrevMonth}

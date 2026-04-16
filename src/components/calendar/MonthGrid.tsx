@@ -2,12 +2,14 @@ import { useMemo } from "react";
 import { useI18n } from "../../i18n/context";
 import { formatDateKey } from "../../lib/calendarData";
 import type { CalendarData } from "../../lib/calendarData";
+import type { WeekStart } from "../../lib/calendarRange";
 import DayCell from "./DayCell";
 
 interface MonthGridProps {
   currentMonth: Date;
   selectedDate: string;
   data: CalendarData;
+  weekStartsOn: WeekStart;
   onSelectDate: (dateKey: string) => void;
   onOpenDay: (dateKey: string) => void;
   onPrevMonth: () => void;
@@ -15,9 +17,9 @@ interface MonthGridProps {
   onToday: () => void;
 }
 
-function getMonthGrid(year: number, month: number): Date[][] {
+function getMonthGrid(year: number, month: number, weekStartsOn: WeekStart): Date[][] {
   const firstDay = new Date(year, month, 1);
-  const startOffset = firstDay.getDay(); // Sunday = 0
+  const startOffset = (firstDay.getDay() - weekStartsOn + 7) % 7;
 
   const weeks: Date[][] = [];
   let current = new Date(year, month, 1 - startOffset);
@@ -38,6 +40,7 @@ export default function MonthGrid({
   currentMonth,
   selectedDate,
   data,
+  weekStartsOn,
   onSelectDate,
   onOpenDay,
   onPrevMonth,
@@ -49,7 +52,7 @@ export default function MonthGrid({
   const year = currentMonth.getFullYear();
   const month = currentMonth.getMonth();
 
-  const weeks = useMemo(() => getMonthGrid(year, month), [year, month]);
+  const weeks = useMemo(() => getMonthGrid(year, month, weekStartsOn), [year, month, weekStartsOn]);
 
   const today = useMemo(() => formatDateKey(new Date()), []);
 
@@ -60,14 +63,19 @@ export default function MonthGrid({
     });
   }, [currentMonth]);
 
+  const allDayHeaders = [
+    { label: t("calendar.sunday"), type: "sunday" },
+    { label: t("calendar.monday"), type: "" },
+    { label: t("calendar.tuesday"), type: "" },
+    { label: t("calendar.wednesday"), type: "" },
+    { label: t("calendar.thursday"), type: "" },
+    { label: t("calendar.friday"), type: "" },
+    { label: t("calendar.saturday"), type: "saturday" },
+  ];
+
   const dayHeaders = [
-    t("calendar.sunday"),
-    t("calendar.monday"),
-    t("calendar.tuesday"),
-    t("calendar.wednesday"),
-    t("calendar.thursday"),
-    t("calendar.friday"),
-    t("calendar.saturday"),
+    ...allDayHeaders.slice(weekStartsOn),
+    ...allDayHeaders.slice(0, weekStartsOn),
   ];
 
   return (
@@ -91,9 +99,9 @@ export default function MonthGrid({
 
       <div className="month-grid">
         <div className="day-headers">
-          {dayHeaders.map((label, i) => (
-            <div key={i} className={`day-header ${i === 0 ? "sunday" : i === 6 ? "saturday" : ""}`}>
-              {label}
+          {dayHeaders.map((header, i) => (
+            <div key={i} className={`day-header ${header.type}`}>
+              {header.label}
             </div>
           ))}
         </div>
