@@ -668,6 +668,7 @@ button.todo-meta-chip.readonly {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  padding: 8px 12px;
 }
 
 .calendar-day-group {
