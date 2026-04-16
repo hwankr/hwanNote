@@ -1,6 +1,7 @@
 import { type KeyboardEvent, useState } from "react";
 import { useI18n } from "../i18n/context";
 import type { AppLanguage } from "../i18n/messages";
+import type { WeekStart } from "../lib/calendarRange";
 import type { CloudProviderInfo, CloudSyncSource } from "../lib/tauriApi";
 import {
   SHORTCUT_DEFINITIONS,
@@ -41,6 +42,8 @@ interface SettingsPanelProps {
   onTabSizeChange: (size: number) => void;
   onShortcutChange: (action: ShortcutAction, combo: ShortcutCombo) => ShortcutValidationResult;
   onResetShortcuts: () => void;
+  weekStartsOn: WeekStart;
+  onWeekStartsOnChange: (value: WeekStart) => void;
   onClose: () => void;
 }
 
@@ -69,6 +72,8 @@ export default function SettingsPanel({
   onEditorSpellcheckChange,
   onTabSizeChange,
   onShortcutChange,
+  weekStartsOn,
+  onWeekStartsOnChange,
   onResetShortcuts,
   onClose
 }: SettingsPanelProps) {
@@ -182,6 +187,21 @@ export default function SettingsPanel({
             >
               <option value="ko">{t("settings.languageKo")}</option>
               <option value="en">{t("settings.languageEn")}</option>
+            </select>
+          </div>
+
+          <div className="settings-item">
+            <label htmlFor="week-starts-on">{t("settings.weekStartsOn")}</label>
+            <select
+              id="week-starts-on"
+              value={weekStartsOn}
+              onChange={(event) => {
+                const parsed = Number.parseInt(event.target.value, 10) as WeekStart;
+                onWeekStartsOnChange(parsed === 0 ? 0 : 1);
+              }}
+            >
+              <option value={1}>{t("settings.weekStartsOnMonday")}</option>
+              <option value={0}>{t("settings.weekStartsOnSunday")}</option>
             </select>
           </div>
 

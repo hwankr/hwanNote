@@ -5,6 +5,7 @@ export interface TodoItem {
   createdAt: number;
   updatedAt: number;
   dueDateKey: string | null;
+  completedAt: number | null;
 }
 
 export interface DayTodos {
@@ -45,6 +46,7 @@ export interface CalendarTodoRow {
   dueDateKey: string | null;
   hasDueDate: boolean;
   isOverdue: boolean;
+  completedAt: number | null;
 }
 
 export interface CalendarTodoQueryOptions {
@@ -164,6 +166,7 @@ export function deriveCalendarTodoRows(
       dueDateKey: todo.dueDateKey,
       hasDueDate: todo.dueDateKey !== null,
       isOverdue: isTodoOverdue(todo, todayDateKey),
+      completedAt: todo.completedAt,
     }))
   );
 }
@@ -323,7 +326,11 @@ function normalizeLegacyTodoItem(value: unknown): TodoItem | null {
     return null;
   }
 
-  return { ...normalized, dueDateKey: null };
+  return {
+    ...normalized,
+    dueDateKey: null,
+    completedAt: normalized.done ? normalized.updatedAt : null,
+  };
 }
 
 function normalizeTodoItem(value: unknown): TodoItem | null {
@@ -332,15 +339,24 @@ function normalizeTodoItem(value: unknown): TodoItem | null {
     return null;
   }
 
+  const rawCompletedAt = isPlainObject(value) ? value.completedAt : null;
+  const completedAt =
+    typeof rawCompletedAt === "number" && Number.isFinite(rawCompletedAt)
+      ? rawCompletedAt
+      : normalized.done
+        ? normalized.updatedAt
+        : null;
+
   return {
     ...normalized,
     dueDateKey: normalizeDueDateKey(isPlainObject(value) ? value.dueDateKey : null),
+    completedAt,
   };
 }
 
 function normalizeBaseTodoItem(
   value: unknown
-): Omit<TodoItem, "dueDateKey"> | null {
+): Omit<TodoItem, "dueDateKey" | "completedAt"> | null {
   if (!isPlainObject(value)) {
     return null;
   }

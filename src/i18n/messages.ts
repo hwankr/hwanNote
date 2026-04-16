@@ -202,7 +202,24 @@ const messages = {
     "calendar.groupDueSoon": "곧 마감",
     "calendar.groupUpcoming": "예정된 마감",
     "calendar.groupNoDueDate": "마감일 없음",
-    "calendar.groupDone": "완료"
+    "calendar.groupDone": "완료",
+    "calendar.doneCollapsed": "완료됨 ({{count}})",
+    "calendar.doneExpanded": "완료됨 ({{count}})",
+    "calendar.doneFilterLabel": "완료 항목 필터",
+    "calendar.doneRecent": "최근 {{days}}일",
+    "calendar.doneAll": "전체",
+    "calendar.doneCountRatio": "{{shown}} / {{total}}개",
+    "calendar.doneCountTotal": "총 {{total}}개",
+    "calendar.periodEmpty": "이 기간에 할 일이 없습니다.",
+    "calendar.viewWeek": "주간 보기",
+    "calendar.viewMonth": "월간 보기",
+    "calendar.weekViewTitle": "{{start}} – {{end}}",
+    "calendar.weekViewSubtitle": "이번 주 할 일",
+    "calendar.monthViewTitle": "{{year}}년 {{month}}",
+    "calendar.monthViewSubtitle": "이번 달 할 일",
+    "settings.weekStartsOn": "주의 시작 요일",
+    "settings.weekStartsOnSunday": "일요일",
+    "settings.weekStartsOnMonday": "월요일"
   },
   en: {
     "common.untitled": "Untitled",
@@ -399,7 +416,24 @@ const messages = {
     "calendar.groupDueSoon": "Due soon",
     "calendar.groupUpcoming": "Upcoming",
     "calendar.groupNoDueDate": "No due date",
-    "calendar.groupDone": "Done"
+    "calendar.groupDone": "Done",
+    "calendar.doneCollapsed": "Done ({{count}})",
+    "calendar.doneExpanded": "Done ({{count}})",
+    "calendar.doneFilterLabel": "Done filter",
+    "calendar.doneRecent": "Last {{days}} days",
+    "calendar.doneAll": "All",
+    "calendar.doneCountRatio": "{{shown}} of {{total}}",
+    "calendar.doneCountTotal": "{{total}} total",
+    "calendar.periodEmpty": "No tasks in this period.",
+    "calendar.viewWeek": "Week",
+    "calendar.viewMonth": "Month",
+    "calendar.weekViewTitle": "{{start}} – {{end}}",
+    "calendar.weekViewSubtitle": "Tasks for this week",
+    "calendar.monthViewTitle": "{{month}} {{year}}",
+    "calendar.monthViewSubtitle": "Tasks for this month",
+    "settings.weekStartsOn": "Week starts on",
+    "settings.weekStartsOnSunday": "Sunday",
+    "settings.weekStartsOnMonday": "Monday"
   }
 } as const satisfies Record<AppLanguage, MessageDictionary>;
 

@@ -158,6 +158,7 @@ export const useCalendarStore = create<CalendarStore>((set) => ({
         createdAt: now,
         updatedAt: now,
         dueDateKey: null,
+        completedAt: null,
       });
       return true;
     });
@@ -177,6 +178,7 @@ export const useCalendarStore = create<CalendarStore>((set) => ({
       }
       if (updates.done !== undefined && updates.done !== item.done) {
         item.done = updates.done;
+        item.completedAt = updates.done ? Date.now() : null;
         changed = true;
       }
       if (!changed) {
@@ -210,7 +212,9 @@ export const useCalendarStore = create<CalendarStore>((set) => ({
       const item = day.items.find((t) => t.id === todoId);
       if (!item) return false;
       item.done = !item.done;
-      item.updatedAt = Date.now();
+      const now = Date.now();
+      item.completedAt = item.done ? now : null;
+      item.updatedAt = now;
       return true;
     });
   },

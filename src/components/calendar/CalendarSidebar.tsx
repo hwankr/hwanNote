@@ -2,24 +2,31 @@ import { useMemo } from "react";
 import { useI18n } from "../../i18n/context";
 import {
   parseDateKey,
+  type CalendarData,
   type CalendarTodoGroup,
   type CalendarTodoRow,
   type TodoItem,
 } from "../../lib/calendarData";
+import { getWeekRange, type WeekStart } from "../../lib/calendarRange";
 import AllTodosPanel from "./AllTodosPanel";
 import DayTodosPanel from "./DayTodosPanel";
+import MonthTodosPanel from "./MonthTodosPanel";
+import WeekTodosPanel from "./WeekTodosPanel";
 
 export interface PinnedNote {
   id: string;
   title: string;
 }
 
-export type CalendarSidebarMode = "day" | "all";
+export type CalendarSidebarMode = "day" | "week" | "month" | "all";
 
 interface CalendarSidebarProps {
   selectedDate: string;
+  todayDateKey: string;
   mode: CalendarSidebarMode;
   onModeChange: (mode: CalendarSidebarMode) => void;
+  data: CalendarData;
+  weekStartsOn: WeekStart;
   dayTodos: TodoItem[];
   groupedTodoRows: Record<CalendarTodoGroup, CalendarTodoRow[]>;
   linkedNoteIds: string[];
@@ -34,10 +41,15 @@ interface CalendarSidebarProps {
   onOpenDay: (dateKey: string) => void;
 }
 
+const MODES: CalendarSidebarMode[] = ["day", "week", "month", "all"];
+
 export default function CalendarSidebar({
   selectedDate,
+  todayDateKey,
   mode,
   onModeChange,
+  data,
+  weekStartsOn,
   dayTodos,
   groupedTodoRows,
   linkedNoteIds,
@@ -64,45 +76,74 @@ export default function CalendarSidebar({
     [localeTag, selectedDate]
   );
 
+  const weekRangeLabel = useMemo(() => {
+    const { startKey, endKey } = getWeekRange(selectedDate, weekStartsOn);
+    const startLabel = parseDateKey(startKey).toLocaleDateString(localeTag, {
+      month: "short",
+      day: "numeric",
+    });
+    const endLabel = parseDateKey(endKey).toLocaleDateString(localeTag, {
+      month: "short",
+      day: "numeric",
+    });
+    return t("calendar.weekViewTitle", { start: startLabel, end: endLabel });
+  }, [localeTag, selectedDate, t, weekStartsOn]);
+
+  const monthLabel = useMemo(() => {
+    const parsed = parseDateKey(selectedDate);
+    const year = parsed.getFullYear();
+    const month = parsed.toLocaleDateString(localeTag, { month: "long" });
+    return t("calendar.monthViewTitle", { year, month });
+  }, [localeTag, selectedDate, t]);
+
+  const eyebrowByMode: Record<CalendarSidebarMode, string> = {
+    day: t("calendar.viewDay"),
+    week: t("calendar.viewWeek"),
+    month: t("calendar.viewMonth"),
+    all: t("calendar.viewAll"),
+  };
+
+  const titleByMode: Record<CalendarSidebarMode, string> = {
+    day: selectedDateLabel,
+    week: weekRangeLabel,
+    month: monthLabel,
+    all: t("calendar.allViewTitle"),
+  };
+
+  const subtitleByMode: Record<CalendarSidebarMode, string> = {
+    day: t("calendar.dayViewSubtitle"),
+    week: t("calendar.weekViewSubtitle"),
+    month: t("calendar.monthViewSubtitle"),
+    all: t("calendar.allViewSubtitle"),
+  };
+
   return (
     <aside className="calendar-sidebar">
       <div className="calendar-sidebar-header">
         <div className="calendar-sidebar-heading">
-          <span className="calendar-sidebar-eyebrow">
-            {mode === "day" ? t("calendar.viewDay") : t("calendar.viewAll")}
-          </span>
-          <h3 className="calendar-sidebar-title">
-            {mode === "day" ? selectedDateLabel : t("calendar.allViewTitle")}
-          </h3>
-          <p className="calendar-sidebar-subtitle">
-            {mode === "day" ? t("calendar.dayViewSubtitle") : t("calendar.allViewSubtitle")}
-          </p>
+          <span className="calendar-sidebar-eyebrow">{eyebrowByMode[mode]}</span>
+          <h3 className="calendar-sidebar-title">{titleByMode[mode]}</h3>
+          <p className="calendar-sidebar-subtitle">{subtitleByMode[mode]}</p>
         </div>
 
         <div className="calendar-view-switch" role="tablist" aria-label={t("calendar.title")}>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={mode === "day"}
-            className={`calendar-view-switch-btn ${mode === "day" ? "active" : ""}`}
-            onClick={() => onModeChange("day")}
-          >
-            {t("calendar.viewDay")}
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={mode === "all"}
-            className={`calendar-view-switch-btn ${mode === "all" ? "active" : ""}`}
-            onClick={() => onModeChange("all")}
-          >
-            {t("calendar.viewAll")}
-          </button>
+          {MODES.map((m) => (
+            <button
+              key={m}
+              type="button"
+              role="tab"
+              aria-selected={mode === m}
+              className={`calendar-view-switch-btn ${mode === m ? "active" : ""}`}
+              onClick={() => onModeChange(m)}
+            >
+              {eyebrowByMode[m]}
+            </button>
+          ))}
         </div>
       </div>
 
       <div className="calendar-sidebar-content">
-        {mode === "day" ? (
+        {mode === "day" && (
           <DayTodosPanel
             selectedDate={selectedDate}
             dayTodos={dayTodos}
@@ -116,9 +157,36 @@ export default function CalendarSidebar({
             onNavigateToNote={onNavigateToNote}
             noteTitle={noteTitle}
           />
-        ) : (
+        )}
+        {mode === "week" && (
+          <WeekTodosPanel
+            data={data}
+            selectedDate={selectedDate}
+            weekStartsOn={weekStartsOn}
+            todayDateKey={todayDateKey}
+            onToggleTodo={onToggleTodo}
+            onUpdateTodo={onUpdateTodo}
+            onDeleteTodo={onDeleteTodo}
+            onSetTodoDueDate={onSetTodoDueDate}
+            onOpenSourceDate={onOpenDay}
+          />
+        )}
+        {mode === "month" && (
+          <MonthTodosPanel
+            data={data}
+            selectedDate={selectedDate}
+            todayDateKey={todayDateKey}
+            onToggleTodo={onToggleTodo}
+            onUpdateTodo={onUpdateTodo}
+            onDeleteTodo={onDeleteTodo}
+            onSetTodoDueDate={onSetTodoDueDate}
+            onOpenSourceDate={onOpenDay}
+          />
+        )}
+        {mode === "all" && (
           <AllTodosPanel
             groupedRows={groupedTodoRows}
+            todayDateKey={todayDateKey}
             onToggleTodo={onToggleTodo}
             onUpdateTodo={onUpdateTodo}
             onDeleteTodo={onDeleteTodo}
