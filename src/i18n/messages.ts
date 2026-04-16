@@ -210,7 +210,16 @@ const messages = {
     "calendar.doneAll": "전체",
     "calendar.doneCountRatio": "{{shown}} / {{total}}개",
     "calendar.doneCountTotal": "총 {{total}}개",
-    "calendar.periodEmpty": "이 기간에 할 일이 없습니다."
+    "calendar.periodEmpty": "이 기간에 할 일이 없습니다.",
+    "calendar.viewWeek": "주간 보기",
+    "calendar.viewMonth": "월간 보기",
+    "calendar.weekViewTitle": "{start} – {end}",
+    "calendar.weekViewSubtitle": "이번 주 할 일",
+    "calendar.monthViewTitle": "{year}년 {month}",
+    "calendar.monthViewSubtitle": "이번 달 할 일",
+    "settings.weekStartsOn": "주의 시작 요일",
+    "settings.weekStartsOnSunday": "일요일",
+    "settings.weekStartsOnMonday": "월요일"
   },
   en: {
     "common.untitled": "Untitled",
@@ -415,7 +424,16 @@ const messages = {
     "calendar.doneAll": "All",
     "calendar.doneCountRatio": "{{shown}} of {{total}}",
     "calendar.doneCountTotal": "{{total}} total",
-    "calendar.periodEmpty": "No tasks in this period."
+    "calendar.periodEmpty": "No tasks in this period.",
+    "calendar.viewWeek": "Week",
+    "calendar.viewMonth": "Month",
+    "calendar.weekViewTitle": "{start} – {end}",
+    "calendar.weekViewSubtitle": "Tasks for this week",
+    "calendar.monthViewTitle": "{month} {year}",
+    "calendar.monthViewSubtitle": "Tasks for this month",
+    "settings.weekStartsOn": "Week starts on",
+    "settings.weekStartsOnSunday": "Sunday",
+    "settings.weekStartsOnMonday": "Monday"
   }
 } as const satisfies Record<AppLanguage, MessageDictionary>;
 
