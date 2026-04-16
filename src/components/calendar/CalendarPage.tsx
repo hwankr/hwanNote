@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { formatDateKey, parseDateKey, type TodoItem } from "../../lib/calendarData";
+import { type WeekStart } from "../../lib/calendarRange";
 import { useNoteStore } from "../../stores/noteStore";
 import { selectTodoRowsByGroup, useCalendarStore } from "../../stores/calendarStore";
 import CalendarSidebar, { type CalendarSidebarMode } from "./CalendarSidebar";
@@ -7,6 +8,7 @@ import MonthGrid from "./MonthGrid";
 
 interface CalendarPageProps {
   onNavigateToNote: (noteId: string) => void;
+  weekStartsOn: WeekStart;
 }
 
 type TodoUpdateFn = (
@@ -15,7 +17,7 @@ type TodoUpdateFn = (
   updates: Partial<Pick<TodoItem, "text" | "done">>
 ) => void;
 
-export default function CalendarPage({ onNavigateToNote }: CalendarPageProps) {
+export default function CalendarPage({ onNavigateToNote, weekStartsOn }: CalendarPageProps) {
   const todayDateKey = formatDateKey(new Date());
   const data = useCalendarStore((s) => s.data);
   const selectedDate = useCalendarStore((s) => s.selectedDate);
@@ -117,8 +119,11 @@ export default function CalendarPage({ onNavigateToNote }: CalendarPageProps) {
       />
       <CalendarSidebar
         selectedDate={selectedDate}
+        todayDateKey={todayDateKey}
         mode={sidebarMode}
         onModeChange={setSidebarMode}
+        data={data}
+        weekStartsOn={weekStartsOn}
         dayTodos={dayTodos}
         groupedTodoRows={groupedTodoRows}
         linkedNoteIds={linkedNoteIds}
