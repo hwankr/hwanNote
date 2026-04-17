@@ -31,6 +31,11 @@ export default function CalendarPage({ onNavigateToNote, weekStartsOn }: Calenda
   const updateTodo = useCalendarStore((s) => s.updateTodo) as TodoUpdateFn;
   const deleteTodo = useCalendarStore((s) => s.deleteTodo);
   const setTodoDueDate = useCalendarStore((s) => s.setTodoDueDate);
+  const createInboxTodo = useCalendarStore((s) => s.createInboxTodo);
+  const toggleInboxTodo = useCalendarStore((s) => s.toggleInboxTodo);
+  const updateInboxTodo = useCalendarStore((s) => s.updateInboxTodo);
+  const deleteInboxTodo = useCalendarStore((s) => s.deleteInboxTodo);
+  const setInboxTodoDueDate = useCalendarStore((s) => s.setInboxTodoDueDate);
 
   const notesById = useNoteStore((s) => s.notesById);
   const allNotes = useNoteStore((s) => s.allNotes);
@@ -79,6 +84,20 @@ export default function CalendarPage({ onNavigateToNote, weekStartsOn }: Calenda
       setTodoDueDate(dateKey, todoId, dueDateKey);
     },
     [setTodoDueDate]
+  );
+
+  const handleUpdateInboxTodo = useCallback(
+    (todoId: string, text: string) => {
+      updateInboxTodo(todoId, { text });
+    },
+    [updateInboxTodo]
+  );
+
+  const handleSetInboxTodoDueDate = useCallback(
+    (todoId: string, dueDateKey: string | null) => {
+      setInboxTodoDueDate(todoId, dueDateKey);
+    },
+    [setInboxTodoDueDate]
   );
 
   const linkedNoteIds = data.noteLinks[selectedDate] ?? [];
@@ -137,6 +156,11 @@ export default function CalendarPage({ onNavigateToNote, weekStartsOn }: Calenda
         onDeleteTodo={deleteTodo}
         onOpenDay={handleOpenDay}
         onSetTodoDueDate={handleSetTodoDueDate}
+        onCreateInboxTodo={createInboxTodo}
+        onToggleInboxTodo={toggleInboxTodo}
+        onUpdateInboxTodo={handleUpdateInboxTodo}
+        onDeleteInboxTodo={deleteInboxTodo}
+        onSetInboxTodoDueDate={handleSetInboxTodoDueDate}
       />
     </div>
   );
