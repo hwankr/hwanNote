@@ -36,6 +36,7 @@ interface CalendarSidebarProps {
   onUpdateTodo: (dateKey: string, todoId: string, text: string) => void;
   onDeleteTodo: (dateKey: string, todoId: string) => void;
   onSetTodoDueDate?: (dateKey: string, todoId: string, dueDateKey: string | null) => void;
+  onSetTodoShowSpan?: (dateKey: string, todoId: string, showSpan: boolean) => void;
   onCreateInboxTodo: (text: string) => void;
   onToggleInboxTodo: (todoId: string) => void;
   onUpdateInboxTodo: (todoId: string, text: string) => void;
@@ -64,6 +65,7 @@ export default function CalendarSidebar({
   onUpdateTodo,
   onDeleteTodo,
   onSetTodoDueDate,
+  onSetTodoShowSpan,
   onCreateInboxTodo,
   onToggleInboxTodo,
   onUpdateInboxTodo,
@@ -164,6 +166,7 @@ export default function CalendarSidebar({
             onUpdateTodo={onUpdateTodo}
             onDeleteTodo={onDeleteTodo}
             onSetTodoDueDate={onSetTodoDueDate}
+            onSetTodoShowSpan={onSetTodoShowSpan}
             onNavigateToNote={onNavigateToNote}
             noteTitle={noteTitle}
           />
