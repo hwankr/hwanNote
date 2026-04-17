@@ -14,6 +14,7 @@ interface DayTodosPanelProps {
   onUpdateTodo: (dateKey: string, todoId: string, text: string) => void;
   onDeleteTodo: (dateKey: string, todoId: string) => void;
   onSetTodoDueDate?: (dateKey: string, todoId: string, dueDateKey: string | null) => void;
+  onSetTodoShowSpan?: (dateKey: string, todoId: string, showSpan: boolean) => void;
   onNavigateToNote: (noteId: string) => void;
   noteTitle: (noteId: string) => string;
 }
@@ -28,6 +29,7 @@ export default function DayTodosPanel({
   onUpdateTodo,
   onDeleteTodo,
   onSetTodoDueDate,
+  onSetTodoShowSpan,
   onNavigateToNote,
   noteTitle,
 }: DayTodosPanelProps) {
@@ -76,6 +78,11 @@ export default function DayTodosPanel({
               onSetDueDate={
                 onSetTodoDueDate
                   ? (dueDateKey) => onSetTodoDueDate(selectedDate, item.id, dueDateKey)
+                  : undefined
+              }
+              onSetShowSpan={
+                onSetTodoShowSpan
+                  ? (showSpan) => onSetTodoShowSpan(selectedDate, item.id, showSpan)
                   : undefined
               }
             />
