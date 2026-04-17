@@ -1,3 +1,4 @@
+import { useCallback, useState } from "react";
 import { useI18n } from "../../i18n/context";
 import {
   CALENDAR_TODO_GROUP_ORDER,
@@ -15,10 +16,16 @@ interface AllTodosPanelProps {
   onDeleteTodo: (dateKey: string, todoId: string) => void;
   onSetTodoDueDate?: (dateKey: string, todoId: string, dueDateKey: string | null) => void;
   onOpenSourceDate: (dateKey: string) => void;
+  onCreateInboxTodo: (text: string) => void;
+  onToggleInboxTodo: (todoId: string) => void;
+  onUpdateInboxTodo: (todoId: string, text: string) => void;
+  onDeleteInboxTodo: (todoId: string) => void;
+  onSetInboxTodoDueDate?: (todoId: string, dueDateKey: string | null) => void;
 }
 
 const OPEN_GROUPS = CALENDAR_TODO_GROUP_ORDER.filter(
-  (group): group is Exclude<CalendarTodoGroup, "done"> => group !== "done"
+  (group): group is Exclude<CalendarTodoGroup, "done" | "inbox"> =>
+    group !== "done" && group !== "inbox"
 );
 
 export default function AllTodosPanel({
@@ -29,8 +36,23 @@ export default function AllTodosPanel({
   onDeleteTodo,
   onSetTodoDueDate,
   onOpenSourceDate,
+  onCreateInboxTodo,
+  onToggleInboxTodo,
+  onUpdateInboxTodo,
+  onDeleteInboxTodo,
+  onSetInboxTodoDueDate,
 }: AllTodosPanelProps) {
   const { t } = useI18n();
+  const [inboxDraft, setInboxDraft] = useState("");
+
+  const handleAddInbox = useCallback(() => {
+    const trimmed = inboxDraft.trim();
+    if (!trimmed) {
+      return;
+    }
+    onCreateInboxTodo(trimmed);
+    setInboxDraft("");
+  }, [inboxDraft, onCreateInboxTodo]);
 
   const sectionTitleByKey = {
     overdue: t("calendar.groupOverdue"),
@@ -45,15 +67,55 @@ export default function AllTodosPanel({
     items: groupedRows[key],
   })).filter((section) => section.items.length > 0);
 
+  const inboxRows = groupedRows.inbox;
   const doneRows = groupedRows.done;
-  const hasAnything = openSections.length > 0 || doneRows.length > 0;
-
-  if (!hasAnything) {
-    return <p className="todo-empty calendar-all-empty">{t("calendar.allTodosEmpty")}</p>;
-  }
 
   return (
     <div className="calendar-all-panel">
+      <section className="calendar-task-section calendar-inbox-section">
+        <div className="calendar-task-section-header">
+          <h4>{t("calendar.inboxTitle")}</h4>
+          <span className="calendar-task-section-count">{inboxRows.length}</span>
+        </div>
+
+        <div className="todo-add-row">
+          <input
+            type="text"
+            className="todo-add-input"
+            placeholder={t("calendar.inboxAdd")}
+            value={inboxDraft}
+            onChange={(event) => setInboxDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                handleAddInbox();
+              }
+            }}
+          />
+        </div>
+
+        {inboxRows.length === 0 ? (
+          <p className="todo-empty">{t("calendar.inboxEmpty")}</p>
+        ) : (
+          <div className="calendar-task-section-list">
+            {inboxRows.map((row) => (
+              <TodoItem
+                key={`inbox:${row.id}`}
+                item={row}
+                isOverdue={row.isOverdue}
+                onToggle={() => onToggleInboxTodo(row.id)}
+                onUpdate={(text) => onUpdateInboxTodo(row.id, text)}
+                onDelete={() => onDeleteInboxTodo(row.id)}
+                onSetDueDate={
+                  onSetInboxTodoDueDate
+                    ? (dueDateKey) => onSetInboxTodoDueDate(row.id, dueDateKey)
+                    : undefined
+                }
+              />
+            ))}
+          </div>
+        )}
+      </section>
+
       {openSections.map((section) => (
         <section key={section.key} className="calendar-task-section">
           <div className="calendar-task-section-header">
@@ -62,24 +124,27 @@ export default function AllTodosPanel({
           </div>
 
           <div className="calendar-task-section-list">
-            {section.items.map((row) => (
-              <TodoItem
-                key={`${row.sourceDateKey}:${row.id}`}
-                item={row}
-                sourceDateKey={row.sourceDateKey}
-                showSourceDate
-                isOverdue={row.isOverdue}
-                onToggle={() => onToggleTodo(row.sourceDateKey, row.id)}
-                onUpdate={(text) => onUpdateTodo(row.sourceDateKey, row.id, text)}
-                onDelete={() => onDeleteTodo(row.sourceDateKey, row.id)}
-                onSelectSourceDate={onOpenSourceDate}
-                onSetDueDate={
-                  onSetTodoDueDate
-                    ? (dueDateKey) => onSetTodoDueDate(row.sourceDateKey, row.id, dueDateKey)
-                    : undefined
-                }
-              />
-            ))}
+            {section.items.map((row) => {
+              const rowDateKey = row.sourceDateKey as string;
+              return (
+                <TodoItem
+                  key={`${rowDateKey}:${row.id}`}
+                  item={row}
+                  sourceDateKey={rowDateKey}
+                  showSourceDate
+                  isOverdue={row.isOverdue}
+                  onToggle={() => onToggleTodo(rowDateKey, row.id)}
+                  onUpdate={(text) => onUpdateTodo(rowDateKey, row.id, text)}
+                  onDelete={() => onDeleteTodo(rowDateKey, row.id)}
+                  onSelectSourceDate={onOpenSourceDate}
+                  onSetDueDate={
+                    onSetTodoDueDate
+                      ? (dueDateKey) => onSetTodoDueDate(rowDateKey, row.id, dueDateKey)
+                      : undefined
+                  }
+                />
+              );
+            })}
           </div>
         </section>
       ))}
@@ -93,6 +158,10 @@ export default function AllTodosPanel({
         onDeleteTodo={onDeleteTodo}
         onSetTodoDueDate={onSetTodoDueDate}
         onSelectSourceDate={onOpenSourceDate}
+        onToggleInboxTodo={onToggleInboxTodo}
+        onUpdateInboxTodo={onUpdateInboxTodo}
+        onDeleteInboxTodo={onDeleteInboxTodo}
+        onSetInboxTodoDueDate={onSetInboxTodoDueDate}
       />
     </div>
   );
