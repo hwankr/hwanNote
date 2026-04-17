@@ -6,6 +6,7 @@ export interface TodoItem {
   updatedAt: number;
   dueDateKey: string | null;
   completedAt: number | null;
+  showSpan?: boolean;
 }
 
 export interface DayTodos {
@@ -413,10 +414,14 @@ function normalizeTodoItem(value: unknown): TodoItem | null {
         ? normalized.updatedAt
         : null;
 
+  const rawShowSpan = isPlainObject(value) ? value.showSpan : undefined;
+  const showSpan = typeof rawShowSpan === "boolean" ? rawShowSpan : undefined;
+
   return {
     ...normalized,
     dueDateKey: normalizeDueDateKey(isPlainObject(value) ? value.dueDateKey : null),
     completedAt,
+    showSpan,
   };
 }
 
