@@ -119,6 +119,7 @@ export default function MonthGrid({
                 <DayCell
                   key={dateKey}
                   date={date}
+                  weekday={date.getDay()}
                   isCurrentMonth={date.getMonth() === month}
                   isToday={dateKey === today}
                   isSelected={dateKey === selectedDate}
