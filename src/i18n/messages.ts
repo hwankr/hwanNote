@@ -224,6 +224,11 @@ const messages = {
     "calendar.groupInbox": "날짜 없음",
     "settings.weekStartsOn": "주간 필터 시작 요일",
     "settings.weekStartsOnSunday": "일요일",
+    "calendar.spanLabel": "기간",
+    "calendar.spanOn": "표시",
+    "calendar.spanOff": "숨김",
+    "calendar.showSpan": "달력에 기간 표시",
+    "calendar.hideSpan": "달력에서 기간 숨김",
     "settings.weekStartsOnMonday": "월요일"
   },
   en: {
@@ -443,6 +448,11 @@ const messages = {
     "calendar.groupInbox": "Undated",
     "settings.weekStartsOn": "Weekly filter starts on",
     "settings.weekStartsOnSunday": "Sunday",
+    "calendar.spanLabel": "Span",
+    "calendar.spanOn": "On",
+    "calendar.spanOff": "Off",
+    "calendar.showSpan": "Show span on calendar",
+    "calendar.hideSpan": "Hide span on calendar",
     "settings.weekStartsOnMonday": "Monday"
   }
 } as const satisfies Record<AppLanguage, MessageDictionary>;
