@@ -11,7 +11,7 @@ interface TodoItemProps {
   onDelete: () => void;
   onSetDueDate?: (dueDateKey: string | null) => void;
   showSourceDate?: boolean;
-  sourceDateKey?: string;
+  sourceDateKey?: string | null;
   onSelectSourceDate?: (dateKey: string) => void;
   isOverdue?: boolean;
 }
