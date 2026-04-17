@@ -105,19 +105,19 @@
 /* —— Weekend day cells —— */
 
 .day-cell.sunday {
-  background: color-mix(in srgb, #e57373 6%, transparent);
+  background: var(--weekend-sunday-bg);
 }
 
 .day-cell.sunday .day-number {
-  color: #e57373;
+  color: var(--weekend-sunday-text);
 }
 
 .day-cell.saturday {
-  background: color-mix(in srgb, #64b5f6 7%, transparent);
+  background: var(--weekend-saturday-bg);
 }
 
 .day-cell.saturday .day-number {
-  color: #5aa8ed;
+  color: var(--weekend-saturday-text);
 }
 
 .day-cell.sunday:hover,
