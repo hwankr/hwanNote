@@ -137,6 +137,12 @@
   grid-template-columns: repeat(7, 1fr);
   gap: 1px;
   flex: 1;
+  position: relative;
+  padding-top: calc(var(--span-lanes, 0) * 18px);
+}
+
+.week-row.has-spans {
+  padding-top: calc(var(--span-lanes, 0) * 18px + 6px);
 }
 
 /* —— Day Cell —— */
@@ -803,4 +809,63 @@ button.todo-meta-chip.readonly {
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+
+/* —— Month grid span bars —— */
+
+.week-row-spans {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  column-gap: 1px;
+  padding: 2px 2px 0;
+  pointer-events: none;
+}
+
+.span-bar {
+  grid-row: 1;
+  margin-top: calc(var(--bar-lane, 0) * 18px);
+  height: 16px;
+  padding: 0 8px;
+  display: flex;
+  align-items: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--accent);
+  border-radius: 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: auto;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+}
+
+.span-bar.done {
+  opacity: 0.55;
+  text-decoration: line-through;
+}
+
+.span-bar.continues-left {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+.span-bar.continues-right {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+/* —— Span toggle chip in TodoItem —— */
+
+.todo-span-chip {
+  cursor: pointer;
+}
+
+.todo-span-chip.active {
+  border-color: var(--accent);
+  color: var(--accent);
 }
