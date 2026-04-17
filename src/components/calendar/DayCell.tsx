@@ -1,5 +1,6 @@
 interface DayCellProps {
   date: Date;
+  weekday: number; // 0 = Sunday … 6 = Saturday
   isCurrentMonth: boolean;
   isToday: boolean;
   isSelected: boolean;
@@ -14,6 +15,7 @@ const MAX_DOTS = 3;
 
 export default function DayCell({
   date,
+  weekday,
   isCurrentMonth,
   isToday,
   isSelected,
@@ -34,6 +36,8 @@ export default function DayCell({
       type="button"
       className={[
         "day-cell",
+        weekday === 0 && "sunday",
+        weekday === 6 && "saturday",
         !isCurrentMonth && "dimmed",
         isToday && "today",
         isSelected && "selected",
