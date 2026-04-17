@@ -52,24 +52,27 @@ export default function DateGroupedTodoList({
               <span className="day-group-count">{rows.length}</span>
             </div>
             <div className="calendar-day-group-list">
-              {rows.map((row) => (
-                <TodoItem
-                  key={`${row.sourceDateKey}:${row.id}`}
-                  item={row}
-                  sourceDateKey={row.sourceDateKey}
-                  showSourceDate={false}
-                  isOverdue={row.isOverdue}
-                  onToggle={() => onToggleTodo(row.sourceDateKey, row.id)}
-                  onUpdate={(text) => onUpdateTodo(row.sourceDateKey, row.id, text)}
-                  onDelete={() => onDeleteTodo(row.sourceDateKey, row.id)}
-                  onSelectSourceDate={onSelectSourceDate}
-                  onSetDueDate={
-                    onSetTodoDueDate
-                      ? (dueDateKey) => onSetTodoDueDate(row.sourceDateKey, row.id, dueDateKey)
-                      : undefined
-                  }
-                />
-              ))}
+              {rows.map((row) => {
+                const rowDateKey = row.sourceDateKey as string;
+                return (
+                  <TodoItem
+                    key={`${rowDateKey}:${row.id}`}
+                    item={row}
+                    sourceDateKey={rowDateKey}
+                    showSourceDate={false}
+                    isOverdue={row.isOverdue}
+                    onToggle={() => onToggleTodo(rowDateKey, row.id)}
+                    onUpdate={(text) => onUpdateTodo(rowDateKey, row.id, text)}
+                    onDelete={() => onDeleteTodo(rowDateKey, row.id)}
+                    onSelectSourceDate={onSelectSourceDate}
+                    onSetDueDate={
+                      onSetTodoDueDate
+                        ? (dueDateKey) => onSetTodoDueDate(rowDateKey, row.id, dueDateKey)
+                        : undefined
+                    }
+                  />
+                );
+              })}
             </div>
           </section>
         );
