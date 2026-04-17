@@ -102,6 +102,36 @@
   color: #64b5f6;
 }
 
+/* —— Weekend day cells —— */
+
+.day-cell.sunday {
+  background: color-mix(in srgb, #e57373 6%, transparent);
+}
+
+.day-cell.sunday .day-number {
+  color: #e57373;
+}
+
+.day-cell.saturday {
+  background: color-mix(in srgb, #64b5f6 7%, transparent);
+}
+
+.day-cell.saturday .day-number {
+  color: #5aa8ed;
+}
+
+.day-cell.sunday:hover,
+.day-cell.saturday:hover {
+  background: var(--bg-hover);
+}
+
+/* Today's circle should always win over weekend tint */
+.day-cell.today.sunday .day-number,
+.day-cell.today.saturday .day-number {
+  color: #fff;
+  background: var(--accent);
+}
+
 .week-row {
   display: grid;
   grid-template-columns: repeat(7, 1fr);
