@@ -39,6 +39,7 @@ interface CalendarStore {
   toggleTodo: (dateKey: string, todoId: string) => void;
   setTodoDueDate: (dateKey: string, todoId: string, dueDateKey: string | null) => void;
   clearTodoDueDate: (dateKey: string, todoId: string) => void;
+  setTodoShowSpan: (dateKey: string, todoId: string, showSpan: boolean) => void;
   createInboxTodo: (text: string) => void;
   updateInboxTodo: (todoId: string, updates: Partial<Pick<TodoItem, "text" | "done">>) => void;
   toggleInboxTodo: (todoId: string) => void;
@@ -254,6 +255,28 @@ export const useCalendarStore = create<CalendarStore>((set) => ({
       const item = day.items.find((t) => t.id === todoId);
       if (!item || item.dueDateKey === null) return false;
       item.dueDateKey = null;
+      item.updatedAt = Date.now();
+      return true;
+    });
+  },
+
+  setTodoShowSpan: (dateKey, todoId, showSpan) => {
+    mutateAndSave((data) => {
+      const day = data.todos[dateKey];
+      if (!day) return false;
+      const item = day.items.find((t) => t.id === todoId);
+      if (!item) return false;
+
+      const nextShowSpan = showSpan ? undefined : false;
+      if ((item.showSpan ?? undefined) === nextShowSpan) {
+        return false;
+      }
+
+      if (nextShowSpan === undefined) {
+        delete item.showSpan;
+      } else {
+        item.showSpan = nextShowSpan;
+      }
       item.updatedAt = Date.now();
       return true;
     });
