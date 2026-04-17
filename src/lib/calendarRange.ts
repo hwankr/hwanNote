@@ -77,8 +77,9 @@ export function selectPeriodTodos(
   done: CalendarTodoRow[];
 } {
   const dayIndex = new Set(days);
-  const rows = deriveCalendarTodoRows(data, { todayDateKey }).filter((row) =>
-    dayIndex.has(row.sourceDateKey)
+  const rows = deriveCalendarTodoRows(data, { todayDateKey }).filter(
+    (row): row is CalendarTodoRow & { sourceDateKey: string } =>
+      row.sourceDateKey !== null && dayIndex.has(row.sourceDateKey)
   );
 
   const openByDay: Record<string, CalendarTodoRow[]> = {};

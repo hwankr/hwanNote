@@ -217,6 +217,11 @@ const messages = {
     "calendar.weekViewSubtitle": "이번 주 할 일",
     "calendar.monthViewTitle": "{{year}}년 {{month}}",
     "calendar.monthViewSubtitle": "이번 달 할 일",
+    "calendar.inboxTitle": "날짜 없는 할 일",
+    "calendar.inboxSubtitle": "아직 날짜를 정하지 않은 할 일",
+    "calendar.inboxAdd": "날짜 없는 할 일 추가...",
+    "calendar.inboxEmpty": "날짜 없는 할 일이 없습니다.",
+    "calendar.groupInbox": "날짜 없음",
     "settings.weekStartsOn": "주의 시작 요일",
     "settings.weekStartsOnSunday": "일요일",
     "settings.weekStartsOnMonday": "월요일"
@@ -431,6 +436,11 @@ const messages = {
     "calendar.weekViewSubtitle": "Tasks for this week",
     "calendar.monthViewTitle": "{{month}} {{year}}",
     "calendar.monthViewSubtitle": "Tasks for this month",
+    "calendar.inboxTitle": "Undated tasks",
+    "calendar.inboxSubtitle": "Tasks with no scheduled day",
+    "calendar.inboxAdd": "Add an undated task...",
+    "calendar.inboxEmpty": "No undated tasks.",
+    "calendar.groupInbox": "Undated",
     "settings.weekStartsOn": "Week starts on",
     "settings.weekStartsOnSunday": "Sunday",
     "settings.weekStartsOnMonday": "Monday"

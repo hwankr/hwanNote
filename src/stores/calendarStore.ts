@@ -39,6 +39,11 @@ interface CalendarStore {
   toggleTodo: (dateKey: string, todoId: string) => void;
   setTodoDueDate: (dateKey: string, todoId: string, dueDateKey: string | null) => void;
   clearTodoDueDate: (dateKey: string, todoId: string) => void;
+  createInboxTodo: (text: string) => void;
+  updateInboxTodo: (todoId: string, updates: Partial<Pick<TodoItem, "text" | "done">>) => void;
+  toggleInboxTodo: (todoId: string) => void;
+  deleteInboxTodo: (todoId: string) => void;
+  setInboxTodoDueDate: (todoId: string, dueDateKey: string | null) => void;
 
   addNoteLink: (dateKey: string, noteId: string) => void;
   removeNoteLink: (dateKey: string, noteId: string) => void;
@@ -249,6 +254,88 @@ export const useCalendarStore = create<CalendarStore>((set) => ({
       const item = day.items.find((t) => t.id === todoId);
       if (!item || item.dueDateKey === null) return false;
       item.dueDateKey = null;
+      item.updatedAt = Date.now();
+      return true;
+    });
+  },
+
+  createInboxTodo: (text) => {
+    mutateAndSave((data) => {
+      const now = Date.now();
+      data.inbox.push({
+        id: generateTodoId(),
+        text,
+        done: false,
+        createdAt: now,
+        updatedAt: now,
+        dueDateKey: null,
+        completedAt: null,
+      });
+      return true;
+    });
+  },
+
+  updateInboxTodo: (todoId, updates) => {
+    mutateAndSave((data) => {
+      const item = data.inbox.find((t) => t.id === todoId);
+      if (!item) return false;
+
+      let changed = false;
+      if (updates.text !== undefined && updates.text !== item.text) {
+        item.text = updates.text;
+        changed = true;
+      }
+      if (updates.done !== undefined && updates.done !== item.done) {
+        item.done = updates.done;
+        item.completedAt = updates.done ? Date.now() : null;
+        changed = true;
+      }
+      if (!changed) {
+        return false;
+      }
+      item.updatedAt = Date.now();
+      return true;
+    });
+  },
+
+  toggleInboxTodo: (todoId) => {
+    mutateAndSave((data) => {
+      const item = data.inbox.find((t) => t.id === todoId);
+      if (!item) return false;
+      item.done = !item.done;
+      const now = Date.now();
+      item.completedAt = item.done ? now : null;
+      item.updatedAt = now;
+      return true;
+    });
+  },
+
+  deleteInboxTodo: (todoId) => {
+    mutateAndSave((data) => {
+      const nextInbox = data.inbox.filter((t) => t.id !== todoId);
+      if (nextInbox.length === data.inbox.length) {
+        return false;
+      }
+      data.inbox = nextInbox;
+      return true;
+    });
+  },
+
+  setInboxTodoDueDate: (todoId, dueDateKey) => {
+    mutateAndSave((data) => {
+      const item = data.inbox.find((t) => t.id === todoId);
+      if (!item) return false;
+
+      if (dueDateKey !== null && !isDateKey(dueDateKey)) {
+        console.warn("Ignored invalid dueDateKey update:", dueDateKey);
+        return false;
+      }
+
+      if (item.dueDateKey === dueDateKey) {
+        return false;
+      }
+
+      item.dueDateKey = dueDateKey;
       item.updatedAt = Date.now();
       return true;
     });

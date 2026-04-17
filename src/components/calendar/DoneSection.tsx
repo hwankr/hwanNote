@@ -10,13 +10,16 @@ import TodoItem from "./TodoItem";
 type DoneSectionProps = {
   rows: CalendarTodoRow[];
   todayDateKey: string;
-  /** When true, show a "recent 7 days / all" filter when expanded. */
   enableRecencyFilter?: boolean;
   onToggleTodo: (dateKey: string, todoId: string) => void;
   onUpdateTodo: (dateKey: string, todoId: string, text: string) => void;
   onDeleteTodo: (dateKey: string, todoId: string) => void;
   onSetTodoDueDate?: (dateKey: string, todoId: string, dueDateKey: string | null) => void;
   onSelectSourceDate?: (dateKey: string) => void;
+  onToggleInboxTodo?: (todoId: string) => void;
+  onUpdateInboxTodo?: (todoId: string, text: string) => void;
+  onDeleteInboxTodo?: (todoId: string) => void;
+  onSetInboxTodoDueDate?: (todoId: string, dueDateKey: string | null) => void;
 };
 
 export default function DoneSection({
@@ -28,6 +31,10 @@ export default function DoneSection({
   onDeleteTodo,
   onSetTodoDueDate,
   onSelectSourceDate,
+  onToggleInboxTodo,
+  onUpdateInboxTodo,
+  onDeleteInboxTodo,
+  onSetInboxTodoDueDate,
 }: DoneSectionProps) {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(false);
@@ -97,24 +104,41 @@ export default function DoneSection({
           )}
 
           <div className="done-section-list">
-            {visibleRows.map((row) => (
-              <TodoItem
-                key={`${row.sourceDateKey}:${row.id}`}
-                item={row}
-                sourceDateKey={row.sourceDateKey}
-                showSourceDate={showSourceDate}
-                isOverdue={false}
-                onToggle={() => onToggleTodo(row.sourceDateKey, row.id)}
-                onUpdate={(text) => onUpdateTodo(row.sourceDateKey, row.id, text)}
-                onDelete={() => onDeleteTodo(row.sourceDateKey, row.id)}
-                onSelectSourceDate={onSelectSourceDate}
-                onSetDueDate={
-                  onSetTodoDueDate
-                    ? (dueDateKey) => onSetTodoDueDate(row.sourceDateKey, row.id, dueDateKey)
-                    : undefined
-                }
-              />
-            ))}
+            {visibleRows.map((row) => {
+              const key = row.isInbox ? `inbox:${row.id}` : `${row.sourceDateKey}:${row.id}`;
+              const handleToggle = row.isInbox
+                ? () => onToggleInboxTodo?.(row.id)
+                : () => onToggleTodo(row.sourceDateKey as string, row.id);
+              const handleUpdate = row.isInbox
+                ? (text: string) => onUpdateInboxTodo?.(row.id, text)
+                : (text: string) => onUpdateTodo(row.sourceDateKey as string, row.id, text);
+              const handleDelete = row.isInbox
+                ? () => onDeleteInboxTodo?.(row.id)
+                : () => onDeleteTodo(row.sourceDateKey as string, row.id);
+              const handleSetDueDate = row.isInbox
+                ? onSetInboxTodoDueDate
+                  ? (dueDateKey: string | null) => onSetInboxTodoDueDate(row.id, dueDateKey)
+                  : undefined
+                : onSetTodoDueDate
+                  ? (dueDateKey: string | null) =>
+                      onSetTodoDueDate(row.sourceDateKey as string, row.id, dueDateKey)
+                  : undefined;
+
+              return (
+                <TodoItem
+                  key={key}
+                  item={row}
+                  sourceDateKey={row.sourceDateKey ?? undefined}
+                  showSourceDate={showSourceDate && !row.isInbox}
+                  isOverdue={false}
+                  onToggle={handleToggle}
+                  onUpdate={handleUpdate}
+                  onDelete={handleDelete}
+                  onSelectSourceDate={onSelectSourceDate}
+                  onSetDueDate={handleSetDueDate}
+                />
+              );
+            })}
           </div>
         </div>
       )}

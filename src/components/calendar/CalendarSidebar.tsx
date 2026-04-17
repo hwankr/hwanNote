@@ -36,6 +36,11 @@ interface CalendarSidebarProps {
   onUpdateTodo: (dateKey: string, todoId: string, text: string) => void;
   onDeleteTodo: (dateKey: string, todoId: string) => void;
   onSetTodoDueDate?: (dateKey: string, todoId: string, dueDateKey: string | null) => void;
+  onCreateInboxTodo: (text: string) => void;
+  onToggleInboxTodo: (todoId: string) => void;
+  onUpdateInboxTodo: (todoId: string, text: string) => void;
+  onDeleteInboxTodo: (todoId: string) => void;
+  onSetInboxTodoDueDate?: (todoId: string, dueDateKey: string | null) => void;
   onNavigateToNote: (noteId: string) => void;
   noteTitle: (noteId: string) => string;
   onOpenDay: (dateKey: string) => void;
@@ -59,6 +64,11 @@ export default function CalendarSidebar({
   onUpdateTodo,
   onDeleteTodo,
   onSetTodoDueDate,
+  onCreateInboxTodo,
+  onToggleInboxTodo,
+  onUpdateInboxTodo,
+  onDeleteInboxTodo,
+  onSetInboxTodoDueDate,
   onNavigateToNote,
   noteTitle,
   onOpenDay,
@@ -192,6 +202,11 @@ export default function CalendarSidebar({
             onDeleteTodo={onDeleteTodo}
             onSetTodoDueDate={onSetTodoDueDate}
             onOpenSourceDate={onOpenDay}
+            onCreateInboxTodo={onCreateInboxTodo}
+            onToggleInboxTodo={onToggleInboxTodo}
+            onUpdateInboxTodo={onUpdateInboxTodo}
+            onDeleteInboxTodo={onDeleteInboxTodo}
+            onSetInboxTodoDueDate={onSetInboxTodoDueDate}
           />
         )}
       </div>

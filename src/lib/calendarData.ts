@@ -32,9 +32,22 @@ export interface CalendarDataV2 {
   noteLinks: Record<string, string[]>;
 }
 
-export type CalendarData = CalendarDataV2;
+export interface CalendarDataV3 {
+  version: 3;
+  todos: Record<string, DayTodos>;
+  inbox: TodoItem[];
+  noteLinks: Record<string, string[]>;
+}
 
-export type CalendarTodoGroup = "overdue" | "dueSoon" | "upcoming" | "noDueDate" | "done";
+export type CalendarData = CalendarDataV3;
+
+export type CalendarTodoGroup =
+  | "overdue"
+  | "dueSoon"
+  | "upcoming"
+  | "inbox"
+  | "noDueDate"
+  | "done";
 
 export interface CalendarTodoRow {
   id: string;
@@ -42,10 +55,11 @@ export interface CalendarTodoRow {
   done: boolean;
   createdAt: number;
   updatedAt: number;
-  sourceDateKey: string;
+  sourceDateKey: string | null;
   dueDateKey: string | null;
   hasDueDate: boolean;
   isOverdue: boolean;
+  isInbox: boolean;
   completedAt: number | null;
 }
 
@@ -54,18 +68,19 @@ export interface CalendarTodoQueryOptions {
   dueSoonDays?: number;
 }
 
-export const CALENDAR_DATA_VERSION = 2;
+export const CALENDAR_DATA_VERSION = 3;
 export const DEFAULT_DUE_SOON_DAYS = 7;
 export const CALENDAR_TODO_GROUP_ORDER: CalendarTodoGroup[] = [
   "overdue",
   "dueSoon",
   "upcoming",
+  "inbox",
   "noDueDate",
   "done",
 ];
 
 export function createEmptyCalendarData(): CalendarData {
-  return { version: CALENDAR_DATA_VERSION, todos: {}, noteLinks: {} };
+  return { version: CALENDAR_DATA_VERSION, todos: {}, inbox: [], noteLinks: {} };
 }
 
 export function parseCalendarData(raw: string): CalendarData {
@@ -82,15 +97,25 @@ export function parseCalendarData(raw: string): CalendarData {
     }
 
     if (parsed.version === 1) {
-      return migrateCalendarDataV1ToV2(parsed);
+      return migrateCalendarDataV2ToV3({
+        ...migrateCalendarDataV1ToV2(parsed),
+        version: 2,
+      });
+    }
+
+    if (parsed.version === 2) {
+      return migrateCalendarDataV2ToV3(parsed);
     }
 
     if (parsed.version === CALENDAR_DATA_VERSION) {
-      return normalizeCalendarDataV2(parsed);
+      return normalizeCalendarDataV3(parsed);
     }
 
     if (parsed.version === undefined && ("todos" in parsed || "noteLinks" in parsed)) {
-      return migrateCalendarDataV1ToV2(parsed);
+      return migrateCalendarDataV2ToV3({
+        ...migrateCalendarDataV1ToV2(parsed),
+        version: 2,
+      });
     }
 
     if (typeof parsed.version !== "number") {
@@ -103,7 +128,7 @@ export function parseCalendarData(raw: string): CalendarData {
       return createEmptyCalendarData();
     }
 
-    return normalizeCalendarDataV2(parsed);
+    return normalizeCalendarDataV3(parsed);
   } catch (error) {
     console.error("calendar.json: parse error, returning empty data", error);
     return createEmptyCalendarData();
@@ -155,8 +180,8 @@ export function deriveCalendarTodoRows(
 ): CalendarTodoRow[] {
   const todayDateKey = options.todayDateKey ?? formatDateKey(new Date());
 
-  return Object.entries(data.todos).flatMap(([sourceDateKey, day]) =>
-    day.items.map((todo) => ({
+  const datedRows = Object.entries(data.todos).flatMap(([sourceDateKey, day]) =>
+    day.items.map<CalendarTodoRow>((todo) => ({
       id: todo.id,
       text: todo.text,
       done: todo.done,
@@ -166,13 +191,30 @@ export function deriveCalendarTodoRows(
       dueDateKey: todo.dueDateKey,
       hasDueDate: todo.dueDateKey !== null,
       isOverdue: isTodoOverdue(todo, todayDateKey),
+      isInbox: false,
       completedAt: todo.completedAt,
     }))
   );
+
+  const inboxRows = data.inbox.map<CalendarTodoRow>((todo) => ({
+    id: todo.id,
+    text: todo.text,
+    done: todo.done,
+    createdAt: todo.createdAt,
+    updatedAt: todo.updatedAt,
+    sourceDateKey: null,
+    dueDateKey: todo.dueDateKey,
+    hasDueDate: todo.dueDateKey !== null,
+    isOverdue: isTodoOverdue(todo, todayDateKey),
+    isInbox: true,
+    completedAt: todo.completedAt,
+  }));
+
+  return [...datedRows, ...inboxRows];
 }
 
 export function getCalendarTodoGroup(
-  row: Pick<CalendarTodoRow, "done" | "dueDateKey">,
+  row: Pick<CalendarTodoRow, "done" | "dueDateKey" | "isInbox">,
   options: CalendarTodoQueryOptions = {}
 ): CalendarTodoGroup {
   if (row.done) {
@@ -186,7 +228,7 @@ export function getCalendarTodoGroup(
   }
 
   if (row.dueDateKey === null) {
-    return "noDueDate";
+    return row.isInbox ? "inbox" : "noDueDate";
   }
 
   const dueSoonDays = Math.max(0, options.dueSoonDays ?? DEFAULT_DUE_SOON_DAYS);
@@ -218,9 +260,13 @@ export function compareCalendarTodoRows(
     }
   }
 
-  const sourceDateDelta = left.sourceDateKey.localeCompare(right.sourceDateKey);
-  if (sourceDateDelta !== 0) {
-    return sourceDateDelta;
+  if (left.sourceDateKey !== right.sourceDateKey) {
+    if (left.sourceDateKey === null) return 1;
+    if (right.sourceDateKey === null) return -1;
+    const sourceDateDelta = left.sourceDateKey.localeCompare(right.sourceDateKey);
+    if (sourceDateDelta !== 0) {
+      return sourceDateDelta;
+    }
   }
 
   const updatedDelta = right.updatedAt - left.updatedAt;
@@ -261,25 +307,45 @@ function createEmptyCalendarTodoGroups(): Record<CalendarTodoGroup, CalendarTodo
     overdue: [],
     dueSoon: [],
     upcoming: [],
+    inbox: [],
     noDueDate: [],
     done: [],
   };
 }
 
-function migrateCalendarDataV1ToV2(value: unknown): CalendarData {
+function migrateCalendarDataV1ToV2(value: unknown): CalendarDataV2 {
   return {
-    version: CALENDAR_DATA_VERSION,
+    version: 2,
     todos: normalizeTodosRecord(value, normalizeLegacyTodoItem),
     noteLinks: normalizeNoteLinksRecord(value),
   };
 }
 
-function normalizeCalendarDataV2(value: unknown): CalendarData {
+function migrateCalendarDataV2ToV3(value: unknown): CalendarData {
   return {
     version: CALENDAR_DATA_VERSION,
     todos: normalizeTodosRecord(value, normalizeTodoItem),
+    inbox: [],
     noteLinks: normalizeNoteLinksRecord(value),
   };
+}
+
+function normalizeCalendarDataV3(value: unknown): CalendarData {
+  return {
+    version: CALENDAR_DATA_VERSION,
+    todos: normalizeTodosRecord(value, normalizeTodoItem),
+    inbox: normalizeInboxArray(value),
+    noteLinks: normalizeNoteLinksRecord(value),
+  };
+}
+
+function normalizeInboxArray(value: unknown): TodoItem[] {
+  if (!isPlainObject(value) || !Array.isArray(value.inbox)) {
+    return [];
+  }
+  return value.inbox
+    .map(normalizeTodoItem)
+    .filter((todo): todo is TodoItem => todo !== null);
 }
 
 function normalizeTodosRecord(
