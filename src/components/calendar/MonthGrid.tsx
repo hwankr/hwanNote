@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { useI18n } from "../../i18n/context";
 import { formatDateKey } from "../../lib/calendarData";
 import type { CalendarData } from "../../lib/calendarData";
+import { computeWeekSpanBars, type WeekSpanBar } from "../../lib/calendarSpans";
 import DayCell from "./DayCell";
 
 interface MonthGridProps {
@@ -51,6 +52,11 @@ export default function MonthGrid({
 
   const weeks = useMemo(() => getMonthGrid(year, month), [year, month]);
 
+  const weekSpans = useMemo(
+    () => weeks.map((week) => computeWeekSpanBars(data, week)),
+    [weeks, data]
+  );
+
   const today = useMemo(() => formatDateKey(new Date()), []);
 
   const monthLabel = useMemo(() => {
@@ -98,34 +104,78 @@ export default function MonthGrid({
           ))}
         </div>
 
-        {weeks.map((week, wi) => (
-          <div key={wi} className="week-row">
-            {week.map((date) => {
-              const dateKey = formatDateKey(date);
-              const items = data.todos[dateKey]?.items ?? [];
-              const doneCount = items.filter((t) => t.done).length;
-              const openCount = items.length - doneCount;
-              const hasNoteLinks = (data.noteLinks[dateKey]?.length ?? 0) > 0;
+        {weeks.map((week, wi) => {
+          const { bars, laneCount } = weekSpans[wi];
+          return (
+            <div
+              key={wi}
+              className={`week-row${laneCount > 0 ? " has-spans" : ""}`}
+              style={{ "--span-lanes": laneCount } as React.CSSProperties}
+            >
+              {laneCount > 0 && (
+                <div className="week-row-spans" aria-hidden="true">
+                  {bars.map((bar) => (
+                    <SpanBar key={`${bar.sourceDateKey}:${bar.todoId}`} bar={bar} />
+                  ))}
+                </div>
+              )}
+              {week.map((date) => {
+                const dateKey = formatDateKey(date);
+                const items = data.todos[dateKey]?.items ?? [];
+                const doneCount = items.filter((t) => t.done).length;
+                const openCount = items.length - doneCount;
+                const hasNoteLinks = (data.noteLinks[dateKey]?.length ?? 0) > 0;
 
-              return (
-                <DayCell
-                  key={dateKey}
-                  date={date}
-                  weekday={date.getDay()}
-                  isCurrentMonth={date.getMonth() === month}
-                  isToday={dateKey === today}
-                  isSelected={dateKey === selectedDate}
-                  openCount={openCount}
-                  doneCount={doneCount}
-                  hasNoteLinks={hasNoteLinks}
-                  onClick={() => onSelectDate(dateKey)}
-                  onDoubleClick={() => onOpenDay(dateKey)}
-                />
-              );
-            })}
-          </div>
-        ))}
+                return (
+                  <DayCell
+                    key={dateKey}
+                    date={date}
+                    weekday={date.getDay()}
+                    isCurrentMonth={date.getMonth() === month}
+                    isToday={dateKey === today}
+                    isSelected={dateKey === selectedDate}
+                    openCount={openCount}
+                    doneCount={doneCount}
+                    hasNoteLinks={hasNoteLinks}
+                    onClick={() => onSelectDate(dateKey)}
+                    onDoubleClick={() => onOpenDay(dateKey)}
+                  />
+                );
+              })}
+            </div>
+          );
+        })}
       </div>
+    </div>
+  );
+}
+
+interface SpanBarProps {
+  bar: WeekSpanBar;
+}
+
+function SpanBar({ bar }: SpanBarProps) {
+  const classes = [
+    "span-bar",
+    bar.done && "done",
+    bar.continuesLeft && "continues-left",
+    bar.continuesRight && "continues-right",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  const gridColumn = `${bar.startColumn + 1} / ${bar.endColumn + 2}`;
+
+  return (
+    <div
+      className={classes}
+      style={{
+        gridColumn,
+        ["--bar-lane" as string]: bar.lane,
+      } as React.CSSProperties}
+      title={bar.text}
+    >
+      {bar.text}
     </div>
   );
 }
