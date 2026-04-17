@@ -2,14 +2,12 @@ import { useMemo } from "react";
 import { useI18n } from "../../i18n/context";
 import { formatDateKey } from "../../lib/calendarData";
 import type { CalendarData } from "../../lib/calendarData";
-import type { WeekStart } from "../../lib/calendarRange";
 import DayCell from "./DayCell";
 
 interface MonthGridProps {
   currentMonth: Date;
   selectedDate: string;
   data: CalendarData;
-  weekStartsOn: WeekStart;
   onSelectDate: (dateKey: string) => void;
   onOpenDay: (dateKey: string) => void;
   onPrevMonth: () => void;
@@ -17,9 +15,9 @@ interface MonthGridProps {
   onToday: () => void;
 }
 
-function getMonthGrid(year: number, month: number, weekStartsOn: WeekStart): Date[][] {
+function getMonthGrid(year: number, month: number): Date[][] {
   const firstDay = new Date(year, month, 1);
-  const startOffset = (firstDay.getDay() - weekStartsOn + 7) % 7;
+  const startOffset = firstDay.getDay(); // 0 = Sunday
 
   const weeks: Date[][] = [];
   let current = new Date(year, month, 1 - startOffset);
@@ -40,7 +38,6 @@ export default function MonthGrid({
   currentMonth,
   selectedDate,
   data,
-  weekStartsOn,
   onSelectDate,
   onOpenDay,
   onPrevMonth,
@@ -52,7 +49,7 @@ export default function MonthGrid({
   const year = currentMonth.getFullYear();
   const month = currentMonth.getMonth();
 
-  const weeks = useMemo(() => getMonthGrid(year, month, weekStartsOn), [year, month, weekStartsOn]);
+  const weeks = useMemo(() => getMonthGrid(year, month), [year, month]);
 
   const today = useMemo(() => formatDateKey(new Date()), []);
 
@@ -63,7 +60,7 @@ export default function MonthGrid({
     });
   }, [currentMonth]);
 
-  const allDayHeaders = [
+  const dayHeaders = [
     { label: t("calendar.sunday"), type: "sunday" },
     { label: t("calendar.monday"), type: "" },
     { label: t("calendar.tuesday"), type: "" },
@@ -71,11 +68,6 @@ export default function MonthGrid({
     { label: t("calendar.thursday"), type: "" },
     { label: t("calendar.friday"), type: "" },
     { label: t("calendar.saturday"), type: "saturday" },
-  ];
-
-  const dayHeaders = [
-    ...allDayHeaders.slice(weekStartsOn),
-    ...allDayHeaders.slice(0, weekStartsOn),
   ];
 
   return (

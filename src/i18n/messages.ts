@@ -222,7 +222,7 @@ const messages = {
     "calendar.inboxAdd": "날짜 없는 할 일 추가...",
     "calendar.inboxEmpty": "날짜 없는 할 일이 없습니다.",
     "calendar.groupInbox": "날짜 없음",
-    "settings.weekStartsOn": "주의 시작 요일",
+    "settings.weekStartsOn": "주간 필터 시작 요일",
     "settings.weekStartsOnSunday": "일요일",
     "settings.weekStartsOnMonday": "월요일"
   },
@@ -441,7 +441,7 @@ const messages = {
     "calendar.inboxAdd": "Add an undated task...",
     "calendar.inboxEmpty": "No undated tasks.",
     "calendar.groupInbox": "Undated",
-    "settings.weekStartsOn": "Week starts on",
+    "settings.weekStartsOn": "Weekly filter starts on",
     "settings.weekStartsOnSunday": "Sunday",
     "settings.weekStartsOnMonday": "Monday"
   }
