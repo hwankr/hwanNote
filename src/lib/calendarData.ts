@@ -41,7 +41,13 @@ export interface CalendarDataV3 {
 
 export type CalendarData = CalendarDataV3;
 
-export type CalendarTodoGroup = "overdue" | "dueSoon" | "upcoming" | "noDueDate" | "done";
+export type CalendarTodoGroup =
+  | "overdue"
+  | "dueSoon"
+  | "upcoming"
+  | "inbox"
+  | "noDueDate"
+  | "done";
 
 export interface CalendarTodoRow {
   id: string;
@@ -49,10 +55,11 @@ export interface CalendarTodoRow {
   done: boolean;
   createdAt: number;
   updatedAt: number;
-  sourceDateKey: string;
+  sourceDateKey: string | null;
   dueDateKey: string | null;
   hasDueDate: boolean;
   isOverdue: boolean;
+  isInbox: boolean;
   completedAt: number | null;
 }
 
@@ -67,6 +74,7 @@ export const CALENDAR_TODO_GROUP_ORDER: CalendarTodoGroup[] = [
   "overdue",
   "dueSoon",
   "upcoming",
+  "inbox",
   "noDueDate",
   "done",
 ];
@@ -172,8 +180,8 @@ export function deriveCalendarTodoRows(
 ): CalendarTodoRow[] {
   const todayDateKey = options.todayDateKey ?? formatDateKey(new Date());
 
-  return Object.entries(data.todos).flatMap(([sourceDateKey, day]) =>
-    day.items.map((todo) => ({
+  const datedRows = Object.entries(data.todos).flatMap(([sourceDateKey, day]) =>
+    day.items.map<CalendarTodoRow>((todo) => ({
       id: todo.id,
       text: todo.text,
       done: todo.done,
@@ -183,13 +191,30 @@ export function deriveCalendarTodoRows(
       dueDateKey: todo.dueDateKey,
       hasDueDate: todo.dueDateKey !== null,
       isOverdue: isTodoOverdue(todo, todayDateKey),
+      isInbox: false,
       completedAt: todo.completedAt,
     }))
   );
+
+  const inboxRows = data.inbox.map<CalendarTodoRow>((todo) => ({
+    id: todo.id,
+    text: todo.text,
+    done: todo.done,
+    createdAt: todo.createdAt,
+    updatedAt: todo.updatedAt,
+    sourceDateKey: null,
+    dueDateKey: todo.dueDateKey,
+    hasDueDate: todo.dueDateKey !== null,
+    isOverdue: isTodoOverdue(todo, todayDateKey),
+    isInbox: true,
+    completedAt: todo.completedAt,
+  }));
+
+  return [...datedRows, ...inboxRows];
 }
 
 export function getCalendarTodoGroup(
-  row: Pick<CalendarTodoRow, "done" | "dueDateKey">,
+  row: Pick<CalendarTodoRow, "done" | "dueDateKey" | "isInbox">,
   options: CalendarTodoQueryOptions = {}
 ): CalendarTodoGroup {
   if (row.done) {
@@ -203,7 +228,7 @@ export function getCalendarTodoGroup(
   }
 
   if (row.dueDateKey === null) {
-    return "noDueDate";
+    return row.isInbox ? "inbox" : "noDueDate";
   }
 
   const dueSoonDays = Math.max(0, options.dueSoonDays ?? DEFAULT_DUE_SOON_DAYS);
@@ -235,9 +260,13 @@ export function compareCalendarTodoRows(
     }
   }
 
-  const sourceDateDelta = left.sourceDateKey.localeCompare(right.sourceDateKey);
-  if (sourceDateDelta !== 0) {
-    return sourceDateDelta;
+  if (left.sourceDateKey !== right.sourceDateKey) {
+    if (left.sourceDateKey === null) return 1;
+    if (right.sourceDateKey === null) return -1;
+    const sourceDateDelta = left.sourceDateKey.localeCompare(right.sourceDateKey);
+    if (sourceDateDelta !== 0) {
+      return sourceDateDelta;
+    }
   }
 
   const updatedDelta = right.updatedAt - left.updatedAt;
@@ -278,6 +307,7 @@ function createEmptyCalendarTodoGroups(): Record<CalendarTodoGroup, CalendarTodo
     overdue: [],
     dueSoon: [],
     upcoming: [],
+    inbox: [],
     noDueDate: [],
     done: [],
   };
