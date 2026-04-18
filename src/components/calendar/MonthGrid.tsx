@@ -123,6 +123,7 @@ export default function MonthGrid({
                       isHighlighted={hoveredTodoId === bar.todoId}
                       onHoverStart={() => setHoveredTodoId(bar.todoId)}
                       onHoverEnd={() => setHoveredTodoId(null)}
+                      onOpen={() => onOpenDay(bar.sourceDateKey)}
                     />
                   ))}
                 </div>
@@ -173,9 +174,10 @@ interface SpanBarProps {
   isHighlighted: boolean;
   onHoverStart: () => void;
   onHoverEnd: () => void;
+  onOpen: () => void;
 }
 
-function SpanBar({ bar, isHighlighted, onHoverStart, onHoverEnd }: SpanBarProps) {
+function SpanBar({ bar, isHighlighted, onHoverStart, onHoverEnd, onOpen }: SpanBarProps) {
   const classes = [
     "span-bar",
     bar.done && "done",
@@ -191,6 +193,8 @@ function SpanBar({ bar, isHighlighted, onHoverStart, onHoverEnd }: SpanBarProps)
 
   return (
     <div
+      role="button"
+      tabIndex={0}
       className={classes}
       style={{
         gridColumn,
@@ -200,6 +204,16 @@ function SpanBar({ bar, isHighlighted, onHoverStart, onHoverEnd }: SpanBarProps)
       title={bar.text}
       onMouseEnter={onHoverStart}
       onMouseLeave={onHoverEnd}
+      onClick={(event) => {
+        event.stopPropagation();
+        onOpen();
+      }}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onOpen();
+        }
+      }}
     />
   );
 }
