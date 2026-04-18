@@ -138,11 +138,11 @@
   gap: 1px;
   flex: 1;
   position: relative;
-  padding-top: calc(var(--span-lanes, 0) * 18px);
+  padding-top: calc(var(--span-lanes, 0) * 10px);
 }
 
 .week-row.has-spans {
-  padding-top: calc(var(--span-lanes, 0) * 18px + 6px);
+  padding-top: calc(var(--span-lanes, 0) * 10px + 4px);
 }
 
 /* —— Day Cell —— */
@@ -813,6 +813,15 @@ button.todo-meta-chip.readonly {
 
 /* —— Month grid span bars —— */
 
+:root {
+  --span-palette-0: #60a5fa;
+  --span-palette-1: #34d399;
+  --span-palette-2: #fbbf24;
+  --span-palette-3: #f472b6;
+  --span-palette-4: #a78bfa;
+  --span-palette-5: #fb923c;
+}
+
 .week-row-spans {
   position: absolute;
   top: 0;
@@ -827,26 +836,18 @@ button.todo-meta-chip.readonly {
 
 .span-bar {
   grid-row: 1;
-  margin-top: calc(var(--bar-lane, 0) * 18px);
-  height: 16px;
-  padding: 0 8px;
-  display: flex;
-  align-items: center;
-  font-size: 11px;
-  font-weight: 600;
-  color: #fff;
-  background: var(--accent);
-  border-radius: 8px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  margin-top: calc(var(--bar-lane, 0) * 10px);
+  height: 7px;
+  padding: 0;
+  display: block;
+  background: var(--bar-color, var(--accent));
+  border-radius: 4px;
   pointer-events: auto;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+  opacity: 0.85;
 }
 
 .span-bar.done {
-  opacity: 0.55;
-  text-decoration: line-through;
+  opacity: 0.35;
 }
 
 .span-bar.continues-left {

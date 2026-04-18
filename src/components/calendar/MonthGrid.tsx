@@ -150,6 +150,16 @@ export default function MonthGrid({
   );
 }
 
+const SPAN_PALETTE_SIZE = 6;
+
+function hashTodoIdToPalette(todoId: string): number {
+  let hash = 0;
+  for (let i = 0; i < todoId.length; i++) {
+    hash = ((hash << 5) - hash + todoId.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash) % SPAN_PALETTE_SIZE;
+}
+
 interface SpanBarProps {
   bar: WeekSpanBar;
 }
@@ -165,6 +175,7 @@ function SpanBar({ bar }: SpanBarProps) {
     .join(" ");
 
   const gridColumn = `${bar.startColumn + 1} / ${bar.endColumn + 2}`;
+  const colorIndex = hashTodoIdToPalette(bar.todoId);
 
   return (
     <div
@@ -172,10 +183,9 @@ function SpanBar({ bar }: SpanBarProps) {
       style={{
         gridColumn,
         ["--bar-lane" as string]: bar.lane,
+        ["--bar-color" as string]: `var(--span-palette-${colorIndex})`,
       } as React.CSSProperties}
       title={bar.text}
-    >
-      {bar.text}
-    </div>
+    />
   );
 }
