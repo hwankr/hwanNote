@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useI18n } from "../../i18n/context";
 import { formatDateKey } from "../../lib/calendarData";
 import type { CalendarData } from "../../lib/calendarData";
@@ -46,6 +46,8 @@ export default function MonthGrid({
   onToday,
 }: MonthGridProps) {
   const { t } = useI18n();
+
+  const [hoveredTodoId, setHoveredTodoId] = useState<string | null>(null);
 
   const year = currentMonth.getFullYear();
   const month = currentMonth.getMonth();
@@ -115,7 +117,13 @@ export default function MonthGrid({
               {laneCount > 0 && (
                 <div className="week-row-spans" aria-hidden="true">
                   {bars.map((bar) => (
-                    <SpanBar key={`${bar.sourceDateKey}:${bar.todoId}`} bar={bar} />
+                    <SpanBar
+                      key={`${bar.sourceDateKey}:${bar.todoId}`}
+                      bar={bar}
+                      isHighlighted={hoveredTodoId === bar.todoId}
+                      onHoverStart={() => setHoveredTodoId(bar.todoId)}
+                      onHoverEnd={() => setHoveredTodoId(null)}
+                    />
                   ))}
                 </div>
               )}
@@ -162,14 +170,18 @@ function hashTodoIdToPalette(todoId: string): number {
 
 interface SpanBarProps {
   bar: WeekSpanBar;
+  isHighlighted: boolean;
+  onHoverStart: () => void;
+  onHoverEnd: () => void;
 }
 
-function SpanBar({ bar }: SpanBarProps) {
+function SpanBar({ bar, isHighlighted, onHoverStart, onHoverEnd }: SpanBarProps) {
   const classes = [
     "span-bar",
     bar.done && "done",
     bar.continuesLeft && "continues-left",
     bar.continuesRight && "continues-right",
+    isHighlighted && "highlighted",
   ]
     .filter(Boolean)
     .join(" ");
@@ -186,6 +198,8 @@ function SpanBar({ bar }: SpanBarProps) {
         ["--bar-color" as string]: `var(--span-palette-${colorIndex})`,
       } as React.CSSProperties}
       title={bar.text}
+      onMouseEnter={onHoverStart}
+      onMouseLeave={onHoverEnd}
     />
   );
 }
