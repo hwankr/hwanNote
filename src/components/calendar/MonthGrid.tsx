@@ -1,7 +1,8 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useI18n } from "../../i18n/context";
 import { formatDateKey } from "../../lib/calendarData";
 import type { CalendarData } from "../../lib/calendarData";
+import { computeWeekSpanBars, type WeekSpanBar } from "../../lib/calendarSpans";
 import DayCell from "./DayCell";
 
 interface MonthGridProps {
@@ -46,10 +47,17 @@ export default function MonthGrid({
 }: MonthGridProps) {
   const { t } = useI18n();
 
+  const [hoveredTodoId, setHoveredTodoId] = useState<string | null>(null);
+
   const year = currentMonth.getFullYear();
   const month = currentMonth.getMonth();
 
   const weeks = useMemo(() => getMonthGrid(year, month), [year, month]);
+
+  const weekSpans = useMemo(
+    () => weeks.map((week) => computeWeekSpanBars(data, week)),
+    [weeks, data]
+  );
 
   const today = useMemo(() => formatDateKey(new Date()), []);
 
@@ -98,34 +106,114 @@ export default function MonthGrid({
           ))}
         </div>
 
-        {weeks.map((week, wi) => (
-          <div key={wi} className="week-row">
-            {week.map((date) => {
-              const dateKey = formatDateKey(date);
-              const items = data.todos[dateKey]?.items ?? [];
-              const doneCount = items.filter((t) => t.done).length;
-              const openCount = items.length - doneCount;
-              const hasNoteLinks = (data.noteLinks[dateKey]?.length ?? 0) > 0;
+        {weeks.map((week, wi) => {
+          const { bars, laneCount } = weekSpans[wi];
+          return (
+            <div
+              key={wi}
+              className={`week-row${laneCount > 0 ? " has-spans" : ""}`}
+              style={{ "--span-lanes": laneCount } as React.CSSProperties}
+            >
+              {laneCount > 0 && (
+                <div className="week-row-spans" aria-hidden="true">
+                  {bars.map((bar) => (
+                    <SpanBar
+                      key={`${bar.sourceDateKey}:${bar.todoId}`}
+                      bar={bar}
+                      isHighlighted={hoveredTodoId === bar.todoId}
+                      onHoverStart={() => setHoveredTodoId(bar.todoId)}
+                      onHoverEnd={() => setHoveredTodoId(null)}
+                      onOpen={() => onOpenDay(bar.sourceDateKey)}
+                    />
+                  ))}
+                </div>
+              )}
+              {week.map((date) => {
+                const dateKey = formatDateKey(date);
+                const items = data.todos[dateKey]?.items ?? [];
+                const doneCount = items.filter((t) => t.done).length;
+                const openCount = items.length - doneCount;
+                const hasNoteLinks = (data.noteLinks[dateKey]?.length ?? 0) > 0;
 
-              return (
-                <DayCell
-                  key={dateKey}
-                  date={date}
-                  weekday={date.getDay()}
-                  isCurrentMonth={date.getMonth() === month}
-                  isToday={dateKey === today}
-                  isSelected={dateKey === selectedDate}
-                  openCount={openCount}
-                  doneCount={doneCount}
-                  hasNoteLinks={hasNoteLinks}
-                  onClick={() => onSelectDate(dateKey)}
-                  onDoubleClick={() => onOpenDay(dateKey)}
-                />
-              );
-            })}
-          </div>
-        ))}
+                return (
+                  <DayCell
+                    key={dateKey}
+                    date={date}
+                    weekday={date.getDay()}
+                    isCurrentMonth={date.getMonth() === month}
+                    isToday={dateKey === today}
+                    isSelected={dateKey === selectedDate}
+                    openCount={openCount}
+                    doneCount={doneCount}
+                    hasNoteLinks={hasNoteLinks}
+                    onClick={() => onSelectDate(dateKey)}
+                    onDoubleClick={() => onOpenDay(dateKey)}
+                  />
+                );
+              })}
+            </div>
+          );
+        })}
       </div>
     </div>
+  );
+}
+
+const SPAN_PALETTE_SIZE = 6;
+
+function hashTodoIdToPalette(todoId: string): number {
+  let hash = 0;
+  for (let i = 0; i < todoId.length; i++) {
+    hash = ((hash << 5) - hash + todoId.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash) % SPAN_PALETTE_SIZE;
+}
+
+interface SpanBarProps {
+  bar: WeekSpanBar;
+  isHighlighted: boolean;
+  onHoverStart: () => void;
+  onHoverEnd: () => void;
+  onOpen: () => void;
+}
+
+function SpanBar({ bar, isHighlighted, onHoverStart, onHoverEnd, onOpen }: SpanBarProps) {
+  const classes = [
+    "span-bar",
+    bar.done && "done",
+    bar.continuesLeft && "continues-left",
+    bar.continuesRight && "continues-right",
+    isHighlighted && "highlighted",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  const gridColumn = `${bar.startColumn + 1} / ${bar.endColumn + 2}`;
+  const colorIndex = hashTodoIdToPalette(bar.todoId);
+
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      className={classes}
+      style={{
+        gridColumn,
+        ["--bar-lane" as string]: bar.lane,
+        ["--bar-color" as string]: `var(--span-palette-${colorIndex})`,
+      } as React.CSSProperties}
+      title={bar.text}
+      onMouseEnter={onHoverStart}
+      onMouseLeave={onHoverEnd}
+      onClick={(event) => {
+        event.stopPropagation();
+        onOpen();
+      }}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onOpen();
+        }
+      }}
+    />
   );
 }

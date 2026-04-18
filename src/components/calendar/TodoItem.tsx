@@ -2,7 +2,10 @@
 import { normalizeDueDateKey, parseDateKey, type TodoItem as CalendarTodoItem } from "../../lib/calendarData";
 import { useI18n } from "../../i18n/context";
 
-type TodoDisplayItem = Pick<CalendarTodoItem, "id" | "text" | "done" | "dueDateKey">;
+type TodoDisplayItem = Pick<
+  CalendarTodoItem,
+  "id" | "text" | "done" | "dueDateKey" | "showSpan"
+>;
 
 interface TodoItemProps {
   item: TodoDisplayItem;
@@ -10,6 +13,7 @@ interface TodoItemProps {
   onUpdate: (text: string) => void;
   onDelete: () => void;
   onSetDueDate?: (dueDateKey: string | null) => void;
+  onSetShowSpan?: (showSpan: boolean) => void;
   showSourceDate?: boolean;
   sourceDateKey?: string | null;
   onSelectSourceDate?: (dateKey: string) => void;
@@ -22,6 +26,7 @@ export default function TodoItem({
   onUpdate,
   onDelete,
   onSetDueDate,
+  onSetShowSpan,
   showSourceDate = false,
   sourceDateKey,
   onSelectSourceDate,
@@ -195,6 +200,22 @@ export default function TodoItem({
               <span>{dueDateKey ? dueDateLabel : t("calendar.noDueDate")}</span>
             </span>
           )}
+
+          {onSetShowSpan && item.dueDateKey && dueDateKey && (() => {
+            const spanActive = item.showSpan !== false;
+            return (
+              <button
+                type="button"
+                className={`todo-meta-chip todo-span-chip${spanActive ? " active" : ""}`}
+                onClick={() => onSetShowSpan(!spanActive)}
+                aria-pressed={spanActive}
+                title={t(spanActive ? "calendar.hideSpan" : "calendar.showSpan")}
+              >
+                <span className="todo-meta-label">{t("calendar.spanLabel")}</span>
+                <span>{t(spanActive ? "calendar.spanOn" : "calendar.spanOff")}</span>
+              </button>
+            );
+          })()}
 
           {isOverdue && <span className="todo-state-chip overdue">{t("calendar.groupOverdue")}</span>}
         </div>

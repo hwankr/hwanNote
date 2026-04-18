@@ -31,6 +31,7 @@ export default function CalendarPage({ onNavigateToNote, weekStartsOn }: Calenda
   const updateTodo = useCalendarStore((s) => s.updateTodo) as TodoUpdateFn;
   const deleteTodo = useCalendarStore((s) => s.deleteTodo);
   const setTodoDueDate = useCalendarStore((s) => s.setTodoDueDate);
+  const setTodoShowSpan = useCalendarStore((s) => s.setTodoShowSpan);
   const createInboxTodo = useCalendarStore((s) => s.createInboxTodo);
   const toggleInboxTodo = useCalendarStore((s) => s.toggleInboxTodo);
   const updateInboxTodo = useCalendarStore((s) => s.updateInboxTodo);
@@ -84,6 +85,13 @@ export default function CalendarPage({ onNavigateToNote, weekStartsOn }: Calenda
       setTodoDueDate(dateKey, todoId, dueDateKey);
     },
     [setTodoDueDate]
+  );
+
+  const handleSetTodoShowSpan = useCallback(
+    (dateKey: string, todoId: string, showSpan: boolean) => {
+      setTodoShowSpan(dateKey, todoId, showSpan);
+    },
+    [setTodoShowSpan]
   );
 
   const handleUpdateInboxTodo = useCallback(
@@ -155,6 +163,7 @@ export default function CalendarPage({ onNavigateToNote, weekStartsOn }: Calenda
         onDeleteTodo={deleteTodo}
         onOpenDay={handleOpenDay}
         onSetTodoDueDate={handleSetTodoDueDate}
+        onSetTodoShowSpan={handleSetTodoShowSpan}
         onCreateInboxTodo={createInboxTodo}
         onToggleInboxTodo={toggleInboxTodo}
         onUpdateInboxTodo={handleUpdateInboxTodo}
