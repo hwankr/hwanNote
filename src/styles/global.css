@@ -9,6 +9,10 @@
   --text-primary: #1a1a1a;
   --text-muted: #666666;
   --accent: #0078d4;
+  --kind-event: #1976D2;
+  --kind-event-bg: rgba(25, 118, 210, 0.12);
+  --kind-deadline: #EF6C00;
+  --kind-deadline-bg: rgba(239, 108, 0, 0.12);
   --border-soft: #e6ded8;
   --shadow-soft: 0 8px 24px rgba(0, 0, 0, 0.18);
   --shadow-tab: 0 1px 3px rgba(0, 0, 0, 0.08);
