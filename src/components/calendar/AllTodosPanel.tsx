@@ -24,8 +24,8 @@ interface AllTodosPanelProps {
 }
 
 const OPEN_GROUPS = CALENDAR_TODO_GROUP_ORDER.filter(
-  (group): group is Exclude<CalendarTodoGroup, "done" | "inbox"> =>
-    group !== "done" && group !== "inbox"
+  (group): group is Exclude<CalendarTodoGroup, "done" | "inbox" | "events" | "deadlines"> =>
+    group !== "done" && group !== "inbox" && group !== "events" && group !== "deadlines"
 );
 
 export default function AllTodosPanel({

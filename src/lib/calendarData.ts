@@ -59,6 +59,8 @@ export interface CalendarDataV4 {
 export type CalendarData = CalendarDataV4;
 
 export type CalendarTodoGroup =
+  | "events"
+  | "deadlines"
   | "overdue"
   | "dueSoon"
   | "upcoming"
@@ -78,6 +80,7 @@ export interface CalendarTodoRow {
   isOverdue: boolean;
   isInbox: boolean;
   completedAt: number | null;
+  kind: TodoKind;
 }
 
 export interface CalendarTodoQueryOptions {
@@ -88,6 +91,8 @@ export interface CalendarTodoQueryOptions {
 export const CALENDAR_DATA_VERSION = 4;
 export const DEFAULT_DUE_SOON_DAYS = 7;
 export const CALENDAR_TODO_GROUP_ORDER: CalendarTodoGroup[] = [
+  "events",
+  "deadlines",
   "overdue",
   "dueSoon",
   "upcoming",
@@ -218,6 +223,7 @@ export function deriveCalendarTodoRows(
       isOverdue: isTodoOverdue(todo, todayDateKey),
       isInbox: false,
       completedAt: todo.completedAt,
+      kind: todo.kind ?? "task",
     }))
   );
 
@@ -233,15 +239,24 @@ export function deriveCalendarTodoRows(
     isOverdue: isTodoOverdue(todo, todayDateKey),
     isInbox: true,
     completedAt: todo.completedAt,
+    kind: todo.kind ?? "task",
   }));
 
   return [...datedRows, ...inboxRows];
 }
 
 export function getCalendarTodoGroup(
-  row: Pick<CalendarTodoRow, "done" | "dueDateKey" | "isInbox">,
+  row: Pick<CalendarTodoRow, "done" | "dueDateKey" | "isInbox" | "kind">,
   options: CalendarTodoQueryOptions = {}
 ): CalendarTodoGroup {
+  if (row.kind === "event") {
+    return "events";
+  }
+
+  if (row.kind === "deadline") {
+    return "deadlines";
+  }
+
   if (row.done) {
     return "done";
   }
@@ -267,9 +282,24 @@ export function compareCalendarTodoRows(
   right: CalendarTodoRow,
   options: CalendarTodoQueryOptions = {}
 ): number {
+  const leftGroup = getCalendarTodoGroup(left, options);
+  const rightGroup = getCalendarTodoGroup(right, options);
+
+  if (leftGroup === rightGroup && (leftGroup === "events" || leftGroup === "deadlines")) {
+    if (left.sourceDateKey !== right.sourceDateKey) {
+      if (left.sourceDateKey === null) return 1;
+      if (right.sourceDateKey === null) return -1;
+      return left.sourceDateKey.localeCompare(right.sourceDateKey);
+    }
+    if (left.createdAt !== right.createdAt) {
+      return left.createdAt - right.createdAt;
+    }
+    return left.text.localeCompare(right.text, undefined, { numeric: true, sensitivity: "base" });
+  }
+
   const groupDelta =
-    CALENDAR_TODO_GROUP_ORDER.indexOf(getCalendarTodoGroup(left, options)) -
-    CALENDAR_TODO_GROUP_ORDER.indexOf(getCalendarTodoGroup(right, options));
+    CALENDAR_TODO_GROUP_ORDER.indexOf(leftGroup) -
+    CALENDAR_TODO_GROUP_ORDER.indexOf(rightGroup);
 
   if (groupDelta !== 0) {
     return groupDelta;
@@ -329,6 +359,8 @@ export function groupCalendarTodoRows(
 
 function createEmptyCalendarTodoGroups(): Record<CalendarTodoGroup, CalendarTodoRow[]> {
   return {
+    events: [],
+    deadlines: [],
     overdue: [],
     dueSoon: [],
     upcoming: [],
