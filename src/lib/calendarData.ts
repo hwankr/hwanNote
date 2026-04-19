@@ -420,7 +420,8 @@ function normalizeInboxArray(value: unknown): TodoItem[] {
   }
   return value.inbox
     .map(normalizeTodoItem)
-    .filter((todo): todo is TodoItem => todo !== null);
+    .filter((todo): todo is TodoItem => todo !== null)
+    .map((todo) => (todo.kind === undefined ? todo : { ...todo, kind: undefined }));
 }
 
 function normalizeTodosRecord(
