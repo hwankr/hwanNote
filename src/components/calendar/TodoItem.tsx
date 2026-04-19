@@ -1,10 +1,15 @@
 ﻿import { useCallback, useRef, useState } from "react";
-import { normalizeDueDateKey, parseDateKey, type TodoItem as CalendarTodoItem } from "../../lib/calendarData";
+import {
+  normalizeDueDateKey,
+  parseDateKey,
+  type TodoItem as CalendarTodoItem,
+  type TodoKind,
+} from "../../lib/calendarData";
 import { useI18n } from "../../i18n/context";
 
 type TodoDisplayItem = Pick<
   CalendarTodoItem,
-  "id" | "text" | "done" | "dueDateKey" | "showSpan"
+  "id" | "text" | "done" | "dueDateKey" | "showSpan" | "kind"
 >;
 
 interface TodoItemProps {
@@ -33,6 +38,8 @@ export default function TodoItem({
   isOverdue = false,
 }: TodoItemProps) {
   const { t, localeTag } = useI18n();
+  const kind: TodoKind = item.kind ?? "task";
+  const isEventLike = kind === "event" || kind === "deadline";
   const [isEditing, setIsEditing] = useState(false);
   const [editText, setEditText] = useState(item.text);
   const [isDueDateEditing, setIsDueDateEditing] = useState(false);
@@ -117,16 +124,39 @@ export default function TodoItem({
     .join(" ");
 
   return (
-    <div className={`todo-item ${item.done ? "done" : ""} ${isOverdue ? "overdue" : ""}`}>
-      <label className="todo-checkbox-label">
-        <input
-          type="checkbox"
-          checked={item.done}
-          onChange={onToggle}
-          className="todo-checkbox"
-        />
-        <span className="todo-checkmark" />
-      </label>
+    <div
+      className={`todo-item kind-${kind} ${item.done ? "done" : ""} ${isOverdue && !isEventLike ? "overdue" : ""}`}
+    >
+      {isEventLike ? (
+        <span
+          className={`todo-kind-badge kind-${kind}`}
+          title={t(kind === "event" ? "calendar.kindEvent" : "calendar.kindDeadline")}
+          aria-label={t(kind === "event" ? "calendar.kindEvent" : "calendar.kindDeadline")}
+        >
+          {kind === "event" ? (
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+              <rect x="2" y="3" width="10" height="9" rx="1.5" stroke="currentColor" strokeWidth="1.2" />
+              <path d="M2 6h10" stroke="currentColor" strokeWidth="1.2" />
+              <path d="M5 1.5v2M9 1.5v2" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+            </svg>
+          ) : (
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+              <path d="M3.5 1.5v11" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+              <path d="M3.5 2.5h7l-1.5 2.25L11 7H3.5" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+            </svg>
+          )}
+        </span>
+      ) : (
+        <label className="todo-checkbox-label">
+          <input
+            type="checkbox"
+            checked={item.done}
+            onChange={onToggle}
+            className="todo-checkbox"
+          />
+          <span className="todo-checkmark" />
+        </label>
+      )}
 
       <div className="todo-item-body">
         {isEditing ? (
@@ -166,58 +196,62 @@ export default function TodoItem({
             </button>
           )}
 
-          {isDueDateEditing && onSetDueDate ? (
-            <div className="todo-due-editor">
-              <input
-                ref={dueDateInputRef}
-                type="date"
-                className="todo-due-input"
-                value={draftDueDateKey}
-                onChange={(event) => setDraftDueDateKey(event.target.value)}
-              />
-              <div className="todo-due-actions">
-                <button type="button" className="todo-inline-btn primary" onClick={saveDueDate}>
-                  {t("calendar.dueDateSave")}
+          {!isEventLike && (
+            <>
+              {isDueDateEditing && onSetDueDate ? (
+                <div className="todo-due-editor">
+                  <input
+                    ref={dueDateInputRef}
+                    type="date"
+                    className="todo-due-input"
+                    value={draftDueDateKey}
+                    onChange={(event) => setDraftDueDateKey(event.target.value)}
+                  />
+                  <div className="todo-due-actions">
+                    <button type="button" className="todo-inline-btn primary" onClick={saveDueDate}>
+                      {t("calendar.dueDateSave")}
+                    </button>
+                    {dueDateKey && (
+                      <button type="button" className="todo-inline-btn" onClick={clearDueDate}>
+                        {t("calendar.dueDateClear")}
+                      </button>
+                    )}
+                    <button type="button" className="todo-inline-btn" onClick={closeDueDateEditor}>
+                      {t("common.cancel")}
+                    </button>
+                  </div>
+                </div>
+              ) : onSetDueDate ? (
+                <button type="button" className={dueDateChipClassName} onClick={openDueDateEditor}>
+                  <span className="todo-meta-label">{t("calendar.dueDate")}</span>
+                  <span>{dueDateKey ? dueDateLabel : t("calendar.setDueDate")}</span>
                 </button>
-                {dueDateKey && (
-                  <button type="button" className="todo-inline-btn" onClick={clearDueDate}>
-                    {t("calendar.dueDateClear")}
+              ) : (
+                <span className={dueDateChipClassName}>
+                  <span className="todo-meta-label">{t("calendar.dueDate")}</span>
+                  <span>{dueDateKey ? dueDateLabel : t("calendar.noDueDate")}</span>
+                </span>
+              )}
+
+              {onSetShowSpan && item.dueDateKey && dueDateKey && (() => {
+                const spanActive = item.showSpan !== false;
+                return (
+                  <button
+                    type="button"
+                    className={`todo-meta-chip todo-span-chip${spanActive ? " active" : ""}`}
+                    onClick={() => onSetShowSpan(!spanActive)}
+                    aria-pressed={spanActive}
+                    title={t(spanActive ? "calendar.hideSpan" : "calendar.showSpan")}
+                  >
+                    <span className="todo-meta-label">{t("calendar.spanLabel")}</span>
+                    <span>{t(spanActive ? "calendar.spanOn" : "calendar.spanOff")}</span>
                   </button>
-                )}
-                <button type="button" className="todo-inline-btn" onClick={closeDueDateEditor}>
-                  {t("common.cancel")}
-                </button>
-              </div>
-            </div>
-          ) : onSetDueDate ? (
-            <button type="button" className={dueDateChipClassName} onClick={openDueDateEditor}>
-              <span className="todo-meta-label">{t("calendar.dueDate")}</span>
-              <span>{dueDateKey ? dueDateLabel : t("calendar.setDueDate")}</span>
-            </button>
-          ) : (
-            <span className={dueDateChipClassName}>
-              <span className="todo-meta-label">{t("calendar.dueDate")}</span>
-              <span>{dueDateKey ? dueDateLabel : t("calendar.noDueDate")}</span>
-            </span>
+                );
+              })()}
+
+              {isOverdue && <span className="todo-state-chip overdue">{t("calendar.groupOverdue")}</span>}
+            </>
           )}
-
-          {onSetShowSpan && item.dueDateKey && dueDateKey && (() => {
-            const spanActive = item.showSpan !== false;
-            return (
-              <button
-                type="button"
-                className={`todo-meta-chip todo-span-chip${spanActive ? " active" : ""}`}
-                onClick={() => onSetShowSpan(!spanActive)}
-                aria-pressed={spanActive}
-                title={t(spanActive ? "calendar.hideSpan" : "calendar.showSpan")}
-              >
-                <span className="todo-meta-label">{t("calendar.spanLabel")}</span>
-                <span>{t(spanActive ? "calendar.spanOn" : "calendar.spanOff")}</span>
-              </button>
-            );
-          })()}
-
-          {isOverdue && <span className="todo-state-chip overdue">{t("calendar.groupOverdue")}</span>}
         </div>
       </div>
 
