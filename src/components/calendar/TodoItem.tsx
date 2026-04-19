@@ -125,11 +125,12 @@ export default function TodoItem({
 
   return (
     <div
-      className={`todo-item kind-${kind} ${item.done ? "done" : ""} ${isOverdue && !isEventLike ? "overdue" : ""}`}
+      className={`todo-item kind-${kind} ${item.done && !isEventLike ? "done" : ""} ${isOverdue && !isEventLike ? "overdue" : ""}`}
     >
       {isEventLike ? (
         <span
           className={`todo-kind-badge kind-${kind}`}
+          role="img"
           title={t(kind === "event" ? "calendar.kindEvent" : "calendar.kindDeadline")}
           aria-label={t(kind === "event" ? "calendar.kindEvent" : "calendar.kindDeadline")}
         >
