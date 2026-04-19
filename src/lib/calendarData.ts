@@ -1,3 +1,11 @@
+export type TodoKind = "task" | "event" | "deadline";
+
+export const TODO_KINDS: readonly TodoKind[] = ["task", "event", "deadline"] as const;
+
+export function isTodoKind(value: unknown): value is TodoKind {
+  return value === "task" || value === "event" || value === "deadline";
+}
+
 export interface TodoItem {
   id: string;
   text: string;
@@ -7,6 +15,7 @@ export interface TodoItem {
   dueDateKey: string | null;
   completedAt: number | null;
   showSpan?: boolean;
+  kind?: TodoKind;
 }
 
 export interface DayTodos {
@@ -40,7 +49,14 @@ export interface CalendarDataV3 {
   noteLinks: Record<string, string[]>;
 }
 
-export type CalendarData = CalendarDataV3;
+export interface CalendarDataV4 {
+  version: 4;
+  todos: Record<string, DayTodos>;
+  inbox: TodoItem[];
+  noteLinks: Record<string, string[]>;
+}
+
+export type CalendarData = CalendarDataV4;
 
 export type CalendarTodoGroup =
   | "overdue"
@@ -69,7 +85,7 @@ export interface CalendarTodoQueryOptions {
   dueSoonDays?: number;
 }
 
-export const CALENDAR_DATA_VERSION = 3;
+export const CALENDAR_DATA_VERSION = 4;
 export const DEFAULT_DUE_SOON_DAYS = 7;
 export const CALENDAR_TODO_GROUP_ORDER: CalendarTodoGroup[] = [
   "overdue",
@@ -98,25 +114,33 @@ export function parseCalendarData(raw: string): CalendarData {
     }
 
     if (parsed.version === 1) {
-      return migrateCalendarDataV2ToV3({
-        ...migrateCalendarDataV1ToV2(parsed),
-        version: 2,
-      });
+      return migrateCalendarDataV3ToV4(
+        migrateCalendarDataV2ToV3({
+          ...migrateCalendarDataV1ToV2(parsed),
+          version: 2,
+        })
+      );
     }
 
     if (parsed.version === 2) {
-      return migrateCalendarDataV2ToV3(parsed);
+      return migrateCalendarDataV3ToV4(migrateCalendarDataV2ToV3(parsed));
+    }
+
+    if (parsed.version === 3) {
+      return migrateCalendarDataV3ToV4(parsed);
     }
 
     if (parsed.version === CALENDAR_DATA_VERSION) {
-      return normalizeCalendarDataV3(parsed);
+      return normalizeCalendarDataV4(parsed);
     }
 
     if (parsed.version === undefined && ("todos" in parsed || "noteLinks" in parsed)) {
-      return migrateCalendarDataV2ToV3({
-        ...migrateCalendarDataV1ToV2(parsed),
-        version: 2,
-      });
+      return migrateCalendarDataV3ToV4(
+        migrateCalendarDataV2ToV3({
+          ...migrateCalendarDataV1ToV2(parsed),
+          version: 2,
+        })
+      );
     }
 
     if (typeof parsed.version !== "number") {
@@ -129,7 +153,7 @@ export function parseCalendarData(raw: string): CalendarData {
       return createEmptyCalendarData();
     }
 
-    return normalizeCalendarDataV3(parsed);
+    return normalizeCalendarDataV4(parsed);
   } catch (error) {
     console.error("calendar.json: parse error, returning empty data", error);
     return createEmptyCalendarData();
@@ -322,16 +346,34 @@ function migrateCalendarDataV1ToV2(value: unknown): CalendarDataV2 {
   };
 }
 
-function migrateCalendarDataV2ToV3(value: unknown): CalendarData {
+function migrateCalendarDataV2ToV3(value: unknown): CalendarDataV3 {
   return {
-    version: CALENDAR_DATA_VERSION,
+    version: 3,
     todos: normalizeTodosRecord(value, normalizeTodoItem),
     inbox: [],
     noteLinks: normalizeNoteLinksRecord(value),
   };
 }
 
-function normalizeCalendarDataV3(value: unknown): CalendarData {
+function normalizeCalendarDataV3(value: unknown): CalendarDataV3 {
+  return {
+    version: 3,
+    todos: normalizeTodosRecord(value, normalizeTodoItem),
+    inbox: normalizeInboxArray(value),
+    noteLinks: normalizeNoteLinksRecord(value),
+  };
+}
+
+function migrateCalendarDataV3ToV4(value: unknown): CalendarData {
+  return {
+    version: CALENDAR_DATA_VERSION,
+    todos: normalizeTodosRecord(value, normalizeTodoItem),
+    inbox: normalizeInboxArray(value),
+    noteLinks: normalizeNoteLinksRecord(value),
+  };
+}
+
+function normalizeCalendarDataV4(value: unknown): CalendarData {
   return {
     version: CALENDAR_DATA_VERSION,
     todos: normalizeTodosRecord(value, normalizeTodoItem),
@@ -417,11 +459,29 @@ function normalizeTodoItem(value: unknown): TodoItem | null {
   const rawShowSpan = isPlainObject(value) ? value.showSpan : undefined;
   const showSpan = typeof rawShowSpan === "boolean" ? rawShowSpan : undefined;
 
+  const rawKind = isPlainObject(value) ? value.kind : undefined;
+  const kind = isTodoKind(rawKind) && rawKind !== "task" ? rawKind : undefined;
+
+  const normalizedDone =
+    kind === "event" || kind === "deadline" ? false : normalized.done;
+  const normalizedDueDateKey =
+    kind === "event" || kind === "deadline"
+      ? null
+      : normalizeDueDateKey(isPlainObject(value) ? value.dueDateKey : null);
+  const normalizedCompletedAt =
+    kind === "event" || kind === "deadline"
+      ? null
+      : completedAt;
+  const normalizedShowSpan =
+    kind === "event" || kind === "deadline" ? undefined : showSpan;
+
   return {
     ...normalized,
-    dueDateKey: normalizeDueDateKey(isPlainObject(value) ? value.dueDateKey : null),
-    completedAt,
-    showSpan,
+    done: normalizedDone,
+    dueDateKey: normalizedDueDateKey,
+    completedAt: normalizedCompletedAt,
+    showSpan: normalizedShowSpan,
+    kind,
   };
 }
 
