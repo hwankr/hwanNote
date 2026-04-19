@@ -321,6 +321,9 @@
 /* —— Todo Add —— */
 
 .todo-add-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   padding: 16px 16px 12px;
 }
 
@@ -924,19 +927,15 @@ button.todo-meta-chip.readonly {
 
 .todo-item.kind-event .todo-text-button .todo-text {
   color: var(--kind-event);
+  font-weight: 500;
 }
 
 .todo-item.kind-deadline .todo-text-button .todo-text {
   color: var(--kind-deadline);
+  font-weight: 500;
 }
 
 /* —— Kind selector segmented control on Day add-row —— */
-
-.todo-add-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
 
 .todo-kind-selector {
   display: inline-flex;
