@@ -131,8 +131,22 @@ export default function MonthGrid({
               {week.map((date) => {
                 const dateKey = formatDateKey(date);
                 const items = data.todos[dateKey]?.items ?? [];
-                const doneCount = items.filter((t) => t.done).length;
-                const openCount = items.length - doneCount;
+                let openCount = 0;
+                let doneCount = 0;
+                let eventCount = 0;
+                let deadlineCount = 0;
+                for (const item of items) {
+                  const itemKind = item.kind ?? "task";
+                  if (itemKind === "event") {
+                    eventCount++;
+                  } else if (itemKind === "deadline") {
+                    deadlineCount++;
+                  } else if (item.done) {
+                    doneCount++;
+                  } else {
+                    openCount++;
+                  }
+                }
                 const hasNoteLinks = (data.noteLinks[dateKey]?.length ?? 0) > 0;
 
                 return (
@@ -145,6 +159,8 @@ export default function MonthGrid({
                     isSelected={dateKey === selectedDate}
                     openCount={openCount}
                     doneCount={doneCount}
+                    eventCount={eventCount}
+                    deadlineCount={deadlineCount}
                     hasNoteLinks={hasNoteLinks}
                     onClick={() => onSelectDate(dateKey)}
                     onDoubleClick={() => onOpenDay(dateKey)}
