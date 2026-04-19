@@ -16,6 +16,7 @@ import {
   type CalendarTodoQueryOptions,
   type CalendarTodoRow,
   type TodoItem,
+  type TodoKind,
 } from "../lib/calendarData";
 import { useNoteStore } from "./noteStore";
 
@@ -33,7 +34,7 @@ interface CalendarStore {
   setSelectedDate: (dateKey: string) => void;
   setCurrentMonth: (date: Date) => void;
 
-  createTodo: (dateKey: string, text: string) => void;
+  createTodo: (dateKey: string, text: string, kind?: TodoKind) => void;
   updateTodo: (dateKey: string, todoId: string, updates: Partial<Pick<TodoItem, "text" | "done">>) => void;
   deleteTodo: (dateKey: string, todoId: string) => void;
   toggleTodo: (dateKey: string, todoId: string) => void;
@@ -151,13 +152,13 @@ export const useCalendarStore = create<CalendarStore>((set) => ({
   setSelectedDate: (dateKey) => set({ selectedDate: dateKey }),
   setCurrentMonth: (date) => set({ currentMonth: date }),
 
-  createTodo: (dateKey, text) => {
+  createTodo: (dateKey, text, kind = "task") => {
     mutateAndSave((data) => {
       if (!data.todos[dateKey]) {
         data.todos[dateKey] = { items: [] };
       }
       const now = Date.now();
-      data.todos[dateKey].items.push({
+      const item: TodoItem = {
         id: generateTodoId(),
         text,
         done: false,
@@ -165,7 +166,11 @@ export const useCalendarStore = create<CalendarStore>((set) => ({
         updatedAt: now,
         dueDateKey: null,
         completedAt: null,
-      });
+      };
+      if (kind !== "task") {
+        item.kind = kind;
+      }
+      data.todos[dateKey].items.push(item);
       return true;
     });
   },
@@ -177,12 +182,14 @@ export const useCalendarStore = create<CalendarStore>((set) => ({
       const item = day.items.find((t) => t.id === todoId);
       if (!item) return false;
 
+      const itemKind: TodoKind = item.kind ?? "task";
+
       let changed = false;
       if (updates.text !== undefined && updates.text !== item.text) {
         item.text = updates.text;
         changed = true;
       }
-      if (updates.done !== undefined && updates.done !== item.done) {
+      if (updates.done !== undefined && itemKind === "task" && updates.done !== item.done) {
         item.done = updates.done;
         item.completedAt = updates.done ? Date.now() : null;
         changed = true;
@@ -217,6 +224,7 @@ export const useCalendarStore = create<CalendarStore>((set) => ({
       if (!day) return false;
       const item = day.items.find((t) => t.id === todoId);
       if (!item) return false;
+      if ((item.kind ?? "task") !== "task") return false;
       item.done = !item.done;
       const now = Date.now();
       item.completedAt = item.done ? now : null;
@@ -231,6 +239,7 @@ export const useCalendarStore = create<CalendarStore>((set) => ({
       if (!day) return false;
       const item = day.items.find((t) => t.id === todoId);
       if (!item) return false;
+      if ((item.kind ?? "task") !== "task") return false;
 
       if (dueDateKey !== null && !isDateKey(dueDateKey)) {
         console.warn("Ignored invalid dueDateKey update:", dueDateKey);
@@ -254,6 +263,7 @@ export const useCalendarStore = create<CalendarStore>((set) => ({
       if (!day) return false;
       const item = day.items.find((t) => t.id === todoId);
       if (!item || item.dueDateKey === null) return false;
+      if ((item.kind ?? "task") !== "task") return false;
       item.dueDateKey = null;
       item.updatedAt = Date.now();
       return true;
@@ -266,6 +276,7 @@ export const useCalendarStore = create<CalendarStore>((set) => ({
       if (!day) return false;
       const item = day.items.find((t) => t.id === todoId);
       if (!item) return false;
+      if ((item.kind ?? "task") !== "task") return false;
 
       const nextShowSpan = showSpan ? undefined : false;
       if ((item.showSpan ?? undefined) === nextShowSpan) {
