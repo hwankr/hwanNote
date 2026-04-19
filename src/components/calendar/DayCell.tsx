@@ -29,9 +29,10 @@ export default function DayCell({
   onClick,
   onDoubleClick,
 }: DayCellProps) {
-  // Render priority: deadlines first (most urgent visual), then events,
-  // then open tasks, then done tasks. We share the MAX_DOTS budget across
-  // all four buckets so the cell never overflows.
+  // Budget allocation priority: deadline > event > open > done (the doneCap
+  // rule below reserves at least one slot for open when both exist).
+  // Visual render order (left to right): deadline, event, done, open.
+  // We share the MAX_DOTS budget across all four buckets so the cell never overflows.
   let budget = MAX_DOTS;
   const renderedDeadline = Math.min(deadlineCount, budget);
   budget -= renderedDeadline;
