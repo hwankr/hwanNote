@@ -5,6 +5,67 @@ All notable user-facing changes to HwanNote are documented here.
 This project follows [Semantic Versioning](https://semver.org/) and commit messages use the
 [Conventional Commits](https://www.conventionalcommits.org/) style.
 
+## [0.8.0] — 2026-04-23
+
+Introduces a three-kind classification for calendar items — **Task**, **Event**,
+and **Deadline** — so time-anchored items (exams, birthdays, report due dates)
+render distinctly from actionable to-dos. Events and deadlines are date-pinned,
+non-completable, and excluded from overdue/done flows; tasks keep their existing
+behavior unchanged.
+
+### New Features
+
+- **Kind selector on the day add-row.** A segmented control (할 일 / 일정 / 마감)
+  sits beside the add-input on the day view. The selected kind persists across
+  submissions so users can quickly add multiple events in a row when planning.
+  The control is keyboard accessible with ARIA radio semantics
+  (`role="radiogroup"` + `role="radio"` + `aria-checked`).
+- **Event badge.** Items created with kind `event` render a blue calendar-icon
+  badge in place of the checkbox. Events are non-completable and never show
+  due-date, span, or overdue chips — they're informational markers on a day.
+- **Deadline badge.** Items created with kind `deadline` render an amber flag-icon
+  badge. Like events, they are single-day markers with no completion state, but
+  use a distinct color to signal attention without escalating to red.
+- **Dedicated sections in the All-tasks view.** The sidebar's All view now renders
+  Events and Deadlines sections above the existing task groups, sorted
+  chronologically by source date (nearest first). Section headers use the kind's
+  accent color.
+- **Kind-colored day-cell dots.** The month grid's indicator dots now distinguish
+  four buckets (deadline > event > open task > done task) sharing the same
+  3-dot budget. Deadlines render leftmost, then events, then open tasks, then
+  done tasks. The cell always reserves at least one slot for open tasks when
+  both open and done exist, so completion activity never hides unfinished work.
+- **i18n.** Six new keys (`calendar.kindLabel`, `calendar.kindTask`,
+  `calendar.kindEvent`, `calendar.kindDeadline`, `calendar.groupEvents`,
+  `calendar.groupDeadlines`) shipped in both Korean and English.
+
+### Under the hood
+
+- **CalendarData schema bumped to v4.** The optional `kind?: TodoKind` field is
+  the only structural addition; existing v1/v2/v3 data migrates transparently.
+  Tasks omit the field in JSON (only events and deadlines serialize `kind`) so
+  existing files don't churn on first save.
+- **Data-boundary enforcement.** `normalizeTodoItem` forces `done: false`,
+  `dueDateKey: null`, `completedAt: null`, and `showSpan: undefined` on any
+  loaded event/deadline — hand-edited JSON that violates the invariant is
+  silently cleaned rather than crashing.
+- **Inbox invariant.** The inbox can only hold tasks. `normalizeInboxArray`
+  strips any `kind` value from loaded inbox items, guarding against hand-edited
+  JSON that would otherwise produce a row unreachable from any UI surface.
+- **Store-level guards.** `toggleTodo`, `setTodoDueDate`, `clearTodoDueDate`,
+  and `setTodoShowSpan` no-op on non-task kinds; `updateTodo`'s `done` branch
+  is gated to tasks only.
+- **Span-bar exclusion.** Week span bars skip event and deadline items even
+  though the data-layer invariant already prevents them from having a due date.
+- **Theme tokens.** Four new CSS variables (`--kind-event`, `--kind-event-bg`,
+  `--kind-deadline`, `--kind-deadline-bg`) are defined in both `lightTheme` and
+  `darkTheme` plus the `:root` initial-paint fallback.
+
+### Upgrading
+
+- No manual steps. First launch after install migrates calendar data in place.
+- The auto-updater will detect v0.8.0 and prompt to install on next run.
+
 ## [0.7.0] — 2026-04-18
 
 Adds horizontal "span bars" to the month grid so multi-day tasks (like an
