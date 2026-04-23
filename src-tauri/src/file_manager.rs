@@ -1602,6 +1602,68 @@ mod tests {
     }
 
     #[test]
+    fn remove_note_from_index_if_path_removes_matching_index_entry() {
+        let dir = make_temp_dir("conditional-remove-matching-path");
+        let result = (|| -> Result<(), String> {
+            auto_save_markdown_note(
+                &dir,
+                &AutoSavePayload {
+                    note_id: "note-1".to_string(),
+                    title: "Alpha".to_string(),
+                    content: "# Alpha".to_string(),
+                    folder_path: Some("alpha".to_string()),
+                    is_title_manual: Some(true),
+                    is_pinned: Some(false),
+                },
+            )?;
+
+            let path = resolve_note_file_path(&dir, "note-1")?
+                .ok_or_else(|| "missing note path".to_string())?;
+            let removed = remove_note_from_index_if_path(&dir, "note-1", &path)?;
+
+            assert_eq!(removed.as_deref(), Some(path.as_path()));
+            let index = read_index(&dir);
+            assert!(!index.entries.contains_key("note-1"));
+
+            Ok(())
+        })();
+        cleanup_temp_dir(&dir);
+        result.unwrap();
+    }
+
+    #[test]
+    fn remove_note_from_index_if_path_removes_stale_missing_file_entry() {
+        let dir = make_temp_dir("conditional-remove-missing-file");
+        let result = (|| -> Result<(), String> {
+            auto_save_markdown_note(
+                &dir,
+                &AutoSavePayload {
+                    note_id: "note-1".to_string(),
+                    title: "Alpha".to_string(),
+                    content: "# Alpha".to_string(),
+                    folder_path: Some("alpha".to_string()),
+                    is_title_manual: Some(true),
+                    is_pinned: Some(false),
+                },
+            )?;
+
+            let path = resolve_note_file_path(&dir, "note-1")?
+                .ok_or_else(|| "missing note path".to_string())?;
+            fs::remove_file(&path).map_err(|e| e.to_string())?;
+
+            let removed = remove_note_from_index_if_path(&dir, "note-1", &path)?;
+
+            assert_eq!(removed.as_deref(), Some(path.as_path()));
+            let index = read_index(&dir);
+            assert!(!index.entries.contains_key("note-1"));
+
+            Ok(())
+        })();
+        cleanup_temp_dir(&dir);
+        result.unwrap();
+    }
+
+    #[test]
     fn remove_note_from_index_if_path_preserves_changed_index_entry() {
         let dir = make_temp_dir("conditional-remove-changed-path");
         let result = (|| -> Result<(), String> {
