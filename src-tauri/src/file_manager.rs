@@ -1185,7 +1185,16 @@ pub fn load_markdown_notes(auto_save_dir: &Path) -> Result<Vec<LoadedNote>, Stri
     Ok(notes)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn resolve_note_file_path(
+    auto_save_dir: &Path,
+    note_id: &str,
+) -> Result<Option<PathBuf>, String> {
+    let _index_guard = lock_note_index();
+    resolve_note_file_path_unlocked(auto_save_dir, note_id)
+}
+
+fn resolve_note_file_path_unlocked(
     auto_save_dir: &Path,
     note_id: &str,
 ) -> Result<Option<PathBuf>, String> {
@@ -1203,6 +1212,23 @@ pub fn resolve_note_file_path(
     Ok(Some(auto_save_dir.join(&entry.relative_path)))
 }
 
+fn trash_note_file_or_accept_missing<F>(file_path: &Path, delete_file: F) -> Result<(), String>
+where
+    F: FnOnce(&Path) -> Result<(), String>,
+{
+    match delete_file(file_path) {
+        Ok(()) => Ok(()),
+        Err(delete_error) => match file_path
+            .try_exists()
+            .map_err(|e| format!("Failed to recheck note file after trash error: {e}"))?
+        {
+            false => Ok(()),
+            true => Err(delete_error),
+        },
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn remove_note_from_index_if_path(
     auto_save_dir: &Path,
     note_id: &str,
@@ -1214,6 +1240,18 @@ pub fn remove_note_from_index_if_path(
     }
 
     let _index_guard = lock_note_index();
+    remove_note_from_index_if_path_unlocked(auto_save_dir, note_id, expected_file_path)
+}
+
+fn remove_note_from_index_if_path_unlocked(
+    auto_save_dir: &Path,
+    note_id: &str,
+    expected_file_path: &Path,
+) -> Result<Option<PathBuf>, String> {
+    let safe_id = sanitize_note_id(note_id);
+    if safe_id.is_empty() {
+        return Ok(None);
+    }
 
     let mut index = read_index(auto_save_dir);
     let entry = match index.entries.get(&safe_id) {
@@ -1235,6 +1273,32 @@ pub fn remove_note_from_index_if_path(
     index.entries.remove(&safe_id);
     write_index(auto_save_dir, &index)?;
     Ok(Some(file_path))
+}
+
+pub fn delete_note_file_and_index<F>(
+    auto_save_dir: &Path,
+    note_id: &str,
+    delete_file: F,
+) -> Result<bool, String>
+where
+    F: FnOnce(&Path) -> Result<(), String>,
+{
+    let _index_guard = lock_note_index();
+    let file_path = match resolve_note_file_path_unlocked(auto_save_dir, note_id)? {
+        Some(p) => p,
+        None => return Ok(false),
+    };
+
+    match file_path
+        .try_exists()
+        .map_err(|e| format!("Failed to check note file before delete: {e}"))?
+    {
+        true => trash_note_file_or_accept_missing(&file_path, delete_file)?,
+        false => {}
+    }
+
+    let removed = remove_note_from_index_if_path_unlocked(auto_save_dir, note_id, &file_path)?;
+    Ok(removed.is_some())
 }
 
 pub fn normalize_external_txt_path(
@@ -1726,6 +1790,140 @@ mod tests {
 
             let index = read_index(&dir);
             assert!(index.entries.contains_key("note-1"));
+            assert!(path.exists());
+
+            Ok(())
+        })();
+        cleanup_temp_dir(&dir);
+        result.unwrap();
+    }
+
+    #[test]
+    fn delete_note_file_and_index_removes_index_when_delete_removes_file() {
+        let dir = make_temp_dir("delete-note-success");
+        let result = (|| -> Result<(), String> {
+            auto_save_markdown_note(
+                &dir,
+                &AutoSavePayload {
+                    note_id: "note-1".to_string(),
+                    title: "Alpha".to_string(),
+                    content: "# Alpha".to_string(),
+                    folder_path: Some("alpha".to_string()),
+                    is_title_manual: Some(true),
+                    is_pinned: Some(false),
+                },
+            )?;
+
+            let path = resolve_note_file_path(&dir, "note-1")?
+                .ok_or_else(|| "missing note path".to_string())?;
+            let removed = delete_note_file_and_index(&dir, "note-1", |path| {
+                fs::remove_file(path).map_err(|e| e.to_string())
+            })?;
+
+            assert!(removed);
+            assert!(!path.exists());
+            let index = read_index(&dir);
+            assert!(!index.entries.contains_key("note-1"));
+
+            Ok(())
+        })();
+        cleanup_temp_dir(&dir);
+        result.unwrap();
+    }
+
+    #[test]
+    fn delete_note_file_and_index_preserves_index_when_delete_error_leaves_file() {
+        let dir = make_temp_dir("delete-note-error-present");
+        let result = (|| -> Result<(), String> {
+            auto_save_markdown_note(
+                &dir,
+                &AutoSavePayload {
+                    note_id: "note-1".to_string(),
+                    title: "Alpha".to_string(),
+                    content: "# Alpha".to_string(),
+                    folder_path: Some("alpha".to_string()),
+                    is_title_manual: Some(true),
+                    is_pinned: Some(false),
+                },
+            )?;
+
+            let result =
+                delete_note_file_and_index(&dir, "note-1", |_| Err("trash canceled".to_string()));
+
+            assert_eq!(result.unwrap_err(), "trash canceled");
+            let index = read_index(&dir);
+            assert!(index.entries.contains_key("note-1"));
+            let path = resolve_note_file_path(&dir, "note-1")?
+                .ok_or_else(|| "missing note path".to_string())?;
+            assert!(path.exists());
+
+            Ok(())
+        })();
+        cleanup_temp_dir(&dir);
+        result.unwrap();
+    }
+
+    #[test]
+    fn delete_note_file_and_index_accepts_delete_error_when_file_is_missing() {
+        let dir = make_temp_dir("delete-note-error-missing");
+        let result = (|| -> Result<(), String> {
+            auto_save_markdown_note(
+                &dir,
+                &AutoSavePayload {
+                    note_id: "note-1".to_string(),
+                    title: "Alpha".to_string(),
+                    content: "# Alpha".to_string(),
+                    folder_path: Some("alpha".to_string()),
+                    is_title_manual: Some(true),
+                    is_pinned: Some(false),
+                },
+            )?;
+
+            let path = resolve_note_file_path(&dir, "note-1")?
+                .ok_or_else(|| "missing note path".to_string())?;
+            let removed = delete_note_file_and_index(&dir, "note-1", |path| {
+                fs::remove_file(path).map_err(|e| e.to_string())?;
+                Err("file disappeared".to_string())
+            })?;
+
+            assert!(removed);
+            assert!(!path.exists());
+            let index = read_index(&dir);
+            assert!(!index.entries.contains_key("note-1"));
+
+            Ok(())
+        })();
+        cleanup_temp_dir(&dir);
+        result.unwrap();
+    }
+
+    #[test]
+    fn delete_note_file_and_index_preserves_recreated_same_path_file() {
+        let dir = make_temp_dir("delete-recreated-same-path");
+        let result = (|| -> Result<(), String> {
+            auto_save_markdown_note(
+                &dir,
+                &AutoSavePayload {
+                    note_id: "note-1".to_string(),
+                    title: "Alpha".to_string(),
+                    content: "# Alpha".to_string(),
+                    folder_path: Some("alpha".to_string()),
+                    is_title_manual: Some(true),
+                    is_pinned: Some(false),
+                },
+            )?;
+
+            let result = delete_note_file_and_index(&dir, "note-1", |path| {
+                fs::remove_file(path).map_err(|e| e.to_string())?;
+                fs::write(path, "# Alpha recreated").map_err(|e| e.to_string())?;
+                Ok(())
+            });
+
+            assert!(result.is_err());
+            let index = read_index(&dir);
+            assert!(index.entries.contains_key("note-1"));
+            let path = resolve_note_file_path(&dir, "note-1")?
+                .ok_or_else(|| "missing note path".to_string())?;
             assert!(path.exists());
 
             Ok(())

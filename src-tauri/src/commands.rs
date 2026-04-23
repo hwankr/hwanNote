@@ -224,54 +224,16 @@ pub fn cmd_folder_delete(app: AppHandle, folder_path: String) -> Result<FolderDe
     file_manager::delete_folder(&effective_dir, &folder_path)
 }
 
-fn trash_note_file_or_accept_missing<F>(file_path: &Path, delete_file: F) -> Result<(), String>
-where
-    F: FnOnce(&Path) -> Result<(), String>,
-{
-    match delete_file(file_path) {
-        Ok(()) => Ok(()),
-        Err(delete_error) => match file_path
-            .try_exists()
-            .map_err(|e| format!("Failed to recheck note file after trash error: {e}"))?
-        {
-            false => Ok(()),
-            true => Err(delete_error),
-        },
-    }
-}
-
 #[tauri::command]
 pub async fn cmd_note_delete(app: AppHandle, note_id: String) -> Result<bool, String> {
     let effective_dir = resolve_effective_dir(&app);
-    let file_path = match file_manager::resolve_note_file_path(&effective_dir, &note_id)? {
-        Some(p) => p,
-        None => return Ok(false),
-    };
-
-    match file_path
-        .try_exists()
-        .map_err(|e| format!("Failed to check note file before delete: {e}"))?
-    {
-        true => {
-            let trash_result = tauri::async_runtime::spawn_blocking({
-                let file_path = file_path.clone();
-                move || {
-                    trash_note_file_or_accept_missing(&file_path, |path| {
-                        trash::delete(path).map_err(|e| e.to_string())
-                    })
-                }
-            })
-            .await
-            .map_err(|e| e.to_string())?;
-
-            trash_result?;
-        }
-        false => {}
-    }
-
-    let removed =
-        file_manager::remove_note_from_index_if_path(&effective_dir, &note_id, &file_path)?;
-    Ok(removed.is_some())
+    tauri::async_runtime::spawn_blocking(move || {
+        file_manager::delete_note_file_and_index(&effective_dir, &note_id, |path| {
+            trash::delete(path).map_err(|e| e.to_string())
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ── Calendar commands ──
@@ -862,44 +824,4 @@ pub fn cmd_cloud_sync_set_active_source(
 
     config_manager::set_cloud_sync_source(&app, next_source)?;
     Ok(cmd_cloud_sync_status(app))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn make_temp_file(prefix: &str) -> std::path::PathBuf {
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("hwan-note-{prefix}-{stamp}.md"));
-        fs::write(&path, "# temp").unwrap();
-        path
-    }
-
-    #[test]
-    fn trash_note_file_or_accept_missing_accepts_file_removed_after_delete_error() {
-        let path = make_temp_file("trash-race-missing");
-        let result = trash_note_file_or_accept_missing(&path, |path| {
-            fs::remove_file(path).unwrap();
-            Err("file disappeared".to_string())
-        });
-
-        assert!(result.is_ok());
-        assert!(!path.exists());
-    }
-
-    #[test]
-    fn trash_note_file_or_accept_missing_preserves_error_when_file_still_exists() {
-        let path = make_temp_file("trash-race-present");
-        let result =
-            trash_note_file_or_accept_missing(&path, |_| Err("trash canceled".to_string()));
-
-        assert_eq!(result.unwrap_err(), "trash canceled");
-        assert!(path.exists());
-        fs::remove_file(path).unwrap();
-    }
 }
