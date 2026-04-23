@@ -81,6 +81,7 @@ const messages = {
     "sidebar.noteUnpin": "고정 해제",
     "sidebar.noteDelete": "삭제",
     "sidebar.noteDeleteConfirm": "'{{title}}' 메모를 삭제할까요?\n삭제된 메모는 휴지통으로 이동됩니다.",
+    "sidebar.noteDeleteFailed": "메모를 삭제하지 못했습니다. 메모가 목록에 남아 있으면 다시 시도해 주세요.",
     "settings.title": "설정",
     "settings.closeAria": "설정 닫기",
     "settings.close": "닫기",
@@ -311,6 +312,7 @@ const messages = {
     "sidebar.noteUnpin": "Unpin",
     "sidebar.noteDelete": "Delete",
     "sidebar.noteDeleteConfirm": "Delete '{{title}}'?\nThe note will be moved to the Recycle Bin.",
+    "sidebar.noteDeleteFailed": "The note could not be deleted. If it remains in the list, try again.",
     "settings.title": "Settings",
     "settings.closeAria": "Close settings",
     "settings.close": "Close",
@@ -498,4 +500,3 @@ export function translate(
   const localized = messages[language][key] ?? messages.ko[key] ?? key;
   return interpolate(localized, vars);
 }
-

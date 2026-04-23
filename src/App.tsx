@@ -1,6 +1,6 @@
 import { Editor as TiptapEditor } from "@tiptap/react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { message } from "@tauri-apps/plugin-dialog";
+import { confirm as confirmDialog, message } from "@tauri-apps/plugin-dialog";
 import { type PointerEvent as ReactPointerEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { hwanNote, type CloudProviderInfo, type CloudSyncSource, type LoadedNote } from "./lib/tauriApi";
 import Editor, { restoreEditorFocus } from "./components/Editor";
@@ -1623,10 +1623,27 @@ export default function App() {
     });
   }, [resolveDirtyTabs, runGuardedFlow]);
 
+  const confirmDeleteNote = useCallback(async (tab: NoteTab) => {
+    const title = tab.title.trim() || t("common.untitled");
+    return confirmDialog(t("sidebar.noteDeleteConfirm", { title }), {
+      title: t("sidebar.noteDelete"),
+      kind: "warning"
+    });
+  }, [t]);
+
   const handleDeleteNote = useCallback(async (id: string) => {
+    const initialTab = getTabById(id);
+    if (!initialTab) {
+      return false;
+    }
+
+    const confirmed = await confirmDeleteNote(initialTab);
+    if (!confirmed) {
+      return false;
+    }
+
     return runGuardedFlow(async () => {
-      const tab = getTabById(id);
-      if (!tab) {
+      if (!getTabById(id)) {
         return false;
       }
 
@@ -1642,10 +1659,11 @@ export default function App() {
         return true;
       } catch (error) {
         console.error("Failed to delete note:", error);
+        await message(t("sidebar.noteDeleteFailed"), { title: t("sidebar.noteDelete"), kind: "error" });
         return false;
       }
     });
-  }, [getTabById, removeNote, resolveDirtyTabs, runGuardedFlow]);
+  }, [confirmDeleteNote, getTabById, removeNote, resolveDirtyTabs, runGuardedFlow, t]);
 
   const handleBrowseAutoSaveDir = useCallback(async () => {
     const didResolve = await resolveOpenTabsBeforeReload();

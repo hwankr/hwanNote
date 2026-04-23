@@ -138,13 +138,9 @@ export default function Sidebar({
       label: tt("sidebar.noteDelete"),
       danger: true,
       onClick: () => {
+        const noteId = noteMenu.noteId;
         setNoteMenu(null);
-        const confirmed = window.confirm(
-          tt("sidebar.noteDeleteConfirm", { title: noteMenuTarget.title })
-        );
-        if (confirmed) {
-          onDeleteNote(noteMenu.noteId);
-        }
+        onDeleteNote(noteId);
       }
     });
 
