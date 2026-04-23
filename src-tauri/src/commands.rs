@@ -227,22 +227,13 @@ pub fn cmd_folder_delete(app: AppHandle, folder_path: String) -> Result<FolderDe
 #[tauri::command]
 pub async fn cmd_note_delete(app: AppHandle, note_id: String) -> Result<bool, String> {
     let effective_dir = resolve_effective_dir(&app);
-    let file_path = match file_manager::remove_note_from_index(&effective_dir, &note_id)? {
-        Some(p) => p,
-        None => return Ok(false),
-    };
-
-    // trash::delete() is synchronous — dispatch to blocking thread
     tauri::async_runtime::spawn_blocking(move || {
-        if let Err(e) = trash::delete(&file_path) {
-            tracing::warn!("Failed to trash file {:?}: {}", file_path, e);
-            // File may already be missing; index entry was already removed
-        }
+        file_manager::delete_note_file_and_index(&effective_dir, &note_id, |path| {
+            trash::delete(path).map_err(|e| e.to_string())
+        })
     })
     .await
-    .map_err(|e| e.to_string())?;
-
-    Ok(true)
+    .map_err(|e| e.to_string())?
 }
 
 // ── Calendar commands ──
