@@ -5,6 +5,29 @@ All notable user-facing changes to HwanNote are documented here.
 This project follows [Semantic Versioning](https://semver.org/) and commit messages use the
 [Conventional Commits](https://www.conventionalcommits.org/) style.
 
+## [0.8.1] - 2026-04-23
+
+Fixes the note-list right-click delete flow so deletion only completes after
+the user confirms and the backend can safely move the note file to trash.
+
+### Fixed
+
+- **Delete confirmation now gates destructive work.** Right-clicking a note and
+  choosing Delete now delegates to the app-level delete handler, which asks for
+  confirmation before resolving unsaved changes or calling the backend delete
+  command.
+- **Canceled or failed trash operations preserve notes.** If the OS trash step
+  fails, is canceled, or cannot confirm the file state, HwanNote leaves the
+  note in the sidebar and keeps the library index intact instead of silently
+  dropping it.
+- **Stale missing files still clean up safely.** If the index points at a file
+  that is already gone before deletion starts, HwanNote can remove only that
+  stale index entry.
+- **Autosave/delete races are guarded.** Backend delete now resolves, trashes,
+  and updates the index inside the file-manager delete transaction, with tests
+  covering failed trash, missing files, same-path recreation, and concurrent
+  path changes.
+
 ## [0.8.0] — 2026-04-23
 
 Introduces a three-kind classification for calendar items — **Task**, **Event**,
