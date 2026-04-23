@@ -1170,6 +1170,24 @@ pub fn load_markdown_notes(auto_save_dir: &Path) -> Result<Vec<LoadedNote>, Stri
     Ok(notes)
 }
 
+pub fn resolve_note_file_path(
+    auto_save_dir: &Path,
+    note_id: &str,
+) -> Result<Option<PathBuf>, String> {
+    let safe_id = sanitize_note_id(note_id);
+    if safe_id.is_empty() {
+        return Ok(None);
+    }
+
+    let index = read_index(auto_save_dir);
+    let entry = match index.entries.get(&safe_id) {
+        Some(e) => e,
+        None => return Ok(None),
+    };
+
+    Ok(Some(auto_save_dir.join(&entry.relative_path)))
+}
+
 pub fn remove_note_from_index(
     auto_save_dir: &Path,
     note_id: &str,
@@ -1443,6 +1461,7 @@ mod tests {
                     content: "# Alpha".to_string(),
                     folder_path: Some("alpha".to_string()),
                     is_title_manual: Some(true),
+                    is_pinned: Some(false),
                 },
             )?;
 
@@ -1475,6 +1494,7 @@ mod tests {
                     content: "# Alpha".to_string(),
                     folder_path: Some("alpha".to_string()),
                     is_title_manual: Some(true),
+                    is_pinned: Some(false),
                 },
             )?;
             auto_save_markdown_note(
@@ -1485,6 +1505,7 @@ mod tests {
                     content: "# Beta".to_string(),
                     folder_path: Some("alpha/child".to_string()),
                     is_title_manual: Some(true),
+                    is_pinned: Some(false),
                 },
             )?;
 
@@ -1516,6 +1537,7 @@ mod tests {
                     content: "Body first line\nSecond line".to_string(),
                     folder_path: None,
                     is_title_manual: Some(true),
+                    is_pinned: Some(false),
                 },
             )?;
 
@@ -1538,6 +1560,35 @@ mod tests {
             assert!(notes[0].is_title_manual);
             assert_eq!(notes[0].plain_text, "Body first line\nSecond line");
             assert!(!notes[0].content.contains("hwan-note:manual-title"));
+            Ok(())
+        })();
+        cleanup_temp_dir(&dir);
+        result.unwrap();
+    }
+
+    #[test]
+    fn resolve_note_file_path_does_not_remove_index_entry() {
+        let dir = make_temp_dir("resolve-note-path");
+        let result = (|| -> Result<(), String> {
+            auto_save_markdown_note(
+                &dir,
+                &AutoSavePayload {
+                    note_id: "note-1".to_string(),
+                    title: "Alpha".to_string(),
+                    content: "# Alpha".to_string(),
+                    folder_path: None,
+                    is_title_manual: Some(true),
+                    is_pinned: Some(false),
+                },
+            )?;
+
+            let path = resolve_note_file_path(&dir, "note-1")?
+                .ok_or_else(|| "missing note path".to_string())?;
+            assert!(path.exists());
+
+            let index = read_index(&dir);
+            assert!(index.entries.contains_key("note-1"));
+
             Ok(())
         })();
         cleanup_temp_dir(&dir);
@@ -1603,6 +1654,7 @@ mod tests {
                     content: "# Cloud version".to_string(),
                     folder_path: Some("team".to_string()),
                     is_title_manual: Some(true),
+                    is_pinned: Some(false),
                 },
             )?;
             auto_save_markdown_note(
@@ -1613,6 +1665,7 @@ mod tests {
                     content: "# Local version".to_string(),
                     folder_path: Some("team".to_string()),
                     is_title_manual: Some(true),
+                    is_pinned: Some(false),
                 },
             )?;
             create_folder(&src, "empty")?;
@@ -1657,6 +1710,7 @@ mod tests {
                     content: "# Local root version".to_string(),
                     folder_path: Some("team".to_string()),
                     is_title_manual: Some(true),
+                    is_pinned: Some(false),
                 },
             )?;
             auto_save_markdown_note(
@@ -1667,6 +1721,7 @@ mod tests {
                     content: "# Cloud version".to_string(),
                     folder_path: Some("team".to_string()),
                     is_title_manual: Some(true),
+                    is_pinned: Some(false),
                 },
             )?;
 
