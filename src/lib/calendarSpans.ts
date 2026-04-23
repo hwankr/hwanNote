@@ -51,6 +51,7 @@ export function computeWeekSpanBars(
   const candidates: Candidate[] = [];
   for (const [sourceDateKey, day] of Object.entries(data.todos)) {
     for (const todo of day.items) {
+      if (todo.kind && todo.kind !== "task") continue;
       if (todo.showSpan === false) continue;
       if (todo.dueDateKey === null) continue;
       if (todo.dueDateKey <= sourceDateKey) continue; // single-day or invalid

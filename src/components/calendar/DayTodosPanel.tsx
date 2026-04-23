@@ -1,6 +1,10 @@
 ﻿import { useCallback, useState } from "react";
 import { useI18n } from "../../i18n/context";
-import type { TodoItem as CalendarTodoItem } from "../../lib/calendarData";
+import {
+  TODO_KINDS,
+  type TodoItem as CalendarTodoItem,
+  type TodoKind,
+} from "../../lib/calendarData";
 import type { PinnedNote } from "./CalendarSidebar";
 import TodoItem from "./TodoItem";
 
@@ -9,7 +13,7 @@ interface DayTodosPanelProps {
   dayTodos: CalendarTodoItem[];
   linkedNoteIds: string[];
   pinnedNotes: PinnedNote[];
-  onCreateTodo: (dateKey: string, text: string) => void;
+  onCreateTodo: (dateKey: string, text: string, kind: TodoKind) => void;
   onToggleTodo: (dateKey: string, todoId: string) => void;
   onUpdateTodo: (dateKey: string, todoId: string, text: string) => void;
   onDeleteTodo: (dateKey: string, todoId: string) => void;
@@ -35,6 +39,7 @@ export default function DayTodosPanel({
 }: DayTodosPanelProps) {
   const { t } = useI18n();
   const [newTodoText, setNewTodoText] = useState("");
+  const [newTodoKind, setNewTodoKind] = useState<TodoKind>("task");
   const [pinnedCollapsed, setPinnedCollapsed] = useState(false);
 
   const handleAddTodo = useCallback(() => {
@@ -43,13 +48,33 @@ export default function DayTodosPanel({
       return;
     }
 
-    onCreateTodo(selectedDate, trimmed);
+    onCreateTodo(selectedDate, trimmed, newTodoKind);
     setNewTodoText("");
-  }, [newTodoText, onCreateTodo, selectedDate]);
+  }, [newTodoText, newTodoKind, onCreateTodo, selectedDate]);
 
   return (
     <>
       <div className="todo-add-row">
+        <div className="todo-kind-selector" role="radiogroup" aria-label={t("calendar.kindLabel")}>
+          {TODO_KINDS.map((kindOption) => (
+            <button
+              key={kindOption}
+              type="button"
+              role="radio"
+              aria-checked={newTodoKind === kindOption}
+              className={`todo-kind-option kind-${kindOption}${newTodoKind === kindOption ? " active" : ""}`}
+              onClick={() => setNewTodoKind(kindOption)}
+            >
+              {t(
+                kindOption === "task"
+                  ? "calendar.kindTask"
+                  : kindOption === "event"
+                    ? "calendar.kindEvent"
+                    : "calendar.kindDeadline"
+              )}
+            </button>
+          ))}
+        </div>
         <input
           type="text"
           className="todo-add-input"

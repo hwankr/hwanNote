@@ -6,6 +6,7 @@ import {
   type CalendarTodoGroup,
   type CalendarTodoRow,
   type TodoItem,
+  type TodoKind,
 } from "../../lib/calendarData";
 import { getWeekRange, type WeekStart } from "../../lib/calendarRange";
 import AllTodosPanel from "./AllTodosPanel";
@@ -31,7 +32,7 @@ interface CalendarSidebarProps {
   groupedTodoRows: Record<CalendarTodoGroup, CalendarTodoRow[]>;
   linkedNoteIds: string[];
   pinnedNotes: PinnedNote[];
-  onCreateTodo: (dateKey: string, text: string) => void;
+  onCreateTodo: (dateKey: string, text: string, kind: TodoKind) => void;
   onToggleTodo: (dateKey: string, todoId: string) => void;
   onUpdateTodo: (dateKey: string, todoId: string, text: string) => void;
   onDeleteTodo: (dateKey: string, todoId: string) => void;

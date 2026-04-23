@@ -23,9 +23,9 @@ interface AllTodosPanelProps {
   onSetInboxTodoDueDate?: (todoId: string, dueDateKey: string | null) => void;
 }
 
-const OPEN_GROUPS = CALENDAR_TODO_GROUP_ORDER.filter(
-  (group): group is Exclude<CalendarTodoGroup, "done" | "inbox"> =>
-    group !== "done" && group !== "inbox"
+const TASK_OPEN_GROUPS = CALENDAR_TODO_GROUP_ORDER.filter(
+  (group): group is "overdue" | "dueSoon" | "upcoming" | "noDueDate" =>
+    group === "overdue" || group === "dueSoon" || group === "upcoming" || group === "noDueDate"
 );
 
 export default function AllTodosPanel({
@@ -61,7 +61,7 @@ export default function AllTodosPanel({
     noDueDate: t("calendar.groupNoDueDate"),
   } as const;
 
-  const openSections = OPEN_GROUPS.map((key) => ({
+  const openSections = TASK_OPEN_GROUPS.map((key) => ({
     key,
     title: sectionTitleByKey[key],
     items: groupedRows[key],
@@ -69,6 +69,8 @@ export default function AllTodosPanel({
 
   const inboxRows = groupedRows.inbox;
   const doneRows = groupedRows.done;
+  const eventRows = groupedRows.events;
+  const deadlineRows = groupedRows.deadlines;
 
   return (
     <div className="calendar-all-panel">
@@ -115,6 +117,60 @@ export default function AllTodosPanel({
           </div>
         )}
       </section>
+
+      {eventRows.length > 0 && (
+        <section className="calendar-task-section calendar-events-section">
+          <div className="calendar-task-section-header">
+            <h4>{t("calendar.groupEvents")}</h4>
+            <span className="calendar-task-section-count">{eventRows.length}</span>
+          </div>
+          <div className="calendar-task-section-list">
+            {eventRows.map((row) => {
+              const rowDateKey = row.sourceDateKey as string;
+              return (
+                <TodoItem
+                  key={`${rowDateKey}:${row.id}`}
+                  item={row}
+                  sourceDateKey={rowDateKey}
+                  showSourceDate
+                  isOverdue={false}
+                  onToggle={() => onToggleTodo(rowDateKey, row.id)}
+                  onUpdate={(text) => onUpdateTodo(rowDateKey, row.id, text)}
+                  onDelete={() => onDeleteTodo(rowDateKey, row.id)}
+                  onSelectSourceDate={onOpenSourceDate}
+                />
+              );
+            })}
+          </div>
+        </section>
+      )}
+
+      {deadlineRows.length > 0 && (
+        <section className="calendar-task-section calendar-deadlines-section">
+          <div className="calendar-task-section-header">
+            <h4>{t("calendar.groupDeadlines")}</h4>
+            <span className="calendar-task-section-count">{deadlineRows.length}</span>
+          </div>
+          <div className="calendar-task-section-list">
+            {deadlineRows.map((row) => {
+              const rowDateKey = row.sourceDateKey as string;
+              return (
+                <TodoItem
+                  key={`${rowDateKey}:${row.id}`}
+                  item={row}
+                  sourceDateKey={rowDateKey}
+                  showSourceDate
+                  isOverdue={false}
+                  onToggle={() => onToggleTodo(rowDateKey, row.id)}
+                  onUpdate={(text) => onUpdateTodo(rowDateKey, row.id, text)}
+                  onDelete={() => onDeleteTodo(rowDateKey, row.id)}
+                  onSelectSourceDate={onOpenSourceDate}
+                />
+              );
+            })}
+          </div>
+        </section>
+      )}
 
       {openSections.map((section) => (
         <section key={section.key} className="calendar-task-section">

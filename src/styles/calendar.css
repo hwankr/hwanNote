@@ -321,6 +321,9 @@
 /* —— Todo Add —— */
 
 .todo-add-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   padding: 16px 16px 12px;
 }
 
@@ -896,4 +899,101 @@ button.todo-meta-chip.readonly {
 .todo-span-chip.active {
   border-color: var(--accent);
   color: var(--accent);
+}
+
+/* —— Kind badge in TodoItem (replaces checkbox for events/deadlines) —— */
+
+.todo-kind-badge {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  margin-top: 3px;
+  border-radius: 5px;
+}
+
+.todo-kind-badge.kind-event {
+  color: var(--kind-event);
+  background: var(--kind-event-bg);
+}
+
+.todo-kind-badge.kind-deadline {
+  color: var(--kind-deadline);
+  background: var(--kind-deadline-bg);
+}
+
+.todo-item.kind-event .todo-text-button .todo-text {
+  color: var(--kind-event);
+  font-weight: 500;
+}
+
+.todo-item.kind-deadline .todo-text-button .todo-text {
+  color: var(--kind-deadline);
+  font-weight: 500;
+}
+
+/* —— Kind selector segmented control on Day add-row —— */
+
+.todo-kind-selector {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 6px;
+  background: var(--bg-editor);
+  border: 1px solid var(--border-soft);
+  flex-shrink: 0;
+}
+
+.todo-kind-option {
+  border: 0;
+  background: transparent;
+  padding: 5px 9px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.todo-kind-option:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.todo-kind-option.active {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-tab);
+}
+
+.todo-kind-option.active.kind-event {
+  color: var(--kind-event);
+}
+
+.todo-kind-option.active.kind-deadline {
+  color: var(--kind-deadline);
+}
+
+/* —— Day cell kind-colored dots —— */
+
+.day-dot.event-dot {
+  background: var(--kind-event);
+}
+
+.day-dot.deadline-dot {
+  background: var(--kind-deadline);
+}
+
+/* —— Events / Deadlines section headers in AllTodosPanel —— */
+
+.calendar-events-section .calendar-task-section-header h4 {
+  color: var(--kind-event);
+}
+
+.calendar-deadlines-section .calendar-task-section-header h4 {
+  color: var(--kind-deadline);
 }
