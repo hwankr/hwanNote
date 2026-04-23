@@ -232,18 +232,25 @@ pub async fn cmd_note_delete(app: AppHandle, note_id: String) -> Result<bool, St
         None => return Ok(false),
     };
 
-    if file_path.exists() {
-        let trash_result = tauri::async_runtime::spawn_blocking({
-            let file_path = file_path.clone();
-            move || trash::delete(&file_path).map_err(|e| e.to_string())
-        })
-        .await
-        .map_err(|e| e.to_string())?;
+    match file_path
+        .try_exists()
+        .map_err(|e| format!("Failed to check note file before delete: {e}"))?
+    {
+        true => {
+            let trash_result = tauri::async_runtime::spawn_blocking({
+                let file_path = file_path.clone();
+                move || trash::delete(&file_path).map_err(|e| e.to_string())
+            })
+            .await
+            .map_err(|e| e.to_string())?;
 
-        trash_result?;
+            trash_result?;
+        }
+        false => {}
     }
 
-    let removed = file_manager::remove_note_from_index(&effective_dir, &note_id)?;
+    let removed =
+        file_manager::remove_note_from_index_if_path(&effective_dir, &note_id, &file_path)?;
     Ok(removed.is_some())
 }
 

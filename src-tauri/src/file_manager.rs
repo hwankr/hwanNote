@@ -1188,9 +1188,10 @@ pub fn resolve_note_file_path(
     Ok(Some(auto_save_dir.join(&entry.relative_path)))
 }
 
-pub fn remove_note_from_index(
+pub fn remove_note_from_index_if_path(
     auto_save_dir: &Path,
     note_id: &str,
+    expected_file_path: &Path,
 ) -> Result<Option<PathBuf>, String> {
     let safe_id = sanitize_note_id(note_id);
     if safe_id.is_empty() {
@@ -1198,12 +1199,17 @@ pub fn remove_note_from_index(
     }
 
     let mut index = read_index(auto_save_dir);
-    let entry = match index.entries.remove(&safe_id) {
-        Some(e) => e,
+    let entry = match index.entries.get(&safe_id) {
+        Some(e) => e.clone(),
         None => return Ok(None),
     };
 
     let file_path = auto_save_dir.join(&entry.relative_path);
+    if file_path != expected_file_path {
+        return Err("Note index changed before delete completed".to_string());
+    }
+
+    index.entries.remove(&safe_id);
     write_index(auto_save_dir, &index)?;
     Ok(Some(file_path))
 }
@@ -1588,6 +1594,50 @@ mod tests {
 
             let index = read_index(&dir);
             assert!(index.entries.contains_key("note-1"));
+
+            Ok(())
+        })();
+        cleanup_temp_dir(&dir);
+        result.unwrap();
+    }
+
+    #[test]
+    fn remove_note_from_index_if_path_preserves_changed_index_entry() {
+        let dir = make_temp_dir("conditional-remove-changed-path");
+        let result = (|| -> Result<(), String> {
+            auto_save_markdown_note(
+                &dir,
+                &AutoSavePayload {
+                    note_id: "note-1".to_string(),
+                    title: "Alpha".to_string(),
+                    content: "# Alpha".to_string(),
+                    folder_path: Some("alpha".to_string()),
+                    is_title_manual: Some(true),
+                    is_pinned: Some(false),
+                },
+            )?;
+
+            let old_path = resolve_note_file_path(&dir, "note-1")?
+                .ok_or_else(|| "missing old note path".to_string())?;
+
+            auto_save_markdown_note(
+                &dir,
+                &AutoSavePayload {
+                    note_id: "note-1".to_string(),
+                    title: "Alpha".to_string(),
+                    content: "# Alpha moved".to_string(),
+                    folder_path: Some("beta".to_string()),
+                    is_title_manual: Some(true),
+                    is_pinned: Some(false),
+                },
+            )?;
+
+            let result = remove_note_from_index_if_path(&dir, "note-1", &old_path);
+            assert!(result.is_err());
+
+            let index = read_index(&dir);
+            let entry = index.entries.get("note-1").unwrap();
+            assert!(entry.relative_path.starts_with("beta/"));
 
             Ok(())
         })();
