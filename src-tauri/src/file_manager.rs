@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
+use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::time::SystemTime;
 
 use regex::Regex;
@@ -23,10 +23,17 @@ static WHITESPACE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").unwr
 static TRAILING_DOTS_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\.+$").unwrap());
 static PLAIN_TASK_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(\s*)- \[[ xX]\]\s*").unwrap());
+static NOTE_INDEX_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 const TOGGLE_BLOCK_END: &str = ":::";
 const MANUAL_TITLE_META_PREFIX: &str = "<!-- hwan-note:manual-title:";
 const MANUAL_TITLE_META_SUFFIX: &str = " -->";
+
+fn lock_note_index() -> MutexGuard<'static, ()> {
+    NOTE_INDEX_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 // ── Types ──
 
@@ -901,6 +908,8 @@ pub fn rename_folder(auto_save_dir: &Path, from: &str, to: &str) -> Result<Vec<S
         return Err("Cannot move a folder into its own child.".to_string());
     }
 
+    let _index_guard = lock_note_index();
+
     let source_dir = auto_save_dir.join(&from_path);
     if !source_dir.exists() {
         return Err("Folder not found.".to_string());
@@ -947,6 +956,8 @@ pub fn delete_folder(
     if normalized.is_empty() {
         return Err("Folder path is required.".to_string());
     }
+
+    let _index_guard = lock_note_index();
 
     let source_dir = auto_save_dir.join(&normalized);
     let prefix = format!("{}/", normalized);
@@ -1025,6 +1036,8 @@ pub fn auto_save_markdown_note(
 
     fs::create_dir_all(&target_dir).map_err(|e| e.to_string())?;
 
+    let _index_guard = lock_note_index();
+
     let mut index = read_index(auto_save_dir);
     let existing_entry = index.entries.get(&safe_id).cloned();
     let existing_path = existing_entry
@@ -1085,6 +1098,8 @@ pub fn auto_save_markdown_note(
 
 pub fn load_markdown_notes(auto_save_dir: &Path) -> Result<Vec<LoadedNote>, String> {
     fs::create_dir_all(auto_save_dir).map_err(|e| e.to_string())?;
+
+    let _index_guard = lock_note_index();
 
     let mut index = read_index(auto_save_dir);
     let by_relative_path = collect_markdown_file_map(auto_save_dir);
@@ -1198,6 +1213,8 @@ pub fn remove_note_from_index_if_path(
         return Ok(None);
     }
 
+    let _index_guard = lock_note_index();
+
     let mut index = read_index(auto_save_dir);
     let entry = match index.entries.get(&safe_id) {
         Some(e) => e.clone(),
@@ -1291,6 +1308,8 @@ pub fn migrate_notes(src_dir: &Path, dst_dir: &Path) -> Result<MigrationResult, 
         fs::create_dir_all(dst_dir.join(folder))
             .map_err(|e| format!("Failed to create destination folder: {}", e))?;
     }
+
+    let _index_guard = lock_note_index();
 
     let mut src_index = read_index(src_dir);
     let src_files = collect_markdown_file_map_skipping(src_dir, skip_src_subtree);
