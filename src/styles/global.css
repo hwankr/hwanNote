@@ -572,7 +572,13 @@ body.tab-dragging .tab:not(.dragging):hover {
 .workspace {
   display: flex;
   flex: 1;
+  min-width: 0;
   min-height: 0;
+  overflow: hidden;
+}
+
+.workspace > * {
+  min-width: 0;
 }
 
 .sidebar {
