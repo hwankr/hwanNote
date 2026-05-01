@@ -1709,7 +1709,7 @@ body.tab-dragging .tab:not(.dragging):hover {
 
 @media (max-width: 1080px) {
   .toolbar-title-field input {
-    width: 120px;
+    flex: 1 1 120px;
   }
 
   .toolbar-select {
