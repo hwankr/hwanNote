@@ -1463,9 +1463,10 @@ body.tab-dragging .tab:not(.dragging):hover {
 
 .statusbar {
   display: grid;
-  grid-template-columns: 1fr auto 1fr;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
   height: 30px;
+  min-width: 0;
   padding: 0 12px;
   border-top: 1px solid var(--border-soft);
   background: var(--bg-status);
