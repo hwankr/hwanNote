@@ -369,20 +369,9 @@ export default function TitleBar({
               </button>
             );
           })}
-          <button type="button" className="titlebar-btn add-tab-btn no-drag" onClick={onCreateTab}>
-            {AddTabIcon}
-          </button>
         </div>
-        <button
-          type="button"
-          className={`tab calendar-tab no-drag ${activeView === "calendar" ? "active" : ""}`}
-          onClick={() => onViewChange("calendar")}
-          title={t("view.calendar")}
-        >
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-            <path d="M5 1v1H3a1 1 0 00-1 1v10a1 1 0 001 1h10a1 1 0 001-1V3a1 1 0 00-1-1h-2V1h-1v1H6V1H5zm-2 4v8h10V5H3zm2 1h2v2H5V6zm3 0h2v2H8V6zm-3 3h2v2H5V9z" fill="currentColor"/>
-          </svg>
-          <span className="tab-title">{t("view.calendar")}</span>
+        <button type="button" className="titlebar-btn add-tab-btn no-drag" onClick={onCreateTab}>
+          {AddTabIcon}
         </button>
         {dragGhost && draggingTab ? (
           <div
@@ -402,6 +391,17 @@ export default function TitleBar({
           </div>
         ) : null}
         <div className="titlebar-drag-handle" aria-hidden="true" />
+        <button
+          type="button"
+          className={`tab calendar-tab no-drag ${activeView === "calendar" ? "active" : ""}`}
+          onClick={() => onViewChange("calendar")}
+          title={t("view.calendar")}
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path d="M5 1v1H3a1 1 0 00-1 1v10a1 1 0 001 1h10a1 1 0 001-1V3a1 1 0 00-1-1h-2V1h-1v1H6V1H5zm-2 4v8h10V5H3zm2 1h2v2H5V6zm3 0h2v2H8V6zm-3 3h2v2H5V9z" fill="currentColor"/>
+          </svg>
+          <span className="tab-title">{t("view.calendar")}</span>
+        </button>
       </div>
 
       <div className="titlebar-right no-drag">
