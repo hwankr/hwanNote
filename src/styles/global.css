@@ -53,9 +53,10 @@ select {
 
 .titlebar {
   display: grid;
-  grid-template-columns: 52px 1fr 138px;
+  grid-template-columns: 52px minmax(0, 1fr) 138px;
   align-items: center;
   height: 44px;
+  min-width: 0;
   border-bottom: 1px solid var(--border-soft);
   background: var(--bg-surface);
   -webkit-app-region: drag;
