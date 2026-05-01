@@ -1728,7 +1728,7 @@ body.tab-dragging .tab:not(.dragging):hover {
 
 @media (max-width: 980px) {
   .statusbar {
-    grid-template-columns: 1fr auto;
+    grid-template-columns: minmax(0, 1fr) auto;
   }
 
   .statusbar-center {
