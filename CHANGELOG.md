@@ -5,6 +5,52 @@ All notable user-facing changes to HwanNote are documented here.
 This project follows [Semantic Versioning](https://semver.org/) and commit messages use the
 [Conventional Commits](https://www.conventionalcommits.org/) style.
 
+## [0.9.0] - 2026-05-01
+
+Reworks the title bar so the tab strip, calendar tab, and window controls all
+stay readable when many notes are open or the window is narrow, and fixes a
+chain of layout bugs that caused the calendar view, toolbar, status bar, and
+sidebar to break when tabs grew long.
+
+### New Features
+
+- **Pinned calendar tab.** The calendar view tab is now anchored to the right
+  edge of the title bar, immediately to the left of the OS window controls.
+  It no longer scrolls off-screen when many note tabs are open.
+- **Always-visible "+" button.** The new-tab "+" button stays attached to the
+  right of the last note tab and remains visible at all tab counts. When the
+  strip is at full capacity the button auto-disables (greyed out, with a
+  "Tab strip is full" tooltip) instead of pushing tabs into a clipped state.
+- **Adaptive tab strip.** Note tabs now share the available width; as more
+  tabs open, every tab shrinks uniformly down to a 64 px floor that always
+  keeps the close ✕ button reachable.
+
+### Fixed
+
+- **Title bar no longer pushes the layout off-screen.** The title bar grid
+  used `1fr` for the tab strip column, which was internally `minmax(auto, 1fr)`
+  and grew with content. Switching to `minmax(0, 1fr)` keeps the bar inside
+  the viewport so the document never gets a horizontal scrollbar when many
+  tabs are open.
+- **Calendar view fully renders again.** With the title bar contained, the
+  calendar's month grid and todo sidebar both fit in the workspace at all
+  window widths. The calendar sidebar can now shrink with the workspace
+  instead of starving the month grid at narrow viewports.
+- **Status bar and toolbar respond to narrow windows.** The same
+  `minmax(0, 1fr)` fix is applied to the status bar grid (including the
+  `(max-width: 980px)` override). The toolbar title input is now flexible
+  via `flex: 1 1 180px` (and `flex: 1 1 120px` under the
+  `(max-width: 1080px)` override) so it shrinks instead of pushing other
+  buttons off the row.
+- **Tab title clipping is more legible.** Crowded tabs use `text-overflow:
+  clip` instead of `ellipsis`, so leading characters of every title remain
+  visible even when each tab is narrow — the previous behavior turned every
+  tab into a uniform "…" and made tabs indistinguishable.
+- **App shell is fenced against horizontal overflow.** `.app-shell` and
+  `.workspace` now carry `min-width: 0` and `overflow: hidden` so any future
+  child overflow stays inside its container instead of leaking to the
+  document.
+
 ## [0.8.1] - 2026-04-23
 
 Fixes the note-list right-click delete flow so deletion only completes after
