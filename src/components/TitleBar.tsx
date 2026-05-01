@@ -136,9 +136,9 @@ export default function TitleBar({
     const measure = () => {
       const calBtn = calendarTabRef.current?.offsetWidth ?? 0;
       const addBtn = addTabBtnRef.current?.offsetWidth ?? 0;
-      const dragHandleMin = 80;
+      const dragHandleMin = 48;
       const centerGap = 8;
-      const calendarMarginRight = 8;
+      const calendarMarginRight = 4;
       const addBtnMarginLeft = -2;
       const totalGapsAndMargins = centerGap * 3 + addBtnMarginLeft + calendarMarginRight;
       const available = center.clientWidth - calBtn - addBtn - dragHandleMin - totalGapsAndMargins;
@@ -155,7 +155,7 @@ export default function TitleBar({
 
   const canAddTab = useMemo(() => {
     const n = tabs.length + 1;
-    const required = n * 80 + (n - 1) * 6;
+    const required = n * 64 + (n - 1) * 6;
     return required <= tabsMaxSpace;
   }, [tabs.length, tabsMaxSpace]);
 
