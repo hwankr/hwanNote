@@ -237,8 +237,9 @@
 /* —— Sidebar —— */
 
 .calendar-sidebar {
-  width: 360px;
-  min-width: 320px;
+  flex: 0 1 360px;
+  width: clamp(260px, 30vw, 360px);
+  min-width: 0;
   border-left: 1px solid var(--border-soft);
   background: var(--bg-surface);
   display: flex;
