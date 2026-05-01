@@ -124,6 +124,26 @@ export default function TitleBar({
   const draggingTab = useMemo(() => tabs.find((tab) => tab.id === draggingTabId) ?? null, [tabs, draggingTabId]);
   const menuTargetIsSplit = Boolean(menuTarget && splitTabIds.has(menuTarget.id));
 
+  const activeTabTitle = useMemo(
+    () => tabs.find((tab) => tab.id === activeTabId)?.title ?? null,
+    [tabs, activeTabId]
+  );
+
+  useEffect(() => {
+    if (activeView !== "notes" || !activeTabId) return;
+    const tabsEl = tabsRef.current;
+    if (!tabsEl) return;
+    const activeEl = tabsEl.querySelector<HTMLElement>(`[data-tab-id="${activeTabId}"]`);
+    if (!activeEl) return;
+    const tabsRect = tabsEl.getBoundingClientRect();
+    const activeRect = activeEl.getBoundingClientRect();
+    if (activeRect.right > tabsRect.right) {
+      tabsEl.scrollLeft += activeRect.right - tabsRect.right;
+    } else if (activeRect.left < tabsRect.left) {
+      tabsEl.scrollLeft -= tabsRect.left - activeRect.left;
+    }
+  }, [activeTabId, activeView, activeTabTitle, tabs.length]);
+
   const handleWindowDragStart = (event: React.PointerEvent<HTMLElement>) => {
     if (event.button !== 0) return;
 
