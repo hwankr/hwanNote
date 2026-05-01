@@ -309,6 +309,8 @@ to:
 
 `flex: 0 1 360px` keeps the preferred size at 360 px but allows shrinking when the parent runs out of room. `width: clamp(260px, 30vw, 360px)` gives a sensible responsive band: never below 260 px (still readable for the todo lists), never above 360 px. `min-width: 0` removes the previous hard 320 px floor that was starving the month grid.
 
+> **Divergence (during execution):** The `width: clamp(260px, 30vw, 360px)` line above was dropped in commit `ee0bf53`. Both the code-quality and codex adverse reviews showed that an explicit `flex-basis` (`360px` from `flex: 0 1 360px`) overrides `width` for sizing in a flex container per CSS Flexbox §7, so the `clamp()` had no effect on the rendered minimum. The practical floor is provided by `minWidth: 960` in `src-tauri/tauri.conf.json`. Final block contains only `flex: 0 1 360px; min-width: 0; ...`.
+
 - [ ] **Step 2: Manual repro — calendar at narrow window**
 
 Run: `npm run dev`. Open the calendar view. Resize the Tauri window to ~720 px wide. Confirm:
