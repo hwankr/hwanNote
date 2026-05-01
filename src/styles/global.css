@@ -233,7 +233,7 @@ body.tab-dragging .tab:not(.dragging):hover {
 
 .tab-title {
   overflow: hidden;
-  text-overflow: ellipsis;
+  text-overflow: clip;
   white-space: nowrap;
 }
 
