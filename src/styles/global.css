@@ -323,10 +323,6 @@ body.tab-dragging .tab:not(.dragging):hover {
 .add-tab-btn {
   color: var(--text-muted);
   flex: 0 0 auto;
-  position: sticky;
-  right: 0;
-  z-index: 1;
-  background: var(--bg-surface);
 }
 
 .window-control {
