@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
 
@@ -32,7 +32,6 @@ impl Default for DownloadedUpdate {
         DownloadedUpdate(Mutex::new(None))
     }
 }
-
 
 pub struct PendingOpenIntents(pub Mutex<Vec<String>>);
 
@@ -79,6 +78,7 @@ struct UpdateStatusPayload {
 pub struct CloudSyncResult {
     provider: Option<String>,
     files_copied: u32,
+    calendar_copied: bool,
     active_source: String,
 }
 
@@ -98,21 +98,47 @@ struct CloudFolderMissingPayload {
     fallback_path: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResolvedStorageSource {
+    Local,
+    Cloud,
+    LocalFallback,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalendarLoadResult {
+    data: String,
+    loaded_from: String,
+    cloud_unavailable: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalendarSavePayload {
+    data: String,
+    loaded_from: String,
+}
+
 // ── Helpers ──
 
 fn resolve_effective_dir(app: &AppHandle) -> PathBuf {
+    resolve_calendar_dir(app).0
+}
+
+fn resolve_calendar_dir(app: &AppHandle) -> (PathBuf, ResolvedStorageSource) {
     let documents = dirs::document_dir().unwrap_or_else(|| PathBuf::from("."));
-    let local_dir = config_manager::get_local_auto_save_dir(app, &file_manager::get_auto_save_dir(&documents));
+    let local_dir = get_calendar_local_dir(app, &documents);
     let provider = config_manager::get_cloud_sync_provider(app);
     let active_source = config_manager::get_cloud_sync_source(app);
 
-    // Detect cloud folder missing at runtime
     if provider.is_some() && active_source == LibrarySource::Cloud {
         if let Some(cloud_dir) = config_manager::get_cloud_notes_dir(app) {
             if !cloud_dir.exists() {
                 tracing::warn!(
                     "Cloud sync folder missing: {:?}, falling back to local: {:?}",
-                    cloud_dir, local_dir
+                    cloud_dir,
+                    local_dir
                 );
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.emit(
@@ -123,19 +149,73 @@ fn resolve_effective_dir(app: &AppHandle) -> PathBuf {
                         },
                     );
                 }
-                return local_dir;
+                return (local_dir, ResolvedStorageSource::LocalFallback);
             }
-            return cloud_dir;
+            return (cloud_dir, ResolvedStorageSource::Cloud);
         }
+
+        return (local_dir, ResolvedStorageSource::LocalFallback);
     }
 
-    local_dir
+    (local_dir, ResolvedStorageSource::Local)
+}
+
+fn get_calendar_local_dir(app: &AppHandle, documents: &Path) -> PathBuf {
+    config_manager::get_local_auto_save_dir(app, &file_manager::get_auto_save_dir(documents))
+}
+
+fn resolve_calendar_save_dir(
+    app: &AppHandle,
+    loaded_from: ResolvedStorageSource,
+) -> Result<PathBuf, String> {
+    let documents = dirs::document_dir().unwrap_or_else(|| PathBuf::from("."));
+    match loaded_from {
+        ResolvedStorageSource::Local | ResolvedStorageSource::LocalFallback => {
+            Ok(get_calendar_local_dir(app, &documents))
+        }
+        ResolvedStorageSource::Cloud => {
+            let cloud_dir = config_manager::get_cloud_notes_dir(app)
+                .ok_or_else(|| "Cloud calendar directory is not configured.".to_string())?;
+            if cloud_dir.exists() {
+                Ok(cloud_dir)
+            } else {
+                Err("Cloud calendar directory is not available.".to_string())
+            }
+        }
+    }
 }
 
 fn library_source_to_str(source: LibrarySource) -> &'static str {
     match source {
         LibrarySource::Local => "local",
         LibrarySource::Cloud => "cloud",
+    }
+}
+
+fn resolved_storage_source_to_str(source: ResolvedStorageSource) -> &'static str {
+    match source {
+        ResolvedStorageSource::Local => "local",
+        ResolvedStorageSource::Cloud => "cloud",
+        ResolvedStorageSource::LocalFallback => "local_fallback",
+    }
+}
+
+fn parse_resolved_storage_source(value: &str) -> Result<ResolvedStorageSource, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "local" => Ok(ResolvedStorageSource::Local),
+        "cloud" => Ok(ResolvedStorageSource::Cloud),
+        "localfallback" | "local_fallback" => Ok(ResolvedStorageSource::LocalFallback),
+        _ => Err(format!("Invalid calendar storage source: {}", value)),
+    }
+}
+
+fn can_save_calendar(
+    loaded_from: ResolvedStorageSource,
+    current_source: ResolvedStorageSource,
+) -> bool {
+    match loaded_from {
+        ResolvedStorageSource::Cloud => current_source == ResolvedStorageSource::Cloud,
+        ResolvedStorageSource::Local | ResolvedStorageSource::LocalFallback => true,
     }
 }
 
@@ -219,7 +299,10 @@ pub fn cmd_folder_rename(app: AppHandle, from: String, to: String) -> Result<Vec
 }
 
 #[tauri::command]
-pub fn cmd_folder_delete(app: AppHandle, folder_path: String) -> Result<FolderDeleteResult, String> {
+pub fn cmd_folder_delete(
+    app: AppHandle,
+    folder_path: String,
+) -> Result<FolderDeleteResult, String> {
     let effective_dir = resolve_effective_dir(&app);
     file_manager::delete_folder(&effective_dir, &folder_path)
 }
@@ -238,41 +321,65 @@ pub async fn cmd_note_delete(app: AppHandle, note_id: String) -> Result<bool, St
 
 // ── Calendar commands ──
 
-const CALENDAR_FILE: &str = "calendar.json";
-
 #[tauri::command]
-pub fn cmd_calendar_load(app: AppHandle) -> Result<String, String> {
-    let dir = resolve_effective_dir(&app);
-    let path = dir.join(CALENDAR_FILE);
+pub fn cmd_calendar_load(app: AppHandle) -> Result<CalendarLoadResult, String> {
+    let (dir, loaded_from) = resolve_calendar_dir(&app);
+    let path = dir.join(file_manager::CALENDAR_FILENAME);
+    let cloud_unavailable = loaded_from == ResolvedStorageSource::LocalFallback;
+    let loaded_from = resolved_storage_source_to_str(loaded_from).to_string();
 
     if !path.exists() {
-        return Ok(String::new());
+        return Ok(CalendarLoadResult {
+            data: String::new(),
+            loaded_from,
+            cloud_unavailable,
+        });
     }
 
     match fs::read_to_string(&path) {
-        Ok(content) => Ok(content),
+        Ok(content) => Ok(CalendarLoadResult {
+            data: content,
+            loaded_from,
+            cloud_unavailable,
+        }),
         Err(e) => {
             tracing::error!("Failed to read calendar.json: {}", e);
             // Create backup of corrupted file
             let bak = dir.join("calendar.json.bak");
             let _ = fs::copy(&path, &bak);
-            Ok(String::new())
+            Ok(CalendarLoadResult {
+                data: String::new(),
+                loaded_from,
+                cloud_unavailable,
+            })
         }
     }
 }
 
 #[tauri::command]
-pub fn cmd_calendar_save(app: AppHandle, data: String) -> Result<(), String> {
-    let dir = resolve_effective_dir(&app);
+pub fn cmd_calendar_save(app: AppHandle, payload: CalendarSavePayload) -> Result<(), String> {
+    let loaded_from = parse_resolved_storage_source(&payload.loaded_from)?;
+    let (_, current_source) = resolve_calendar_dir(&app);
+
+    if !can_save_calendar(loaded_from, current_source) {
+        return Err(format!(
+            "Calendar save rejected: loaded from {}, but current storage resolves to {}.",
+            resolved_storage_source_to_str(loaded_from),
+            resolved_storage_source_to_str(current_source)
+        ));
+    }
+
+    let dir = resolve_calendar_save_dir(&app, loaded_from)?;
+
     if !dir.exists() {
         fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     }
 
-    let path = dir.join(CALENDAR_FILE);
+    let path = dir.join(file_manager::CALENDAR_FILENAME);
     let tmp_path = dir.join(".calendar.json.tmp");
 
     // Atomic write: write to temp file, then rename
-    fs::write(&tmp_path, data.as_bytes()).map_err(|e| {
+    fs::write(&tmp_path, payload.data.as_bytes()).map_err(|e| {
         tracing::error!("Failed to write calendar temp file: {}", e);
         e.to_string()
     })?;
@@ -299,7 +406,9 @@ pub struct SessionData {
 }
 
 fn get_session_dir(app: &AppHandle) -> PathBuf {
-    app.path().app_config_dir().unwrap_or_else(|_| PathBuf::from("."))
+    app.path()
+        .app_config_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
 }
 
 #[tauri::command]
@@ -439,9 +548,7 @@ pub fn cmd_note_save_txt(file_path: String, content: String) -> Result<bool, Str
 // ── Settings commands ──
 
 #[tauri::command]
-pub fn cmd_settings_browse_autosave_dir(
-    window: WebviewWindow,
-) -> Result<Option<String>, String> {
+pub fn cmd_settings_browse_autosave_dir(window: WebviewWindow) -> Result<Option<String>, String> {
     let result = window.dialog().file().blocking_pick_folder();
 
     match result {
@@ -461,7 +568,8 @@ pub fn cmd_settings_set_autosave_dir(
     config_manager::set_custom_auto_save_dir(&app, dir.as_deref())?;
 
     let documents = dirs::document_dir().unwrap_or_else(|| PathBuf::from("."));
-    let local_dir = config_manager::get_local_auto_save_dir(&app, &file_manager::get_auto_save_dir(&documents));
+    let local_dir =
+        config_manager::get_local_auto_save_dir(&app, &file_manager::get_auto_save_dir(&documents));
     let custom_dir = config_manager::get_custom_auto_save_dir(&app);
 
     Ok(AutoSaveDirInfo {
@@ -474,7 +582,8 @@ pub fn cmd_settings_set_autosave_dir(
 #[tauri::command]
 pub fn cmd_settings_get_autosave_dir(app: AppHandle) -> AutoSaveDirInfo {
     let documents = dirs::document_dir().unwrap_or_else(|| PathBuf::from("."));
-    let local_dir = config_manager::get_local_auto_save_dir(&app, &file_manager::get_auto_save_dir(&documents));
+    let local_dir =
+        config_manager::get_local_auto_save_dir(&app, &file_manager::get_auto_save_dir(&documents));
     let custom_dir = config_manager::get_custom_auto_save_dir(&app);
 
     AutoSaveDirInfo {
@@ -567,12 +676,7 @@ pub async fn cmd_updater_download(app: AppHandle) {
         None => return,
     };
 
-    let update = app
-        .state::<PendingUpdate>()
-        .0
-        .lock()
-        .unwrap()
-        .take();
+    let update = app.state::<PendingUpdate>().0.lock().unwrap().take();
 
     if let Some(update) = update {
         let mut downloaded: usize = 0;
@@ -643,12 +747,7 @@ pub fn cmd_updater_install(app: AppHandle) {
         None => return,
     };
 
-    let downloaded = app
-        .state::<DownloadedUpdate>()
-        .0
-        .lock()
-        .unwrap()
-        .take();
+    let downloaded = app.state::<DownloadedUpdate>().0.lock().unwrap().take();
 
     let Some(downloaded) = downloaded else {
         let _ = window.emit(
@@ -694,9 +793,7 @@ pub fn cmd_updater_install(app: AppHandle) {
 pub fn cmd_shell_open_external(app: AppHandle, url: String) -> Result<(), String> {
     // Validate URL protocol
     let allowed_schemes = ["http:", "https:", "mailto:"];
-    let has_valid_scheme = allowed_schemes
-        .iter()
-        .any(|scheme| url.starts_with(scheme));
+    let has_valid_scheme = allowed_schemes.iter().any(|scheme| url.starts_with(scheme));
 
     if !has_valid_scheme {
         return Err("Unsupported URL scheme".to_string());
@@ -736,27 +833,35 @@ pub async fn cmd_cloud_sync_enable(
         .as_ref()
         .ok_or("Sync folder not detected")?;
 
-    let cloud_notes_dir = PathBuf::from(sync_folder)
-        .join("HwanNote")
-        .join("Notes");
+    let cloud_notes_dir = PathBuf::from(sync_folder).join("HwanNote").join("Notes");
 
     // Create the cloud notes directory
     fs::create_dir_all(&cloud_notes_dir)
         .map_err(|e| format!("Failed to create cloud directory: {}", e))?;
 
-    let migration_result = if copy_existing {
+    let (migration_result, calendar_copied) = if copy_existing {
         let documents = dirs::document_dir().unwrap_or_else(|| PathBuf::from("."));
-        let src = config_manager::get_local_auto_save_dir(&app, &file_manager::get_auto_save_dir(&documents));
+        let src = config_manager::get_local_auto_save_dir(
+            &app,
+            &file_manager::get_auto_save_dir(&documents),
+        );
         let dst = cloud_notes_dir.clone();
 
-        tauri::async_runtime::spawn_blocking(move || file_manager::migrate_notes(&src, &dst))
-            .await
-            .map_err(|e| e.to_string())??
+        tauri::async_runtime::spawn_blocking(move || {
+            let migration_result = file_manager::migrate_notes(&src, &dst)?;
+            let calendar_copied = file_manager::migrate_calendar_file(&src, &dst)?;
+            Ok::<_, String>((migration_result, calendar_copied))
+        })
+        .await
+        .map_err(|e| e.to_string())??
     } else {
-        file_manager::MigrationResult {
-            files_copied: 0,
-            index_copied: false,
-        }
+        (
+            file_manager::MigrationResult {
+                files_copied: 0,
+                index_copied: false,
+            },
+            false,
+        )
     };
 
     config_manager::set_cloud_sync_provider(&app, Some(&provider))?;
@@ -765,6 +870,7 @@ pub async fn cmd_cloud_sync_enable(
     Ok(CloudSyncResult {
         provider: Some(provider),
         files_copied: migration_result.files_copied,
+        calendar_copied,
         active_source: library_source_to_str(LibrarySource::Cloud).to_string(),
     })
 }
@@ -777,6 +883,7 @@ pub async fn cmd_cloud_sync_disable(app: AppHandle) -> Result<CloudSyncResult, S
     Ok(CloudSyncResult {
         provider: None,
         files_copied: 0,
+        calendar_copied: false,
         active_source: library_source_to_str(LibrarySource::Local).to_string(),
     })
 }
@@ -824,4 +931,41 @@ pub fn cmd_cloud_sync_set_active_source(
 
     config_manager::set_cloud_sync_source(&app, next_source)?;
     Ok(cmd_cloud_sync_status(app))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{can_save_calendar, ResolvedStorageSource};
+
+    #[test]
+    fn calendar_save_allows_local_fallback_after_cloud_returns() {
+        assert!(can_save_calendar(
+            ResolvedStorageSource::LocalFallback,
+            ResolvedStorageSource::Cloud
+        ));
+    }
+
+    #[test]
+    fn calendar_save_allows_cloud_to_cloud() {
+        assert!(can_save_calendar(
+            ResolvedStorageSource::Cloud,
+            ResolvedStorageSource::Cloud
+        ));
+    }
+
+    #[test]
+    fn calendar_save_allows_local_fallback_to_local_fallback() {
+        assert!(can_save_calendar(
+            ResolvedStorageSource::LocalFallback,
+            ResolvedStorageSource::LocalFallback
+        ));
+    }
+
+    #[test]
+    fn calendar_save_rejects_cloud_loaded_data_when_cloud_is_missing() {
+        assert!(!can_save_calendar(
+            ResolvedStorageSource::Cloud,
+            ResolvedStorageSource::LocalFallback
+        ));
+    }
 }

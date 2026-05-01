@@ -5,6 +5,31 @@ All notable user-facing changes to HwanNote are documented here.
 This project follows [Semantic Versioning](https://semver.org/) and commit messages use the
 [Conventional Commits](https://www.conventionalcommits.org/) style.
 
+## [0.9.1] - 2026-05-01
+
+Fixes a cloud-sync data-loss risk where `calendar.json` could be overwritten
+with an empty fallback calendar if HwanNote started before Google Drive or
+another configured cloud folder was available.
+
+### Fixed
+
+- **Cloud calendars are protected during delayed Drive startup.** Calendar
+  loads now remember whether data came from local storage, cloud storage, or a
+  local fallback used while the cloud folder was missing. Fallback-loaded
+  calendar data is saved back to local storage instead of being written into
+  the cloud folder after Drive appears.
+- **Storage changes flush calendar edits first.** Changing the cloud provider,
+  switching between local and cloud libraries, or changing the local library
+  directory now saves pending calendar edits before the storage target changes
+  and reloads calendar data from the new source afterward.
+- **Existing cloud `calendar.json` files are not overwritten during migration.**
+  When local notes are copied into a cloud library, the calendar file is copied
+  only if the destination does not already have one. The copy uses exclusive
+  file creation so a concurrently downloaded cloud calendar still wins safely.
+- **Failed calendar saves block destructive transitions.** If the app cannot
+  flush calendar data before a storage change or window close, it keeps the
+  current session open and shows an error instead of silently dropping edits.
+
 ## [0.9.0] - 2026-05-01
 
 Reworks the title bar so the tab strip, calendar tab, and window controls all

@@ -1610,11 +1610,20 @@ export default function App() {
         return false;
       }
 
-      await useCalendarStore.getState().saveCalendarData();
+      try {
+        await useCalendarStore.getState().saveCalendarData();
+      } catch (error) {
+        console.error("Failed to save calendar data before exit:", error);
+        await message(t("settings.calendarSaveFailed"), {
+          title: t("settings.calendarSaveFailedTitle"),
+          kind: "error"
+        });
+        return false;
+      }
       await hwanNote.window.exit();
       return true;
     });
-  }, [resolveDirtyTabs, runGuardedFlow]);
+  }, [resolveDirtyTabs, runGuardedFlow, t]);
 
   const resolveOpenTabsBeforeReload = useCallback(async () => {
     return runGuardedFlow(async () => {
@@ -1665,6 +1674,20 @@ export default function App() {
     });
   }, [confirmDeleteNote, getTabById, removeNote, resolveDirtyTabs, runGuardedFlow, t]);
 
+  const flushCalendarBeforeStorageChange = useCallback(async () => {
+    try {
+      await useCalendarStore.getState().saveCalendarData();
+      return true;
+    } catch (error) {
+      console.error("Failed to save calendar data before storage change:", error);
+      await message(t("settings.calendarSaveFailed"), {
+        title: t("settings.calendarSaveFailedTitle"),
+        kind: "error"
+      });
+      return false;
+    }
+  }, [t]);
+
   const handleBrowseAutoSaveDir = useCallback(async () => {
     const didResolve = await resolveOpenTabsBeforeReload();
     if (!didResolve) {
@@ -1677,16 +1700,23 @@ export default function App() {
     const selected = await settingsApi.browseAutoSaveDir();
     if (!selected) return;
 
+    const didSaveCalendar = await flushCalendarBeforeStorageChange();
+    if (!didSaveCalendar) {
+      return;
+    }
+
     try {
       const result = await settingsApi.setAutoSaveDir(selected);
       setAutoSaveDir(result.effectiveDir);
       setAutoSaveDirIsDefault(result.isDefault);
 
       await loadLibraryState();
+      await useCalendarStore.getState().loadCalendarData();
+      useCalendarStore.getState().cleanOrphanNoteLinks();
     } catch (error) {
       console.error("Failed to set auto-save directory:", error);
     }
-  }, [loadLibraryState, resolveOpenTabsBeforeReload]);
+  }, [flushCalendarBeforeStorageChange, loadLibraryState, resolveOpenTabsBeforeReload]);
 
   const handleResetAutoSaveDir = useCallback(async () => {
     const didResolve = await resolveOpenTabsBeforeReload();
@@ -1697,20 +1727,32 @@ export default function App() {
     const settingsApi = hwanNote.settings;
     if (!settingsApi) return;
 
+    const didSaveCalendar = await flushCalendarBeforeStorageChange();
+    if (!didSaveCalendar) {
+      return;
+    }
+
     try {
       const result = await settingsApi.setAutoSaveDir(null);
       setAutoSaveDir(result.effectiveDir);
       setAutoSaveDirIsDefault(result.isDefault);
 
       await loadLibraryState();
+      await useCalendarStore.getState().loadCalendarData();
+      useCalendarStore.getState().cleanOrphanNoteLinks();
     } catch (error) {
       console.error("Failed to reset auto-save directory:", error);
     }
-  }, [loadLibraryState, resolveOpenTabsBeforeReload]);
+  }, [flushCalendarBeforeStorageChange, loadLibraryState, resolveOpenTabsBeforeReload]);
 
   const handleCloudSyncChange = useCallback(async (provider: string | null, options?: { copyLocalNotes: boolean }) => {
     const didResolve = await resolveOpenTabsBeforeReload();
     if (!didResolve) {
+      return;
+    }
+
+    const didSaveCalendar = await flushCalendarBeforeStorageChange();
+    if (!didSaveCalendar) {
       return;
     }
 
@@ -1722,11 +1764,13 @@ export default function App() {
       }
       await refreshLocalAutoSaveDir();
       await loadLibraryState();
+      await useCalendarStore.getState().loadCalendarData();
+      useCalendarStore.getState().cleanOrphanNoteLinks();
       await refreshCloudSyncState();
     } catch (error) {
       console.error("Failed to change cloud sync:", error);
     }
-  }, [loadLibraryState, refreshCloudSyncState, refreshLocalAutoSaveDir, resolveOpenTabsBeforeReload]);
+  }, [flushCalendarBeforeStorageChange, loadLibraryState, refreshCloudSyncState, refreshLocalAutoSaveDir, resolveOpenTabsBeforeReload]);
 
   const handleCloudSyncSourceChange = useCallback(async (source: CloudSyncSource) => {
     const didResolve = await resolveOpenTabsBeforeReload();
@@ -1734,14 +1778,21 @@ export default function App() {
       return;
     }
 
+    const didSaveCalendar = await flushCalendarBeforeStorageChange();
+    if (!didSaveCalendar) {
+      return;
+    }
+
     try {
       await hwanNote.cloud.setActiveSource(source);
       await loadLibraryState();
+      await useCalendarStore.getState().loadCalendarData();
+      useCalendarStore.getState().cleanOrphanNoteLinks();
       await refreshCloudSyncState();
     } catch (error) {
       console.error("Failed to switch library source:", error);
     }
-  }, [loadLibraryState, refreshCloudSyncState, resolveOpenTabsBeforeReload]);
+  }, [flushCalendarBeforeStorageChange, loadLibraryState, refreshCloudSyncState, resolveOpenTabsBeforeReload]);
 
   const handleInstallUpdate = useCallback(async () => {
     const didResolve = await resolveOpenTabsBeforeReload();

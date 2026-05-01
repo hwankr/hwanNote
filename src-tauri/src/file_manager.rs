@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::time::SystemTime;
@@ -9,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use sha1::Digest;
 
 const INDEX_FILENAME: &str = ".hwan-note-index.json";
+pub const CALENDAR_FILENAME: &str = "calendar.json";
 
 static TOGGLE_BLOCK_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^:::toggle\[(open|closed)\](?:\s+(.*))?$").unwrap());
@@ -1468,6 +1470,32 @@ pub fn migrate_notes(src_dir: &Path, dst_dir: &Path) -> Result<MigrationResult, 
     })
 }
 
+pub fn migrate_calendar_file(src_dir: &Path, dst_dir: &Path) -> Result<bool, String> {
+    let src_path = src_dir.join(CALENDAR_FILENAME);
+    if !src_path.exists() {
+        return Ok(false);
+    }
+
+    let dst_path = dst_dir.join(CALENDAR_FILENAME);
+    fs::create_dir_all(dst_dir).map_err(|e| format!("Failed to create destination: {}", e))?;
+
+    let bytes = fs::read(&src_path).map_err(|e| format!("Failed to read {:?}: {}", src_path, e))?;
+    let mut dst_file = match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&dst_path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(error) => return Err(format!("Failed to create {:?}: {}", dst_path, error)),
+    };
+
+    dst_file
+        .write_all(&bytes)
+        .map_err(|e| format!("Failed to copy {:?}: {}", src_path, e))?;
+    Ok(true)
+}
+
 pub fn title_from_filename(file_path: &Path) -> String {
     let stem = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
     let title: String = stem.trim().chars().take(50).collect();
@@ -2124,6 +2152,53 @@ mod tests {
             Ok(())
         })();
         cleanup_temp_dir(&root);
+        result.unwrap();
+    }
+
+    #[test]
+    fn migrate_calendar_file_copies_when_destination_is_missing() {
+        let src = make_temp_dir("migrate-calendar-src");
+        let dst = make_temp_dir("migrate-calendar-dst");
+        let result = (|| -> Result<(), String> {
+            let src_calendar = src.join(CALENDAR_FILENAME);
+            fs::write(&src_calendar, "{\"events\":[1]}").map_err(|e| e.to_string())?;
+            fs::remove_dir_all(&dst).map_err(|e| e.to_string())?;
+
+            let copied = migrate_calendar_file(&src, &dst)?;
+
+            assert!(copied);
+            assert_eq!(
+                fs::read_to_string(dst.join(CALENDAR_FILENAME)).map_err(|e| e.to_string())?,
+                "{\"events\":[1]}"
+            );
+            Ok(())
+        })();
+        cleanup_temp_dir(&src);
+        cleanup_temp_dir(&dst);
+        result.unwrap();
+    }
+
+    #[test]
+    fn migrate_calendar_file_preserves_existing_destination_calendar() {
+        let src = make_temp_dir("migrate-calendar-existing-src");
+        let dst = make_temp_dir("migrate-calendar-existing-dst");
+        let result = (|| -> Result<(), String> {
+            fs::write(src.join(CALENDAR_FILENAME), "{\"events\":[1]}")
+                .map_err(|e| e.to_string())?;
+            fs::write(dst.join(CALENDAR_FILENAME), "{\"events\":[2]}")
+                .map_err(|e| e.to_string())?;
+
+            let copied = migrate_calendar_file(&src, &dst)?;
+
+            assert!(!copied);
+            assert_eq!(
+                fs::read_to_string(dst.join(CALENDAR_FILENAME)).map_err(|e| e.to_string())?,
+                "{\"events\":[2]}"
+            );
+            Ok(())
+        })();
+        cleanup_temp_dir(&src);
+        cleanup_temp_dir(&dst);
         result.unwrap();
     }
 

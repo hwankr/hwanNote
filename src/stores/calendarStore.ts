@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { hwanNote } from "../lib/tauriApi";
+import { hwanNote, type CalendarStorageSource } from "../lib/tauriApi";
 import {
   compareCalendarTodoRows,
   createEmptyCalendarData,
@@ -27,6 +27,8 @@ interface CalendarStore {
   selectedDate: string;
   currentMonth: Date;
   loaded: boolean;
+  loadedFrom: CalendarStorageSource;
+  cloudUnavailable: boolean;
 
   loadCalendarData: () => Promise<void>;
   saveCalendarData: () => Promise<void>;
@@ -82,6 +84,10 @@ let saveTimer: number | null = null;
 let isSaving = false;
 let pendingSave = false;
 
+interface ExecuteSaveOptions {
+  throwOnError?: boolean;
+}
+
 function scheduleSave() {
   if (saveTimer !== null) {
     window.clearTimeout(saveTimer);
@@ -92,9 +98,26 @@ function scheduleSave() {
   }, AUTO_SAVE_DELAY_MS);
 }
 
-async function executeSave() {
+function waitForSaveIdle(): Promise<void> {
+  return new Promise((resolve) => {
+    const check = () => {
+      if (!isSaving) {
+        resolve();
+        return;
+      }
+      window.setTimeout(check, 25);
+    };
+    check();
+  });
+}
+
+async function executeSave(options: ExecuteSaveOptions = {}) {
   if (isSaving) {
     pendingSave = true;
+    if (options.throwOnError) {
+      await waitForSaveIdle();
+      return executeSave(options);
+    }
     return;
   }
 
@@ -102,9 +125,12 @@ async function executeSave() {
   try {
     const state = useCalendarStore.getState();
     const json = serializeCalendarData(state.data);
-    await hwanNote.calendar.save(json);
+    await hwanNote.calendar.save(json, state.loadedFrom);
   } catch (error) {
     console.error("Failed to save calendar data:", error);
+    if (options.throwOnError) {
+      throw error;
+    }
   } finally {
     isSaving = false;
     if (pendingSave) {
@@ -130,14 +156,26 @@ export const useCalendarStore = create<CalendarStore>((set) => ({
   selectedDate: formatDateKey(new Date()),
   currentMonth: new Date(),
   loaded: false,
+  loadedFrom: "local",
+  cloudUnavailable: false,
 
   loadCalendarData: async () => {
     try {
-      const raw = await hwanNote.calendar.load();
-      const data = parseCalendarData(raw);
-      set({ data, loaded: true });
+      const result = await hwanNote.calendar.load();
+      const data = parseCalendarData(result.data);
+      set({
+        data,
+        loaded: true,
+        loadedFrom: result.loadedFrom,
+        cloudUnavailable: result.cloudUnavailable,
+      });
     } catch {
-      set({ data: createEmptyCalendarData(), loaded: true });
+      set({
+        data: createEmptyCalendarData(),
+        loaded: true,
+        loadedFrom: "local",
+        cloudUnavailable: false,
+      });
     }
   },
 
@@ -146,7 +184,7 @@ export const useCalendarStore = create<CalendarStore>((set) => ({
       window.clearTimeout(saveTimer);
       saveTimer = null;
     }
-    await executeSave();
+    await executeSave({ throwOnError: true });
   },
 
   setSelectedDate: (dateKey) => set({ selectedDate: dateKey }),

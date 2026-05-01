@@ -60,6 +60,7 @@ export type CloudSyncSource = "local" | "cloud";
 export interface CloudSyncResult {
   provider: string | null;
   filesCopied: number;
+  calendarCopied: boolean;
   activeSource: CloudSyncSource;
 }
 
@@ -73,6 +74,14 @@ export interface CloudSyncStatus {
 export interface CloudFolderMissingData {
   expectedPath: string;
   fallbackPath: string;
+}
+
+export type CalendarStorageSource = "local" | "cloud" | "local_fallback";
+
+export interface CalendarLoadResult {
+  data: string;
+  loadedFrom: CalendarStorageSource;
+  cloudUnavailable: boolean;
 }
 
 export interface FolderDeleteResult {
@@ -201,10 +210,10 @@ export const hwanNote = {
 
   calendar: {
     load: () =>
-      invoke<string>("cmd_calendar_load"),
+      invoke<CalendarLoadResult>("cmd_calendar_load"),
 
-    save: (data: string) =>
-      invoke("cmd_calendar_save", { data }),
+    save: (data: string, loadedFrom: CalendarStorageSource) =>
+      invoke("cmd_calendar_save", { payload: { data, loadedFrom } }),
   },
 
   session: {
