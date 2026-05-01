@@ -136,8 +136,8 @@ select {
 }
 
 .titlebar-drag-handle {
-  flex: 0 0 clamp(64px, 12vw, 120px);
-  min-width: 64px;
+  flex: 0 0 clamp(80px, 12vw, 120px);
+  min-width: 80px;
   height: 100%;
 }
 
@@ -146,6 +146,7 @@ select {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex-shrink: 0;
   max-width: 220px;
   padding: 6px 10px;
   border: 1px solid transparent;
