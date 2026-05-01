@@ -127,12 +127,7 @@ select {
   flex: 0 1 auto;
   gap: 6px;
   min-width: 0;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-
-.tabs::-webkit-scrollbar {
-  display: none;
+  overflow: hidden;
 }
 
 .titlebar-drag-handle {
@@ -146,6 +141,7 @@ select {
   display: flex;
   align-items: center;
   gap: 6px;
+  min-width: 80px;
   max-width: 220px;
   padding: 6px 10px;
   border: 1px solid transparent;
@@ -308,6 +304,7 @@ body.tab-dragging .tab:not(.dragging):hover {
 .calendar-tab {
   gap: 5px;
   margin-right: 8px;
+  flex-shrink: 0;
   opacity: 0.7;
   border-left: 1px solid var(--border-soft);
 }
@@ -324,6 +321,17 @@ body.tab-dragging .tab:not(.dragging):hover {
   color: var(--text-muted);
   flex: 0 0 auto;
   margin-left: -2px;
+}
+
+.add-tab-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+  pointer-events: auto;
+}
+
+.add-tab-btn:disabled:hover {
+  background: transparent;
+  color: var(--text-muted);
 }
 
 .window-control {

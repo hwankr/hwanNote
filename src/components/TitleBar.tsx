@@ -114,35 +114,55 @@ export default function TitleBar({
   } | null>(null);
   const [menu, setMenu] = useState<{ tabId: string; x: number; y: number } | null>(null);
   const tabsRef = useRef<HTMLDivElement | null>(null);
+  const titlebarCenterRef = useRef<HTMLDivElement | null>(null);
+  const calendarTabRef = useRef<HTMLButtonElement | null>(null);
+  const addTabBtnRef = useRef<HTMLButtonElement | null>(null);
   const dragRef = useRef<{ tabId: string; startX: number; startY: number; active: boolean } | null>(null);
   const dragOverIdRef = useRef<string | null>(null);
   const dragOverPositionRef = useRef<"before" | "after" | null>(null);
   const didDragRef = useRef(false);
   const lastPointerRef = useRef<{ x: number; y: number } | null>(null);
 
+  const [tabsMaxSpace, setTabsMaxSpace] = useState(Number.POSITIVE_INFINITY);
+
   const menuTarget = useMemo(() => tabs.find((tab) => tab.id === menu?.tabId), [tabs, menu]);
   const draggingTab = useMemo(() => tabs.find((tab) => tab.id === draggingTabId) ?? null, [tabs, draggingTabId]);
   const menuTargetIsSplit = Boolean(menuTarget && splitTabIds.has(menuTarget.id));
 
-  const activeTabTitle = useMemo(
-    () => tabs.find((tab) => tab.id === activeTabId)?.title ?? null,
-    [tabs, activeTabId]
-  );
-
   useEffect(() => {
-    if (activeView !== "notes" || !activeTabId) return;
-    const tabsEl = tabsRef.current;
-    if (!tabsEl) return;
-    const activeEl = tabsEl.querySelector<HTMLElement>(`[data-tab-id="${activeTabId}"]`);
-    if (!activeEl) return;
-    const tabsRect = tabsEl.getBoundingClientRect();
-    const activeRect = activeEl.getBoundingClientRect();
-    if (activeRect.right > tabsRect.right) {
-      tabsEl.scrollLeft += activeRect.right - tabsRect.right;
-    } else if (activeRect.left < tabsRect.left) {
-      tabsEl.scrollLeft -= tabsRect.left - activeRect.left;
-    }
-  }, [activeTabId, activeView, activeTabTitle, tabs.length]);
+    const center = titlebarCenterRef.current;
+    if (!center) return;
+
+    const measure = () => {
+      const calBtn = calendarTabRef.current?.offsetWidth ?? 0;
+      const addBtn = addTabBtnRef.current?.offsetWidth ?? 0;
+      const dragHandleMin = 80;
+      const centerGap = 8;
+      const calendarMarginRight = 8;
+      const addBtnMarginLeft = -2;
+      const totalGapsAndMargins = centerGap * 3 + addBtnMarginLeft + calendarMarginRight;
+      const available = center.clientWidth - calBtn - addBtn - dragHandleMin - totalGapsAndMargins;
+      setTabsMaxSpace(Math.max(0, available));
+    };
+
+    const ro = new ResizeObserver(measure);
+    ro.observe(center);
+    if (calendarTabRef.current) ro.observe(calendarTabRef.current);
+    if (addTabBtnRef.current) ro.observe(addTabBtnRef.current);
+    measure();
+    return () => ro.disconnect();
+  }, []);
+
+  const canAddTab = useMemo(() => {
+    const n = tabs.length + 1;
+    const required = n * 80 + (n - 1) * 6;
+    return required <= tabsMaxSpace;
+  }, [tabs.length, tabsMaxSpace]);
+
+  const handleAddTabClick = () => {
+    if (!canAddTab) return;
+    onCreateTab();
+  };
 
   const handleWindowDragStart = (event: React.PointerEvent<HTMLElement>) => {
     if (event.button !== 0) return;
@@ -321,7 +341,7 @@ export default function TitleBar({
         </button>
       </div>
 
-      <div className="titlebar-center">
+      <div ref={titlebarCenterRef} className="titlebar-center">
         <div ref={tabsRef} className="tabs">
           {tabs.map((tab) => {
             const isSplitMember = splitTabIds.has(tab.id);
@@ -390,7 +410,15 @@ export default function TitleBar({
             );
           })}
         </div>
-        <button type="button" className="titlebar-btn add-tab-btn no-drag" onClick={onCreateTab}>
+        <button
+          ref={addTabBtnRef}
+          type="button"
+          className="titlebar-btn add-tab-btn no-drag"
+          onClick={handleAddTabClick}
+          disabled={!canAddTab}
+          aria-disabled={!canAddTab}
+          title={canAddTab ? undefined : t("titlebar.tabsFull")}
+        >
           {AddTabIcon}
         </button>
         {dragGhost && draggingTab ? (
@@ -412,6 +440,7 @@ export default function TitleBar({
         ) : null}
         <div className="titlebar-drag-handle" aria-hidden="true" />
         <button
+          ref={calendarTabRef}
           type="button"
           className={`tab calendar-tab no-drag ${activeView === "calendar" ? "active" : ""}`}
           onClick={() => onViewChange("calendar")}
