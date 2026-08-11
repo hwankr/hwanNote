@@ -3,7 +3,13 @@ import { Editor as TiptapEditor } from "@tiptap/react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { confirm as confirmDialog, message } from "@tauri-apps/plugin-dialog";
 import { type PointerEvent as ReactPointerEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { hwanNote, type CloudProviderInfo, type CloudSyncSource, type LoadedNote } from "./lib/tauriApi";
+import {
+  hwanNote,
+  type CloudProviderInfo,
+  type CloudSyncSource,
+  type LoadedNote,
+  type NoteStorageSource
+} from "./lib/tauriApi";
 import Editor, { restoreEditorFocus } from "./components/Editor";
 import SettingsPanel, { type ThemeMode } from "./components/SettingsPanel";
 import Sidebar, { type AppView, type SidebarTag } from "./components/Sidebar";
@@ -30,6 +36,7 @@ import {
 import { applyTheme, type ThemeName } from "./styles/themes";
 import { normalizeFolderPath } from "./lib/folderPaths";
 import { KeyedDebouncer, KeyedSerialTaskQueue } from "./lib/keyedTasks";
+import { mergeRecoveredNoteTabs } from "./lib/noteRecovery";
 import {
   hasRichTextFormatting,
   markdownToTiptapDocument,
@@ -66,6 +73,8 @@ const MIN_SPLIT_RATIO = 0.25;
 const MAX_SPLIT_RATIO = 0.75;
 const DEFAULT_SPLIT_RATIO = 0.5;
 const AUTO_SAVE_DELAY_MS = 1750;
+const CLOUD_RECOVERY_POLL_INTERVAL_MS = 1500;
+const RECOVERY_TITLE_TOKEN = "__HWAN_NOTE_RECOVERY_TITLE__";
 
 type SortMode = "updated" | "title" | "created";
 type PaneId = "primary" | "secondary";
@@ -183,6 +192,18 @@ function normalizeNoteTitle(value: string) {
   return value.trim().slice(0, 50);
 }
 
+function formatRecoveredNoteTitle(template: string, title: string) {
+  const tokenIndex = template.indexOf(RECOVERY_TITLE_TOKEN);
+  if (tokenIndex < 0) {
+    return normalizeNoteTitle(template);
+  }
+
+  const prefix = template.slice(0, tokenIndex);
+  const suffix = template.slice(tokenIndex + RECOVERY_TITLE_TOKEN.length);
+  const titleLength = Math.max(0, 50 - prefix.length - suffix.length);
+  return `${prefix}${title.trim().slice(0, titleLength)}${suffix}`.trim().slice(0, 50);
+}
+
 function pickDistinctTabId(tabIds: string[], excludedId: string, preferredId?: string | null) {
   if (preferredId && preferredId !== excludedId && tabIds.includes(preferredId)) {
     return preferredId;
@@ -252,6 +273,8 @@ export default function App() {
   const addImportedTab = useNoteStore((state) => state.addImportedTab);
 
   const [activeView, setActiveView] = useState<AppView>("notes");
+  const [noteStorageSource, setNoteStorageSource] = useState<NoteStorageSource>("local");
+  const [noteRecoveryPending, setNoteRecoveryPending] = useState(false);
 
   const [isSplit, setIsSplit] = useState(false);
   const [splitRatio, setSplitRatio] = useState(() => {
@@ -291,6 +314,11 @@ export default function App() {
   const autoSaveDebouncerRef = useRef(new KeyedDebouncer<string>());
   const saveQueueRef = useRef(new KeyedSerialTaskQueue<string>());
   const saveTabRef = useRef<((tabId: string) => Promise<boolean>) | null>(null);
+  const noteStorageSourceRef = useRef<NoteStorageSource>("local");
+  const noteWritesSuspendedRef = useRef(false);
+  const recoveryInFlightRef = useRef(false);
+  const recoveryFailureNotifiedRef = useRef(false);
+  const noteRecoveryPendingRef = useRef(false);
 
   const tabById = useMemo(() => {
     const map = new Map<string, NoteTab>();
@@ -350,6 +378,10 @@ export default function App() {
   }, []);
 
   const saveLibraryTabIfEligible = useCallback(async (tabId: string) => {
+    if (noteWritesSuspendedRef.current) {
+      return false;
+    }
+
     const noteApi = hwanNote.note;
     if (!noteApi?.autoSave) {
       return false;
@@ -414,7 +446,7 @@ export default function App() {
   }, [activeView, flushPendingAutoSave]);
 
   const armAutoSaveForTab = useCallback((tabId: string | null | undefined) => {
-    if (!tabId) {
+    if (!tabId || noteWritesSuspendedRef.current) {
       return;
     }
 
@@ -720,32 +752,137 @@ export default function App() {
       return null;
     }
 
-    const folderApi = hwanNote.folder;
-    const [loaded, folderList] = await Promise.all([
-      noteApi.loadAll(),
-      folderApi?.list
-        ? folderApi.list().catch((error) => {
-            console.error("Failed to load folders from file system:", error);
-            return [] as string[];
-          })
-        : Promise.resolve<string[]>([])
-    ]);
+    const shouldResumeWrites = !noteWritesSuspendedRef.current;
+    noteWritesSuspendedRef.current = true;
+    clearAutoSaveTimer();
+    let loadedSuccessfully = false;
 
-    hydrateLoadedNotes(loaded);
+    try {
+      await saveQueueRef.current.waitForIdle();
+      const result = await noteApi.loadAll();
+      await hydrateLoadedNotes(result.notes);
+      noteStorageSourceRef.current = result.loadedFrom;
+      setNoteStorageSource(result.loadedFrom);
 
-    setPersistedFolders(
-      Array.from(
-        new Set(
-          folderList
-            .filter((entry): entry is string => typeof entry === "string")
-            .map(normalizeFolderPath)
-            .filter(Boolean)
-        )
-      ).sort((a, b) => a.localeCompare(b, localeTag))
-    );
+      setPersistedFolders(
+        Array.from(
+          new Set(
+            result.folders
+              .filter((entry): entry is string => typeof entry === "string")
+              .map(normalizeFolderPath)
+              .filter(Boolean)
+          )
+        ).sort((a, b) => a.localeCompare(b, localeTag))
+      );
 
-    return loaded;
-  }, [hydrateLoadedNotes, localeTag]);
+      loadedSuccessfully = true;
+      noteRecoveryPendingRef.current = false;
+      setNoteRecoveryPending(false);
+      recoveryFailureNotifiedRef.current = false;
+      return result;
+    } finally {
+      if (shouldResumeWrites || loadedSuccessfully) {
+        noteWritesSuspendedRef.current = false;
+      }
+    }
+  }, [clearAutoSaveTimer, hydrateLoadedNotes, localeTag]);
+
+  const recoverCloudLibrary = useCallback(async () => {
+    const recoverySource = noteStorageSourceRef.current;
+    if (
+      (recoverySource !== "local_fallback" && !noteRecoveryPendingRef.current) ||
+      recoveryInFlightRef.current
+    ) {
+      return false;
+    }
+
+    recoveryInFlightRef.current = true;
+    noteRecoveryPendingRef.current = true;
+    setNoteRecoveryPending(true);
+    noteWritesSuspendedRef.current = true;
+    clearAutoSaveTimer();
+
+    try {
+      await saveQueueRef.current.waitForIdle();
+      const result = await hwanNote.note.loadAll();
+
+      if (result.loadedFrom !== "cloud") {
+        if (recoverySource === "local_fallback") {
+          noteStorageSourceRef.current = result.loadedFrom;
+          setNoteStorageSource(result.loadedFrom);
+          noteRecoveryPendingRef.current = false;
+          setNoteRecoveryPending(false);
+          noteWritesSuspendedRef.current = false;
+          recoveryFailureNotifiedRef.current = false;
+        }
+        return false;
+      }
+
+      const currentState = useNoteStore.getState();
+      const reloadedLibraryTabs = result.notes.map(mapLoadedNoteToTab);
+      const recovery = mergeRecoveredNoteTabs({
+        reloadedLibraryTabs,
+        currentTabs: Object.values(currentState.notesById),
+        currentSession: {
+          openTabIds: currentState.openTabIds,
+          activeTabId: currentState.activeTabId
+        },
+        createId: (sourceTab) =>
+          `note-recovered-${Date.now()}-${sourceTab.id.replace(/[^a-zA-Z0-9_-]/g, "-")}-${Math.random()
+            .toString(36)
+            .slice(2, 8)}`,
+        recoveryTitle: (title) =>
+          formatRecoveredNoteTitle(
+            t("settings.cloudSyncRecoveredCopyTitle", { title: RECOVERY_TITLE_TOKEN }),
+            title
+          )
+      });
+
+      setPersistedFolders(
+        Array.from(
+          new Set(
+            result.folders
+              .filter((entry): entry is string => typeof entry === "string")
+              .map(normalizeFolderPath)
+              .filter(Boolean)
+          )
+        ).sort((a, b) => a.localeCompare(b, localeTag))
+      );
+      hydrateTabs(recovery.tabs, recovery.session);
+      noteStorageSourceRef.current = result.loadedFrom;
+      setNoteStorageSource(result.loadedFrom);
+
+      await useCalendarStore.getState().loadCalendarData();
+      useCalendarStore.getState().cleanOrphanNoteLinks();
+
+      noteRecoveryPendingRef.current = false;
+      setNoteRecoveryPending(false);
+      noteWritesSuspendedRef.current = false;
+      recoveryFailureNotifiedRef.current = false;
+      const detail = recovery.recoveredCount > 0
+        ? t("settings.cloudSyncRecoveredWithCopies", { count: recovery.recoveredCount })
+        : t("settings.cloudSyncRecovered");
+      void message(detail, {
+        title: t("settings.cloudSyncRecoveredTitle"),
+        kind: "info"
+      }).catch(() => { /* ignore notification failures */ });
+      return true;
+    } catch (error) {
+      console.error("Failed to reload notes after cloud storage recovery:", error);
+      noteRecoveryPendingRef.current = true;
+      setNoteRecoveryPending(true);
+      if (!recoveryFailureNotifiedRef.current) {
+        recoveryFailureNotifiedRef.current = true;
+        void message(t("settings.cloudSyncRecoveryFailed"), {
+          title: t("settings.cloudSyncRecoveryFailedTitle"),
+          kind: "error"
+        }).catch(() => { /* ignore notification failures */ });
+      }
+      return false;
+    } finally {
+      recoveryInFlightRef.current = false;
+    }
+  }, [clearAutoSaveTimer, hydrateTabs, localeTag, mapLoadedNoteToTab, t]);
 
   const refreshLocalAutoSaveDir = useCallback(async () => {
     const settingsApi = hwanNote.settings;
@@ -1374,6 +1511,10 @@ export default function App() {
       }
     }
 
+    if (noteWritesSuspendedRef.current) {
+      return false;
+    }
+
     if (!noteApi?.autoSave) {
       window.localStorage.setItem(getDraftKey(tab.id), JSON.stringify(tab.content));
       return markTabSaved(tab.id, {
@@ -1391,7 +1532,8 @@ export default function App() {
         markdown,
         normalizeFolderPath(tab.folderPath),
         tab.isTitleManual,
-        tab.isPinned
+        tab.isPinned,
+        noteStorageSourceRef.current
       );
 
       return markTabSaved(tab.id, {
@@ -1706,14 +1848,87 @@ export default function App() {
     void refreshCloudSyncState().catch(() => { /* ignore */ });
   }, [refreshCloudSyncState]);
 
+  const suspendCloudWritesForRecovery = useCallback(() => {
+    if (noteStorageSourceRef.current !== "cloud") {
+      return;
+    }
+
+    noteRecoveryPendingRef.current = true;
+    setNoteRecoveryPending(true);
+    noteWritesSuspendedRef.current = true;
+    clearAutoSaveTimer();
+  }, [clearAutoSaveTimer]);
+
+  useEffect(() => {
+    if (
+      noteStorageSource !== "cloud" &&
+      noteStorageSource !== "local_fallback" &&
+      !noteRecoveryPending
+    ) {
+      return;
+    }
+
+    let disposed = false;
+    const checkForRecovery = async () => {
+      try {
+        const status = await hwanNote.cloud.status();
+        if (disposed) {
+          return;
+        }
+
+        if (status.resolvedSource === "local_fallback") {
+          if (noteStorageSourceRef.current === "cloud") {
+            suspendCloudWritesForRecovery();
+          } else if (noteStorageSourceRef.current === "local_fallback") {
+            noteRecoveryPendingRef.current = false;
+            setNoteRecoveryPending(false);
+            noteWritesSuspendedRef.current = false;
+            recoveryFailureNotifiedRef.current = false;
+          }
+          return;
+        }
+
+        if (
+          status.resolvedSource === "cloud" &&
+          (noteStorageSourceRef.current === "local_fallback" || noteRecoveryPendingRef.current)
+        ) {
+          await recoverCloudLibrary();
+        }
+      } catch {
+        // The next interval or focus event retries the read-only status check.
+      }
+    };
+    const handleFocus = () => {
+      void checkForRecovery();
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        void checkForRecovery();
+      }
+    };
+
+    void checkForRecovery();
+    const intervalId = window.setInterval(checkForRecovery, CLOUD_RECOVERY_POLL_INTERVAL_MS);
+    window.addEventListener("focus", handleFocus);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      disposed = true;
+      window.clearInterval(intervalId);
+      window.removeEventListener("focus", handleFocus);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [noteRecoveryPending, noteStorageSource, recoverCloudLibrary, suspendCloudWritesForRecovery]);
+
   useEffect(() => {
     const unlisten = hwanNote.cloud.onFolderMissing((data) => {
+      suspendCloudWritesForRecovery();
       window.alert(
         `${t("settings.cloudSyncFolderMissing")}\n${t("settings.cloudSyncFolderMissingDetail", { path: data.expectedPath })}`
       );
     });
     return () => unlisten();
-  }, [t]);
+  }, [suspendCloudWritesForRecovery, t]);
 
   useEffect(() => {
     let disposed = false;

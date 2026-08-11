@@ -5,6 +5,30 @@ All notable user-facing changes to HwanNote are documented here.
 This project follows [Semantic Versioning](https://semver.org/) and commit messages use the
 [Conventional Commits](https://www.conventionalcommits.org/) style.
 
+## [0.9.4] - 2026-08-11
+
+Fixes a cloud-sync data-loss risk where notes opened from local fallback
+storage could overwrite same-ID cloud notes after a delayed cloud folder
+became available.
+
+### Fixed
+
+- **Note saves remain bound to their load source.** Note loads now carry the
+  resolved storage source through the frontend and back into Rust saves.
+  Notes loaded from local fallback continue writing only to local storage,
+  even if the configured cloud folder appears before the next autosave.
+- **Recovered cloud storage is reloaded before writes resume.** HwanNote
+  monitors cloud availability, pauses note writes during a source transition,
+  waits for active saves to settle, and reloads the authoritative cloud
+  library before enabling saves again.
+- **Local/cloud conflicts are preserved without overwrites.** When a local
+  fallback note differs from the recovered same-ID cloud note, the cloud note
+  stays authoritative and the local content opens as a separate unsaved
+  recovery tab for review.
+- **Mid-session disconnects use the same recovery guard.** If a cloud library
+  disappears after it was loaded, writes stay suspended until the folder
+  returns and the reload/merge step completes.
+
 ## [0.9.3] - 2026-08-11
 
 Fixes a data-loss risk where an older autosave completion could incorrectly

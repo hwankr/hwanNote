@@ -24,6 +24,15 @@ export interface LoadedNote {
   isPinned: boolean;
 }
 
+export type NoteStorageSource = "local" | "cloud" | "local_fallback";
+
+export interface NoteLoadResult {
+  notes: LoadedNote[];
+  folders: string[];
+  loadedFrom: NoteStorageSource;
+  cloudUnavailable: boolean;
+}
+
 export interface SessionData {
   openTabIds: string[];
   activeTabId: string | null;
@@ -69,6 +78,8 @@ export interface CloudSyncStatus {
   provider: string | null;
   syncFolder: string | null;
   activeSource: CloudSyncSource;
+  resolvedSource: NoteStorageSource;
+  cloudUnavailable: boolean;
 }
 
 export interface CloudFolderMissingData {
@@ -76,7 +87,7 @@ export interface CloudFolderMissingData {
   fallbackPath: string;
 }
 
-export type CalendarStorageSource = "local" | "cloud" | "local_fallback";
+export type CalendarStorageSource = NoteStorageSource;
 
 export interface CalendarLoadResult {
   data: string;
@@ -137,13 +148,14 @@ export const hwanNote = {
       content: string,
       folderPath: string,
       isTitleManual: boolean,
-      isPinned?: boolean
+      isPinned: boolean,
+      loadedFrom: NoteStorageSource
     ) =>
       invoke<AutoSaveResult>("cmd_note_auto_save", {
-        payload: { noteId, title, content, folderPath, isTitleManual, isPinned: isPinned ?? false },
+        payload: { noteId, title, content, folderPath, isTitleManual, isPinned, loadedFrom },
       }),
 
-    loadAll: () => invoke<LoadedNote[]>("cmd_note_load_all"),
+    loadAll: () => invoke<NoteLoadResult>("cmd_note_load_all"),
 
     importTxt: () =>
       invoke<ImportedFile[] | null>("cmd_note_import_txt"),
