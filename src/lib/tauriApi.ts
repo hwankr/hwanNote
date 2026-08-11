@@ -16,7 +16,7 @@ export interface LoadedNote {
   title: string;
   isTitleManual: boolean;
   plainText: string;
-  content: string;
+  markdown: string;
   folderPath: string;
   createdAt: number;
   updatedAt: number;
