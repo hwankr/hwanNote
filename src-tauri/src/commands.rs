@@ -1416,10 +1416,11 @@ pub fn cmd_cloud_sync_set_active_source(
 #[cfg(test)]
 mod tests {
     use super::{
-        backup_calendar_file, can_save_calendar, can_save_note, loaded_source_writes_to_cloud,
-        select_loaded_storage_dir, validate_empty_calendar_reset, verify_calendar_snapshot,
-        write_calendar_data, write_unique_calendar_backup, CalendarWriteGuard,
-        ResolvedStorageSource,
+        backup_calendar_file, can_save_calendar, can_save_note, create_unique_calendar_temp,
+        loaded_source_writes_to_cloud, select_loaded_storage_dir,
+        validate_calendar_data_for_confirmation, validate_empty_calendar_reset,
+        verify_calendar_snapshot, write_calendar_data, write_unique_calendar_backup,
+        CalendarWriteGuard, ResolvedStorageSource,
     };
     use crate::file_manager::{self, AutoSavePayload};
     use std::fs;
@@ -1580,6 +1581,26 @@ mod tests {
     }
 
     #[test]
+    fn calendar_confirmation_validates_the_frontend_parse_contract() {
+        assert!(validate_calendar_data_for_confirmation(
+            r#"{"version":4,"todos":{},"inbox":[],"noteLinks":{}}"#
+        )
+        .is_ok());
+        assert!(validate_calendar_data_for_confirmation(r#"{"todos":{},"noteLinks":{}}"#)
+            .is_ok());
+        assert!(validate_calendar_data_for_confirmation("").is_err());
+        assert!(validate_calendar_data_for_confirmation("{").is_err());
+        assert!(validate_calendar_data_for_confirmation(
+            r#"{"version":4,"todos":[],"inbox":[],"noteLinks":{}}"#
+        )
+        .is_err());
+        assert!(validate_calendar_data_for_confirmation(
+            r#"{"version":999,"todos":{},"inbox":[],"noteLinks":{}}"#
+        )
+        .is_err());
+    }
+
+    #[test]
     fn calendar_reset_accepts_only_the_empty_current_schema() {
         assert!(validate_empty_calendar_reset(
             r#"{"version":4,"todos":{},"inbox":[],"noteLinks":{}}"#
@@ -1593,6 +1614,21 @@ mod tests {
             r#"{"version":3,"todos":{},"inbox":[],"noteLinks":{}}"#
         )
         .is_err());
+    }
+
+    #[test]
+    fn calendar_write_does_not_reuse_an_existing_temp_path() {
+        let root = make_temp_dir("calendar-temp-exclusive");
+        let first_temp_path = root.join(".calendar.json.tmp");
+        fs::write(&first_temp_path, "sentinel").unwrap();
+
+        let (temp_file, selected_path) = create_unique_calendar_temp(&root).unwrap();
+        drop(temp_file);
+
+        assert_ne!(selected_path, first_temp_path);
+        assert_eq!(fs::read_to_string(&first_temp_path).unwrap(), "sentinel");
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
