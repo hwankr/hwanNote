@@ -29,6 +29,7 @@ import {
 } from "./lib/shortcuts";
 import { applyTheme, type ThemeName } from "./styles/themes";
 import { normalizeFolderPath } from "./lib/folderPaths";
+import { KeyedDebouncer, KeyedSerialTaskQueue } from "./lib/keyedTasks";
 import {
   hasRichTextFormatting,
   markdownToTiptapDocument,
@@ -191,6 +192,7 @@ function pickDistinctTabId(tabIds: string[], excludedId: string, preferredId?: s
 }
 
 function createSavedSnapshot({
+  revision,
   title,
   isTitleManual,
   content,
@@ -201,6 +203,7 @@ function createSavedSnapshot({
   updatedAt,
   lastSavedAt
 }: {
+  revision: number;
   title: string;
   isTitleManual: boolean;
   content: JSONContent;
@@ -212,6 +215,7 @@ function createSavedSnapshot({
   lastSavedAt: number;
 }): SavedNoteSnapshot {
   return {
+    revision,
     title,
     isTitleManual,
     content,
@@ -284,9 +288,8 @@ export default function App() {
   const guardedFlowRef = useRef(false);
   const allowImmediateCloseRef = useRef(false);
   const pendingTitleDraftsRef = useRef<Record<string, string>>({});
-  const autoSaveTimerRef = useRef<number | null>(null);
-  const pendingAutoSaveTabIdRef = useRef<string | null>(null);
-  const savingAutoSaveTabIdsRef = useRef<Set<string>>(new Set());
+  const autoSaveDebouncerRef = useRef(new KeyedDebouncer<string>());
+  const saveQueueRef = useRef(new KeyedSerialTaskQueue<string>());
   const saveTabRef = useRef<((tabId: string) => Promise<boolean>) | null>(null);
 
   const tabById = useMemo(() => {
@@ -332,21 +335,17 @@ export default function App() {
 
   const handleTogglePinTab = useCallback((id: string) => {
     togglePinTabStore(id);
-    // Immediately save the pin state to index
     const tab = useNoteStore.getState().notesById[id];
     if (tab && tab.persistence === "library") {
-      const markdown = toStoredNoteDocument(tab, t("common.untitled"));
-      void hwanNote.note.autoSave(
-        tab.id, tab.title, markdown,
-        normalizeFolderPath(tab.folderPath), tab.isTitleManual, tab.isPinned
-      );
+      void saveTabRef.current?.(id);
     }
-  }, [togglePinTabStore, t]);
+  }, [togglePinTabStore]);
 
-  const clearAutoSaveTimer = useCallback(() => {
-    if (autoSaveTimerRef.current !== null) {
-      window.clearTimeout(autoSaveTimerRef.current);
-      autoSaveTimerRef.current = null;
+  const clearAutoSaveTimer = useCallback((tabId?: string) => {
+    if (tabId) {
+      autoSaveDebouncerRef.current.cancel(tabId);
+    } else {
+      autoSaveDebouncerRef.current.cancelAll();
     }
   }, []);
 
@@ -361,7 +360,7 @@ export default function App() {
       return false;
     }
 
-    if (savingAutoSaveTabIdsRef.current.has(tabId)) {
+    if (saveQueueRef.current.isBusy(tabId)) {
       return false;
     }
 
@@ -370,42 +369,41 @@ export default function App() {
       return false;
     }
 
-    savingAutoSaveTabIdsRef.current.add(tabId);
-    try {
-      return await saveTab(tabId);
-    } finally {
-      savingAutoSaveTabIdsRef.current.delete(tabId);
-    }
+    return saveTab(tabId);
   }, [getTabById]);
 
-  const flushPendingAutoSave = useCallback(async () => {
-    clearAutoSaveTimer();
+  const flushPendingAutoSave = useCallback(async (tabId?: string) => {
+    const flushTab = async (pendingTabId: string) => {
+      clearAutoSaveTimer(pendingTabId);
 
-    const pendingTabId = pendingAutoSaveTabIdRef.current;
-    pendingAutoSaveTabIdRef.current = null;
+      if (saveQueueRef.current.isBusy(pendingTabId)) {
+        autoSaveDebouncerRef.current.schedule(pendingTabId, AUTO_SAVE_DELAY_MS, () => {
+          void flushPendingAutoSave(pendingTabId);
+        });
+        return false;
+      }
 
-    if (!pendingTabId) {
+      return saveLibraryTabIfEligible(pendingTabId);
+    };
+
+    if (tabId) {
+      return flushTab(tabId);
+    }
+
+    const pendingTabIds = autoSaveDebouncerRef.current.takePendingKeys();
+    if (pendingTabIds.length === 0) {
       return false;
     }
 
-    if (savingAutoSaveTabIdsRef.current.has(pendingTabId)) {
-      pendingAutoSaveTabIdRef.current = pendingTabId;
-      autoSaveTimerRef.current = window.setTimeout(() => {
-        void flushPendingAutoSave();
-      }, AUTO_SAVE_DELAY_MS);
-      return false;
-    }
-
-    return saveLibraryTabIfEligible(pendingTabId);
+    const results = await Promise.all(pendingTabIds.map(flushTab));
+    return results.some(Boolean);
   }, [clearAutoSaveTimer, saveLibraryTabIfEligible]);
 
   const queuePendingAutoSave = useCallback((tabId: string) => {
-    clearAutoSaveTimer();
-    pendingAutoSaveTabIdRef.current = tabId;
-    autoSaveTimerRef.current = window.setTimeout(() => {
-      void flushPendingAutoSave();
-    }, AUTO_SAVE_DELAY_MS);
-  }, [clearAutoSaveTimer, flushPendingAutoSave]);
+    autoSaveDebouncerRef.current.schedule(tabId, AUTO_SAVE_DELAY_MS, () => {
+      void flushPendingAutoSave(tabId);
+    });
+  }, [flushPendingAutoSave]);
 
   const handleViewChange = useCallback(async (view: AppView) => {
     if (view === activeView) return;
@@ -430,15 +428,8 @@ export default function App() {
       return;
     }
 
-    const previousPendingTabId = pendingAutoSaveTabIdRef.current;
-    if (previousPendingTabId && previousPendingTabId !== tabId) {
-      clearAutoSaveTimer();
-      pendingAutoSaveTabIdRef.current = null;
-      void saveLibraryTabIfEligible(previousPendingTabId);
-    }
-
     queuePendingAutoSave(tabId);
-  }, [clearAutoSaveTimer, getTabById, queuePendingAutoSave, saveLibraryTabIfEligible]);
+  }, [getTabById, queuePendingAutoSave]);
 
   const handleTitleDraftChange = useCallback((tabId: string, title: string) => {
     if (!tabId) {
@@ -666,6 +657,7 @@ export default function App() {
       const plainText = tiptapDocumentToPlainText(content);
       return {
         id: note.noteId,
+        revision: 0,
         title: note.title,
         isTitleManual: note.isTitleManual,
         content,
@@ -679,6 +671,7 @@ export default function App() {
         fileFormat: "md",
         persistence,
         savedSnapshot: createSavedSnapshot({
+          revision: 0,
           title: note.title,
           isTitleManual: note.isTitleManual,
           content,
@@ -1338,11 +1331,8 @@ export default function App() {
     return "cancel";
   }, [getTabById, t]);
 
-  const handleSaveTab = useCallback(async (tabId: string) => {
-    if (pendingAutoSaveTabIdRef.current === tabId) {
-      pendingAutoSaveTabIdRef.current = null;
-      clearAutoSaveTimer();
-    }
+  const performSaveTab = useCallback(async (tabId: string) => {
+    clearAutoSaveTimer(tabId);
 
     flushTitleDraft(tabId);
     const tab = getTabById(tabId);
@@ -1352,6 +1342,19 @@ export default function App() {
 
     const noteApi = hwanNote.note;
     const persistence: NotePersistence = tab.persistence === "external" ? "external" : "library";
+    const createCompletedSavedSnapshot = () =>
+      createSavedSnapshot({
+        revision: tab.revision,
+        title: tab.title,
+        isTitleManual: tab.isTitleManual,
+        content: tab.content,
+        plainText: tab.plainText,
+        folderPath: tab.folderPath,
+        fileFormat: tab.fileFormat,
+        sourceFilePath: tab.sourceFilePath,
+        updatedAt: tab.updatedAt,
+        lastSavedAt: Date.now()
+      });
 
     if (tab.fileFormat === "txt" && tab.sourceFilePath) {
       if (!noteApi?.saveTxt) {
@@ -1360,12 +1363,11 @@ export default function App() {
 
       try {
         await noteApi.saveTxt(tab.sourceFilePath, tab.plainText);
-        markTabSaved(tab.id, {
-          lastSavedAt: Date.now(),
+        return markTabSaved(tab.id, {
+          savedSnapshot: createCompletedSavedSnapshot(),
           persistence,
           sourceFilePath: tab.sourceFilePath
         });
-        return true;
       } catch (error) {
         console.error("Save txt failed:", error);
         return false;
@@ -1374,11 +1376,10 @@ export default function App() {
 
     if (!noteApi?.autoSave) {
       window.localStorage.setItem(getDraftKey(tab.id), JSON.stringify(tab.content));
-      markTabSaved(tab.id, {
-        lastSavedAt: Date.now(),
+      return markTabSaved(tab.id, {
+        savedSnapshot: createCompletedSavedSnapshot(),
         persistence: "library"
       });
-      return true;
     }
 
     try {
@@ -1393,16 +1394,19 @@ export default function App() {
         tab.isPinned
       );
 
-      markTabSaved(tab.id, {
-        lastSavedAt: Date.now(),
+      return markTabSaved(tab.id, {
+        savedSnapshot: createCompletedSavedSnapshot(),
         persistence: "library"
       });
-      return true;
     } catch (error) {
       console.error("Save failed:", error);
       return false;
     }
   }, [clearAutoSaveTimer, flushTitleDraft, getTabById, markTabSaved, t]);
+
+  const handleSaveTab = useCallback((tabId: string) => {
+    return saveQueueRef.current.run(tabId, () => performSaveTab(tabId));
+  }, [performSaveTab]);
 
   useEffect(() => {
     saveTabRef.current = handleSaveTab;
@@ -1457,7 +1461,6 @@ export default function App() {
     }
 
     clearAutoSaveTimer();
-    pendingAutoSaveTabIdRef.current = null;
 
     guardedFlowRef.current = true;
     try {
