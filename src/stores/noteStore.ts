@@ -1,3 +1,4 @@
+import type { JSONContent } from "@tiptap/core";
 import { create } from "zustand";
 import { hwanNote } from "../lib/tauriApi";
 import { normalizeFolderPath } from "../lib/folderPaths";
@@ -10,7 +11,7 @@ export type NotePersistence = "transient" | "library" | "external";
 export interface SavedNoteSnapshot {
   title: string;
   isTitleManual: boolean;
-  content: string;
+  content: JSONContent;
   plainText: string;
   folderPath: string;
   fileFormat: "md" | "txt";
@@ -23,7 +24,7 @@ export interface NoteTab {
   id: string;
   title: string;
   isTitleManual: boolean;
-  content: string;
+  content: JSONContent;
   plainText: string;
   isDirty: boolean;
   isPinned: boolean;
@@ -61,7 +62,7 @@ interface NoteStore {
   sidebarVisible: boolean;
   hydrateTabs: (tabs: NoteTab[], persistedSession?: PersistedTabSession) => void;
   createTab: () => void;
-  addImportedTab: (title: string, content: string, plainText: string, sourceFilePath?: string) => void;
+  addImportedTab: (title: string, content: JSONContent, plainText: string, sourceFilePath?: string) => void;
   openNote: (id: string) => void;
   setActiveTab: (id: string) => void;
   closeTab: (id: string) => void;
@@ -76,8 +77,8 @@ interface NoteStore {
   activatePrevTab: () => void;
   setTabTitle: (id: string, title: string) => void;
   setActiveTitle: (title: string) => void;
-  updateTabContent: (id: string, content: string, plainText: string) => void;
-  updateActiveContent: (content: string, plainText: string) => void;
+  updateTabContent: (id: string, content: JSONContent, plainText: string) => void;
+  updateActiveContent: (content: JSONContent, plainText: string) => void;
   markTabSaved: (id: string, options?: SaveTabOptions) => void;
   discardTabChanges: (id: string) => DiscardTabResult;
   toggleFileFormat: (id: string) => void;
@@ -98,7 +99,7 @@ function deriveTitle(plainText: string) {
     return "제목 없음";
   }
 
-  const stripped = firstLine.replace(/^#{1,3}\s+/, "");
+  const stripped = firstLine.replace(/^#{1,6}\s+/, "");
   return stripped.slice(0, 50) || "제목 없음";
 }
 
@@ -126,7 +127,7 @@ function createEmptyTab(): NoteTab {
     id: createId(),
     title: "제목 없음",
     isTitleManual: false,
-    content: "<p></p>",
+    content: { type: "doc", content: [{ type: "paragraph" }] },
     plainText: "",
     isDirty: false,
     isPinned: false,

@@ -1,3 +1,4 @@
+import type { JSONContent } from "@tiptap/core";
 import { Editor as TiptapEditor } from "@tiptap/react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { confirm as confirmDialog, message } from "@tauri-apps/plugin-dialog";
@@ -28,6 +29,13 @@ import {
 } from "./lib/shortcuts";
 import { applyTheme, type ThemeName } from "./styles/themes";
 import { normalizeFolderPath } from "./lib/folderPaths";
+import {
+  hasRichTextFormatting,
+  markdownToTiptapDocument,
+  plainTextToTiptapDocument,
+  tiptapDocumentToMarkdown,
+  tiptapDocumentToPlainText
+} from "./lib/markdown";
 import {
   readTabSessionFromStorage,
   useNoteStore,
@@ -77,147 +85,24 @@ function normalizeIntentPathKey(filePath: string) {
   return filePath.trim().replace(/\\/g, "/").toLowerCase();
 }
 
-function textToParagraphHtml(content: string) {
-  const escapeHtml = (text: string) =>
-    text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-
-  return content
-    .replace(/\r\n/g, "\n")
-    .split("\n")
-    .map((line) => (line ? `<p>${escapeHtml(line)}</p>` : "<p><br></p>"))
-    .join("");
-}
-
-function htmlToMarkdownWithBlocks(contentHtml: string) {
-  const parser = new DOMParser();
-  const document = parser.parseFromString(contentHtml, "text/html");
-  const lines: string[] = [];
-
-  const extractText = (element: Element) =>
-    element.textContent?.replace(/\r?\n/g, " ").replace(/\s+/g, " ").trim() ?? "";
-  const normalizeText = (text: string) => text.replace(/\r?\n/g, " ").replace(/\s+/g, " ").trim();
-
-  const extractTaskItemText = (container: Element) => {
-    const segments: string[] = [];
-
-    container.childNodes.forEach((child) => {
-      if (child.nodeType === Node.TEXT_NODE) {
-        const text = normalizeText(child.textContent ?? "");
-        if (text) {
-          segments.push(text);
-        }
-        return;
-      }
-
-      if (!(child instanceof Element)) {
-        return;
-      }
-
-      if (child.matches('ul[data-type="taskList"]')) {
-        return;
-      }
-
-      const text = normalizeText(child.textContent ?? "");
-      if (text) {
-        segments.push(text);
-      }
-    });
-
-    return segments.join(" ").trim();
-  };
-
-  const pushTaskList = (list: Element, depth: number) => {
-    const taskItems = Array.from(list.children).filter((child) => child.matches('li[data-type="taskItem"]'));
-
-    taskItems.forEach((item) => {
-      const checked =
-        item.getAttribute("data-checked") === "true" ||
-        item.querySelector('label > input[type="checkbox"]')?.hasAttribute("checked");
-      const content = item.querySelector(":scope > div");
-      const itemText = content ? extractTaskItemText(content) : extractText(item);
-      const prefix = `${"  ".repeat(Math.max(0, depth))}- [${checked ? "x" : " "}]`;
-      lines.push(itemText ? `${prefix} ${itemText}` : prefix);
-
-      const nestedTaskLists = content
-        ? Array.from(content.children).filter((child) => child.matches('ul[data-type="taskList"]'))
-        : [];
-      nestedTaskLists.forEach((nested) => pushTaskList(nested, depth + 1));
-    });
-  };
-
-  const pushNode = (node: ChildNode) => {
-    if (node.nodeType === Node.TEXT_NODE) {
-      const text = node.textContent?.replace(/\r?\n/g, "\n").trim();
-      if (text) {
-        lines.push(text);
-      }
-      return;
-    }
-
-    if (!(node instanceof Element)) {
-      return;
-    }
-
-    if (node.matches('ul[data-type="taskList"]')) {
-      pushTaskList(node, 0);
-      return;
-    }
-
-    if (node.matches('details[data-type="toggleBlock"], details')) {
-      const isOpen = node.hasAttribute("open");
-      const summary = node.querySelector(":scope > summary");
-      const summaryText = normalizeText(summary?.textContent ?? "");
-      lines.push(`:::toggle[${isOpen ? "open" : "closed"}]${summaryText ? ` ${summaryText}` : ""}`);
-
-      const content = Array.from(node.children).find((child) => child !== summary);
-      if (content) {
-        Array.from(content.childNodes).forEach(pushNode);
-      }
-
-      lines.push(":::");
-      return;
-    }
-
-    if (node.matches('div[data-type="toggleContent"]')) {
-      Array.from(node.childNodes).forEach(pushNode);
-      return;
-    }
-
-    if (node.matches("p")) {
-      const text = extractText(node);
-      lines.push(text);
-      return;
-    }
-
-    if (node.matches("h1, h2, h3, h4, h5, h6")) {
-      const text = extractText(node);
-      if (text) {
-        lines.push(text);
-      }
-      return;
-    }
-
-    const text = extractText(node);
-    lines.push(text);
-  };
-
-  Array.from(document.body.childNodes).forEach(pushNode);
-
-  return lines.join("\n").replace(/\n{3,}/g, "\n\n");
-}
-
-function toMarkdownDocument(title: string, plainText: string, contentHtml: string, fallbackTitle: string) {
-  const hasTaskList = /<ul[^>]*data-type=(['"])taskList\1/i.test(contentHtml);
-  const hasToggleBlock = /<details/i.test(contentHtml);
-  const hasStructuredBlocks = hasTaskList || hasToggleBlock;
-  const sourceText = hasStructuredBlocks ? htmlToMarkdownWithBlocks(contentHtml) : plainText;
-  const normalizedBody = sourceText.replace(/\r?\n/g, "\n").trimEnd();
+function toMarkdownDocument(title: string, content: JSONContent, fallbackTitle: string) {
+  const normalizedBody = tiptapDocumentToMarkdown(content).replace(/\r?\n/g, "\n");
   if (normalizedBody) {
-    return `${normalizedBody}\n`;
+    return normalizedBody.endsWith("\n") ? normalizedBody : `${normalizedBody}\n`;
   }
 
   const safeTitle = title.trim() || fallbackTitle;
   return `# ${safeTitle}\n`;
+}
+
+function toStoredNoteDocument(
+  tab: Pick<NoteTab, "title" | "content" | "plainText" | "fileFormat" | "sourceFilePath">,
+  fallbackTitle: string
+) {
+  if (tab.fileFormat === "txt" && !tab.sourceFilePath) {
+    return `${tab.plainText.trimEnd()}\n`;
+  }
+  return toMarkdownDocument(tab.title, tab.content, fallbackTitle);
 }
 
 function extractTags(plainText: string) {
@@ -318,7 +203,7 @@ function createSavedSnapshot({
 }: {
   title: string;
   isTitleManual: boolean;
-  content: string;
+  content: JSONContent;
   plainText: string;
   folderPath: string;
   fileFormat: NoteTab["fileFormat"];
@@ -450,7 +335,7 @@ export default function App() {
     // Immediately save the pin state to index
     const tab = useNoteStore.getState().notesById[id];
     if (tab && tab.persistence === "library") {
-      const markdown = toMarkdownDocument(tab.title, tab.plainText, tab.content, t("common.untitled"));
+      const markdown = toStoredNoteDocument(tab, t("common.untitled"));
       void hwanNote.note.autoSave(
         tab.id, tab.title, markdown,
         normalizeFolderPath(tab.folderPath), tab.isTitleManual, tab.isPinned
@@ -645,7 +530,7 @@ export default function App() {
     }));
   }, []);
 
-  const handleEditorChange = useCallback((pane: PaneId, content: string, plainText: string) => {
+  const handleEditorChange = useCallback((pane: PaneId, content: JSONContent, plainText: string) => {
     const targetTabId = pane === "secondary" && isSplit ? secondaryTabId : primaryTabId;
     if (!targetTabId) {
       return;
@@ -777,12 +662,14 @@ export default function App() {
       const folderPath = normalizeFolderPath(note.folderPath);
       const persistence: NotePersistence = "library";
       const lastSavedAt = note.updatedAt;
+      const content = markdownToTiptapDocument(note.markdown);
+      const plainText = tiptapDocumentToPlainText(content);
       return {
         id: note.noteId,
         title: note.title,
         isTitleManual: note.isTitleManual,
-        content: note.content,
-        plainText: note.plainText,
+        content,
+        plainText,
         isDirty: false,
         isPinned: note.isPinned ?? false,
         folderPath,
@@ -794,8 +681,8 @@ export default function App() {
         savedSnapshot: createSavedSnapshot({
           title: note.title,
           isTitleManual: note.isTitleManual,
-          content: note.content,
-          plainText: note.plainText,
+          content,
+          plainText,
           folderPath,
           fileFormat: "md",
           updatedAt: note.updatedAt,
@@ -914,8 +801,12 @@ export default function App() {
   }, []);
 
   const ingestImportedTextFile = useCallback((title: string, content: string, filePath: string) => {
-    const html = textToParagraphHtml(content);
-    addImportedTab(title, html || "<p></p>", content.replace(/\r?\n/g, "\n"), filePath);
+    addImportedTab(
+      title,
+      plainTextToTiptapDocument(content),
+      content.replace(/\r?\n/g, "\n"),
+      filePath
+    );
   }, [addImportedTab]);
 
   const ingestExternalTxtIntent = useCallback(async (filePath: string) => {
@@ -1482,7 +1373,7 @@ export default function App() {
     }
 
     if (!noteApi?.autoSave) {
-      window.localStorage.setItem(getDraftKey(tab.id), tab.content);
+      window.localStorage.setItem(getDraftKey(tab.id), JSON.stringify(tab.content));
       markTabSaved(tab.id, {
         lastSavedAt: Date.now(),
         persistence: "library"
@@ -1491,15 +1382,7 @@ export default function App() {
     }
 
     try {
-      const isTxtWithoutSource = tab.fileFormat === "txt" && !tab.sourceFilePath;
-      const markdown = isTxtWithoutSource
-        ? tab.plainText.trimEnd() + "\n"
-        : toMarkdownDocument(
-            tab.title,
-            tab.plainText,
-            tab.content,
-            t("common.untitled")
-          );
+      const markdown = toStoredNoteDocument(tab, t("common.untitled"));
 
       await noteApi.autoSave(
         tab.id,
@@ -2347,15 +2230,7 @@ export default function App() {
         onToggleFileFormat={() => {
           if (!focusedTab) return;
           if (focusedTab.fileFormat === "md") {
-            const hasFormatting =
-              /<ul[^>]*data-type=(['"])taskList\1/i.test(focusedTab.content) ||
-              /<details/i.test(focusedTab.content) ||
-              /<strong/i.test(focusedTab.content) ||
-              /<em>/i.test(focusedTab.content) ||
-              /<s>/i.test(focusedTab.content) ||
-              /<a\s/i.test(focusedTab.content) ||
-              /<h[1-3]/i.test(focusedTab.content);
-            if (hasFormatting && !window.confirm(t("status.confirmSwitchToTxt"))) {
+            if (hasRichTextFormatting(focusedTab.content) && !window.confirm(t("status.confirmSwitchToTxt"))) {
               return;
             }
           }

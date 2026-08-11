@@ -1,6 +1,5 @@
 ﻿import { hwanShell } from "../lib/tauriApi";
 import Bold from "@tiptap/extension-bold";
-import Link from "@tiptap/extension-link";
 import Placeholder from "@tiptap/extension-placeholder";
 import Table from "@tiptap/extension-table";
 import TableCell from "@tiptap/extension-table-cell";
@@ -11,20 +10,21 @@ import TaskList from "@tiptap/extension-task-list";
 import Italic from "@tiptap/extension-italic";
 import History from "@tiptap/extension-history";
 import StarterKit from "@tiptap/starter-kit";
-import { getMarkRange } from "@tiptap/core";
+import { getMarkRange, type JSONContent } from "@tiptap/core";
 import { Editor as TiptapEditor, EditorContent, useEditor } from "@tiptap/react";
 import { type MouseEvent as ReactMouseEvent, useCallback, useEffect, useRef, useState } from "react";
 import { TabIndent } from "../extensions/tabIndent";
+import { LinkWithTitle } from "../extensions/linkWithTitle";
 import { ToggleBlock, ToggleContent, ToggleSummary } from "../extensions/toggleBlock";
 import { useI18n } from "../i18n/context";
 import LinkBubble from "./LinkBubble";
 
 interface EditorProps {
-  content: string;
+  content: JSONContent;
   tabSize: number;
   spellcheck: boolean;
   autofocus?: boolean;
-  onChange: (content: string, plainText: string) => void;
+  onChange: (content: JSONContent, plainText: string) => void;
   onCursorChange: (line: number, column: number, chars: number) => void;
   onEditorReady: (editor: TiptapEditor | null) => void;
   onFocus?: () => void;
@@ -127,7 +127,7 @@ export default function Editor({
       StarterKit.configure({
         bold: false,
         heading: {
-          levels: [1, 2, 3]
+          levels: [1, 2, 3, 4, 5, 6]
         },
         italic: false,
         history: false
@@ -142,7 +142,7 @@ export default function Editor({
       ToggleBlock,
       ToggleSummary,
       ToggleContent,
-      Link.configure({
+      LinkWithTitle.configure({
         openOnClick: false,
         autolink: true,
         linkOnPaste: true
@@ -176,7 +176,7 @@ export default function Editor({
     onUpdate: ({ editor }) => {
       const plainText = collectPlainText(editor);
       const cursor = collectCursor(editor, plainText);
-      onChangeRef.current(editor.getHTML(), plainText);
+      onChangeRef.current(editor.getJSON(), plainText);
       onCursorChangeRef.current(cursor.line, cursor.column, cursor.chars);
     },
     onSelectionUpdate: ({ editor }) => {
@@ -224,7 +224,7 @@ export default function Editor({
       return;
     }
 
-    if (editor.getHTML() !== content) {
+    if (JSON.stringify(editor.getJSON()) !== JSON.stringify(content)) {
       editor.commands.setContent(content, false);
       const cursor = collectCursor(editor);
       onCursorChangeRef.current(cursor.line, cursor.column, cursor.chars);
@@ -306,4 +306,3 @@ export default function Editor({
     </section>
   );
 }
-
