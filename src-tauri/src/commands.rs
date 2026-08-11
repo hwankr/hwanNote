@@ -454,7 +454,11 @@ fn validate_calendar_data_for_confirmation(data: &str) -> Result<(), String> {
         .ok_or_else(|| "Calendar confirmation rejected: root must be an object.".to_string())?;
 
     let require_object = |key: &str| -> Result<(), String> {
-        if object.get(key).and_then(serde_json::Value::as_object).is_none() {
+        if object
+            .get(key)
+            .and_then(serde_json::Value::as_object)
+            .is_none()
+        {
             return Err(format!(
                 "Calendar confirmation rejected: {} must be an object.",
                 key
@@ -463,7 +467,11 @@ fn validate_calendar_data_for_confirmation(data: &str) -> Result<(), String> {
         Ok(())
     };
     let require_array = |key: &str| -> Result<(), String> {
-        if object.get(key).and_then(serde_json::Value::as_array).is_none() {
+        if object
+            .get(key)
+            .and_then(serde_json::Value::as_array)
+            .is_none()
+        {
             return Err(format!(
                 "Calendar confirmation rejected: {} must be an array.",
                 key
@@ -1586,8 +1594,7 @@ mod tests {
             r#"{"version":4,"todos":{},"inbox":[],"noteLinks":{}}"#
         )
         .is_ok());
-        assert!(validate_calendar_data_for_confirmation(r#"{"todos":{},"noteLinks":{}}"#)
-            .is_ok());
+        assert!(validate_calendar_data_for_confirmation(r#"{"todos":{},"noteLinks":{}}"#).is_ok());
         assert!(validate_calendar_data_for_confirmation("").is_err());
         assert!(validate_calendar_data_for_confirmation("{").is_err());
         assert!(validate_calendar_data_for_confirmation(
