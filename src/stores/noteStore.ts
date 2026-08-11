@@ -9,6 +9,7 @@ export const ACTIVE_TAB_ID_KEY = "hwan-note:active-tab-id";
 export type NotePersistence = "transient" | "library" | "external";
 
 export interface SavedNoteSnapshot {
+  revision: number;
   title: string;
   isTitleManual: boolean;
   content: JSONContent;
@@ -22,6 +23,7 @@ export interface SavedNoteSnapshot {
 
 export interface NoteTab {
   id: string;
+  revision: number;
   title: string;
   isTitleManual: boolean;
   content: JSONContent;
@@ -44,7 +46,7 @@ export interface PersistedTabSession {
 }
 
 export interface SaveTabOptions {
-  lastSavedAt?: number;
+  savedSnapshot: SavedNoteSnapshot;
   persistence?: NotePersistence;
   sourceFilePath?: string;
 }
@@ -79,7 +81,7 @@ interface NoteStore {
   setActiveTitle: (title: string) => void;
   updateTabContent: (id: string, content: JSONContent, plainText: string) => void;
   updateActiveContent: (content: JSONContent, plainText: string) => void;
-  markTabSaved: (id: string, options?: SaveTabOptions) => void;
+  markTabSaved: (id: string, options: SaveTabOptions) => boolean;
   discardTabChanges: (id: string) => DiscardTabResult;
   toggleFileFormat: (id: string) => void;
   toggleSidebar: () => void;
@@ -105,9 +107,10 @@ function deriveTitle(plainText: string) {
 
 function createSavedSnapshot(tab: Pick<
   NoteTab,
-  "title" | "isTitleManual" | "content" | "plainText" | "folderPath" | "fileFormat" | "sourceFilePath" | "updatedAt" | "lastSavedAt"
+  "revision" | "title" | "isTitleManual" | "content" | "plainText" | "folderPath" | "fileFormat" | "sourceFilePath" | "updatedAt" | "lastSavedAt"
 >): SavedNoteSnapshot {
   return {
+    revision: tab.revision,
     title: tab.title,
     isTitleManual: tab.isTitleManual,
     content: tab.content,
@@ -120,11 +123,31 @@ function createSavedSnapshot(tab: Pick<
   };
 }
 
+function normalizeRevision(value: unknown, fallback = 0) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : fallback;
+}
+
+function normalizeTabRevisions(tab: NoteTab): NoteTab {
+  const revision = normalizeRevision(tab.revision);
+  const savedRevision = tab.savedSnapshot ? normalizeRevision(tab.savedSnapshot.revision, revision) : null;
+
+  if (revision === tab.revision && (!tab.savedSnapshot || savedRevision === tab.savedSnapshot.revision)) {
+    return tab;
+  }
+
+  return {
+    ...tab,
+    revision,
+    savedSnapshot: tab.savedSnapshot ? { ...tab.savedSnapshot, revision: savedRevision ?? revision } : null
+  };
+}
+
 function createEmptyTab(): NoteTab {
   const now = Date.now();
 
   return {
     id: createId(),
+    revision: 0,
     title: "제목 없음",
     isTitleManual: false,
     content: { type: "doc", content: [{ type: "paragraph" }] },
@@ -276,7 +299,7 @@ export const useNoteStore = create<NoteStore>((set, get) => {
     activeOpenTab: baseCollections.activeOpenTab,
     sidebarVisible: false,
     hydrateTabs: (tabs, persistedSession) => {
-      const loadedTabs = tabs.length > 0 ? tabs : [createEmptyTab()];
+      const loadedTabs = (tabs.length > 0 ? tabs : [createEmptyTab()]).map(normalizeTabRevisions);
       const nextNotesById: Record<string, NoteTab> = {};
       const nextNoteIds: string[] = [];
 
@@ -313,6 +336,7 @@ export const useNoteStore = create<NoteStore>((set, get) => {
       const now = Date.now();
       const tab: NoteTab = {
         id: createId(),
+        revision: 0,
         title: title.trim().slice(0, 50) || "제목 없음",
         isTitleManual: true,
         content,
@@ -511,7 +535,13 @@ export const useNoteStore = create<NoteStore>((set, get) => {
 
         const nextNotesById = {
           ...state.notesById,
-          [id]: { ...target, folderPath: normalized, updatedAt: Date.now(), isDirty: true }
+          [id]: {
+            ...target,
+            folderPath: normalized,
+            revision: target.revision + 1,
+            updatedAt: Date.now(),
+            isDirty: true
+          }
         };
         const nextCollections = buildCollections(nextNotesById, state.noteIds, state.openTabIds, state.activeTabId);
         return {
@@ -543,6 +573,7 @@ export const useNoteStore = create<NoteStore>((set, get) => {
             nextNotesById[noteId] = {
               ...note,
               folderPath: note.folderPath.replace(fromPath, toPath),
+              revision: note.revision + 1,
               updatedAt: Date.now(),
               isDirty: true
             };
@@ -583,6 +614,7 @@ export const useNoteStore = create<NoteStore>((set, get) => {
             nextNotesById[noteId] = {
               ...note,
               folderPath: "",
+              revision: note.revision + 1,
               updatedAt: Date.now(),
               isDirty: true
             };
@@ -677,6 +709,7 @@ export const useNoteStore = create<NoteStore>((set, get) => {
             ...target,
             title: manualTitle,
             isTitleManual: true,
+            revision: target.revision + 1,
             isDirty: true,
             updatedAt: Date.now()
           };
@@ -687,6 +720,7 @@ export const useNoteStore = create<NoteStore>((set, get) => {
               ...target,
               title: derived,
               isTitleManual: false,
+              revision: target.revision + 1,
               isDirty: true,
               updatedAt: Date.now()
             };
@@ -726,6 +760,7 @@ export const useNoteStore = create<NoteStore>((set, get) => {
             content,
             plainText,
             title: target.isTitleManual ? target.title : deriveTitle(plainText),
+            revision: target.revision + 1,
             isDirty: true,
             updatedAt: Date.now()
           }
@@ -748,29 +783,33 @@ export const useNoteStore = create<NoteStore>((set, get) => {
       get().updateTabContent(activeTabId, content, plainText);
     },
     markTabSaved: (id, options) => {
+      let savedCurrentRevision = false;
+
       set((state) => {
         const target = state.notesById[id];
         if (!target) {
           return state;
         }
 
-        const nextPersistence = options?.persistence ?? target.persistence;
-        const nextSourceFilePath = options?.sourceFilePath !== undefined ? options.sourceFilePath : target.sourceFilePath;
-        const nextLastSavedAt = options?.lastSavedAt ?? Date.now();
-        const savedTab: NoteTab = {
+        const nextPersistence = options.persistence ?? target.persistence;
+        const nextSourceFilePath = options.sourceFilePath !== undefined ? options.sourceFilePath : target.sourceFilePath;
+        const nextSavedSnapshot: SavedNoteSnapshot = {
+          ...options.savedSnapshot,
+          sourceFilePath: nextSourceFilePath
+        };
+        savedCurrentRevision = target.revision === nextSavedSnapshot.revision;
+
+        const nextTab: NoteTab = {
           ...target,
           persistence: nextPersistence,
           sourceFilePath: nextSourceFilePath,
-          isDirty: false,
-          lastSavedAt: nextLastSavedAt
+          isDirty: !savedCurrentRevision,
+          lastSavedAt: nextSavedSnapshot.lastSavedAt,
+          savedSnapshot: nextSavedSnapshot
         };
-        const nextSavedSnapshot = createSavedSnapshot(savedTab);
         const nextNotesById = {
           ...state.notesById,
-          [id]: {
-            ...savedTab,
-            savedSnapshot: nextSavedSnapshot
-          }
+          [id]: nextTab
         };
 
         let nextNoteIds = state.noteIds.filter((noteId) => noteId !== id);
@@ -787,6 +826,8 @@ export const useNoteStore = create<NoteStore>((set, get) => {
           activeOpenTab: nextCollections.activeOpenTab
         };
       });
+
+      return savedCurrentRevision;
     },
     discardTabChanges: (id) => {
       let result: DiscardTabResult = "none";
@@ -823,6 +864,7 @@ export const useNoteStore = create<NoteStore>((set, get) => {
             folderPath: snapshot.folderPath,
             fileFormat: snapshot.fileFormat,
             sourceFilePath: snapshot.sourceFilePath,
+            revision: target.revision + 1,
             isDirty: false,
             updatedAt: snapshot.updatedAt,
             lastSavedAt: snapshot.lastSavedAt
@@ -852,6 +894,7 @@ export const useNoteStore = create<NoteStore>((set, get) => {
           [id]: {
             ...target,
             fileFormat: nextFileFormat,
+            revision: target.revision + 1,
             isDirty: true,
             updatedAt: Date.now()
           }

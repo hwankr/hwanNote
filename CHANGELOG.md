@@ -5,6 +5,27 @@ All notable user-facing changes to HwanNote are documented here.
 This project follows [Semantic Versioning](https://semver.org/) and commit messages use the
 [Conventional Commits](https://www.conventionalcommits.org/) style.
 
+## [0.9.3] - 2026-08-11
+
+Fixes a data-loss risk where an older autosave completion could incorrectly
+mark newer in-memory edits as saved.
+
+### Fixed
+
+- **Autosave completion is revision-safe.** Each tab now advances its own
+  revision whenever persisted content changes. A completed write clears the
+  dirty state only when it saved the tab's current revision, so edits made
+  during an in-flight save remain protected by autosave retries and close
+  warnings.
+- **Saved snapshots match disk contents.** Save completion records the exact
+  request-time snapshot that was written instead of rebuilding it from newer
+  live editor state.
+- **Same-tab writes are serialized.** Autosave, manual save, close-triggered
+  save, and pin updates share a per-tab queue so an older write cannot finish
+  after and overwrite a newer one.
+- **Pending autosaves are tracked per tab.** Switching between notes no longer
+  displaces another tab's queued retry.
+
 ## [0.9.1] - 2026-05-01
 
 Fixes a cloud-sync data-loss risk where `calendar.json` could be overwritten
