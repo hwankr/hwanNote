@@ -62,6 +62,7 @@ pub fn run() {
         .manage(PendingUpdate::default())
         .manage(DownloadedUpdate::default())
         .manage(PendingOpenIntents::default())
+        .manage(CalendarWriteGuard::default())
         .invoke_handler(tauri::generate_handler![
             cmd_window_minimize,
             cmd_window_toggle_maximize,
@@ -95,6 +96,9 @@ pub fn run() {
             cmd_cloud_sync_status,
             cmd_cloud_sync_set_active_source,
             cmd_calendar_load,
+            cmd_calendar_backup,
+            cmd_calendar_confirm_loaded,
+            cmd_calendar_reset,
             cmd_calendar_save,
             cmd_session_save,
             cmd_session_load,

@@ -5,6 +5,25 @@ All notable user-facing changes to HwanNote are documented here.
 This project follows [Semantic Versioning](https://semver.org/) and commit messages use the
 [Conventional Commits](https://www.conventionalcommits.org/) style.
 
+## [0.9.5] - 2026-08-11
+
+Fixes a calendar corruption recovery bug where a malformed `calendar.json` could
+be treated like an empty calendar and then overwritten on exit before the user
+had a chance to recover or explicitly reset it.
+
+### Fixed
+
+- **Corrupt calendars stay blocked until recovery.** Parse failures now keep
+  the calendar in a dedicated recovery state instead of silently converting it
+  into a writable empty calendar.
+- **Reload and reset clear the recovery guard explicitly.** Successfully
+  reloading from disk releases the write guard, and the empty-calendar reset
+  path now uses a dedicated recovery command that clears the guard after a
+  confirmed reset.
+- **The calendar page shows recovery actions.** When the calendar cannot be
+  read, the calendar view now presents the source path, backup path, and
+  recovery actions instead of exposing the normal editing UI.
+
 ## [0.9.4] - 2026-08-11
 
 Fixes a cloud-sync data-loss risk where notes opened from local fallback

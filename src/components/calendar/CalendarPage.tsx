@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { confirm as confirmDialog, message } from "@tauri-apps/plugin-dialog";
+import { useI18n } from "../../i18n/context";
 import { formatDateKey, parseDateKey, type TodoItem } from "../../lib/calendarData";
 import { type WeekStart } from "../../lib/calendarRange";
 import { useNoteStore } from "../../stores/noteStore";
@@ -18,12 +20,18 @@ type TodoUpdateFn = (
 ) => void;
 
 export default function CalendarPage({ onNavigateToNote, weekStartsOn }: CalendarPageProps) {
+  const { t } = useI18n();
   const todayDateKey = formatDateKey(new Date());
   const data = useCalendarStore((s) => s.data);
   const selectedDate = useCalendarStore((s) => s.selectedDate);
   const currentMonth = useCalendarStore((s) => s.currentMonth);
   const loaded = useCalendarStore((s) => s.loaded);
+  const loadState = useCalendarStore((s) => s.loadState);
+  const loadError = useCalendarStore((s) => s.loadError);
+  const sourcePath = useCalendarStore((s) => s.sourcePath);
+  const backupPath = useCalendarStore((s) => s.backupPath);
   const loadCalendarData = useCalendarStore((s) => s.loadCalendarData);
+  const resetCalendarData = useCalendarStore((s) => s.resetCalendarData);
   const setSelectedDate = useCalendarStore((s) => s.setSelectedDate);
   const setCurrentMonth = useCalendarStore((s) => s.setCurrentMonth);
   const createTodo = useCalendarStore((s) => s.createTodo);
@@ -42,12 +50,45 @@ export default function CalendarPage({ onNavigateToNote, weekStartsOn }: Calenda
   const allNotes = useNoteStore((s) => s.allNotes);
 
   const [sidebarMode, setSidebarMode] = useState<CalendarSidebarMode>("day");
+  const [recoveryBusy, setRecoveryBusy] = useState(false);
 
   useEffect(() => {
-    if (!loaded) {
+    if (!loaded && loadState === "idle") {
       void loadCalendarData();
     }
-  }, [loaded, loadCalendarData]);
+  }, [loaded, loadCalendarData, loadState]);
+
+  const handleRecoveryReload = useCallback(async () => {
+    setRecoveryBusy(true);
+    try {
+      await loadCalendarData();
+    } finally {
+      setRecoveryBusy(false);
+    }
+  }, [loadCalendarData]);
+
+  const handleRecoveryReset = useCallback(async () => {
+    const confirmed = await confirmDialog(t("calendar.recoveryResetConfirm"), {
+      title: t("calendar.recoveryResetTitle"),
+      kind: "warning",
+    });
+    if (!confirmed) {
+      return;
+    }
+
+    setRecoveryBusy(true);
+    try {
+      const result = await resetCalendarData();
+      if (result === "blocked") {
+        await message(t("calendar.recoveryResetFailed"), {
+          title: t("calendar.recoveryResetFailedTitle"),
+          kind: "error",
+        });
+      }
+    } finally {
+      setRecoveryBusy(false);
+    }
+  }, [resetCalendarData, t]);
 
   const handlePrevMonth = useCallback(() => {
     setCurrentMonth(new Date(currentMonth.getFullYear(), currentMonth.getMonth() - 1, 1));
@@ -131,6 +172,67 @@ export default function CalendarPage({ onNavigateToNote, weekStartsOn }: Calenda
   );
 
   const dayTodos = data.todos[selectedDate]?.items ?? [];
+
+  if (loadState === "idle" || loadState === "loading") {
+    return (
+      <div className="calendar-page calendar-recovery-page">
+        <p className="calendar-recovery-loading" role="status">{t("calendar.loading")}</p>
+      </div>
+    );
+  }
+
+  if (loadState === "corrupt" || loadState === "load_error") {
+    return (
+      <div className="calendar-page calendar-recovery-page">
+        <section className="calendar-recovery-card" role="alert">
+          <div className="calendar-recovery-heading">
+            <span className="calendar-recovery-icon" aria-hidden="true">!</span>
+            <div>
+              <h2>{t("calendar.recoveryTitle")}</h2>
+              <p>{t("calendar.recoveryDescription")}</p>
+            </div>
+          </div>
+
+          <dl className="calendar-recovery-details">
+            {sourcePath && (
+              <div>
+                <dt>{t("calendar.recoverySource")}</dt>
+                <dd>{sourcePath}</dd>
+              </div>
+            )}
+            {backupPath && (
+              <div>
+                <dt>{t("calendar.recoveryBackup")}</dt>
+                <dd>{backupPath}</dd>
+              </div>
+            )}
+            {loadError && (
+              <div>
+                <dt>{t("calendar.recoveryError")}</dt>
+                <dd>{loadError}</dd>
+              </div>
+            )}
+          </dl>
+
+          <div className="calendar-recovery-actions">
+            <button type="button" onClick={() => void handleRecoveryReload()} disabled={recoveryBusy}>
+              {t("calendar.recoveryReload")}
+            </button>
+            {loadState === "corrupt" && (
+              <button
+                type="button"
+                className="calendar-recovery-reset"
+                onClick={() => void handleRecoveryReset()}
+                disabled={recoveryBusy}
+              >
+                {t("calendar.recoveryReset")}
+              </button>
+            )}
+          </div>
+        </section>
+      </div>
+    );
+  }
 
   return (
     <div className="calendar-page">

@@ -88,11 +88,16 @@ export interface CloudFolderMissingData {
 }
 
 export type CalendarStorageSource = NoteStorageSource;
+export type CalendarLoadStatus = "ok" | "missing" | "read_error";
 
 export interface CalendarLoadResult {
+  status: CalendarLoadStatus;
   data: string;
   loadedFrom: CalendarStorageSource;
   cloudUnavailable: boolean;
+  sourcePath: string;
+  backupPath: string | null;
+  error: string | null;
 }
 
 export interface FolderDeleteResult {
@@ -224,8 +229,17 @@ export const hwanNote = {
     load: () =>
       invoke<CalendarLoadResult>("cmd_calendar_load"),
 
+    confirmLoaded: (data: string | null, loadedFrom: CalendarStorageSource) =>
+      invoke<void>("cmd_calendar_confirm_loaded", { payload: { data, loadedFrom } }),
+
     save: (data: string, loadedFrom: CalendarStorageSource) =>
       invoke("cmd_calendar_save", { payload: { data, loadedFrom } }),
+
+    backup: (data: string, loadedFrom: CalendarStorageSource) =>
+      invoke<string>("cmd_calendar_backup", { payload: { data, loadedFrom } }),
+
+    reset: (data: string, loadedFrom: CalendarStorageSource) =>
+      invoke<void>("cmd_calendar_reset", { payload: { data, loadedFrom } }),
   },
 
   session: {
