@@ -86,6 +86,30 @@ describe("KeyedSerialTaskQueue", () => {
     await flushPromises();
     expect(queue.isBusy("second")).toBe(false);
   });
+
+  it("waits until every queued key is idle", async () => {
+    const queue = new KeyedSerialTaskQueue<string>();
+    const first = deferred<void>();
+    const second = deferred<void>();
+    let settled = false;
+
+    void queue.run("first", () => first.promise);
+    void queue.run("second", () => second.promise);
+    const idle = queue.waitForIdle().then(() => {
+      settled = true;
+    });
+
+    await flushPromises();
+    expect(settled).toBe(false);
+
+    first.resolve(undefined);
+    await flushPromises();
+    expect(settled).toBe(false);
+
+    second.resolve(undefined);
+    await idle;
+    expect(settled).toBe(true);
+  });
 });
 
 describe("KeyedDebouncer", () => {

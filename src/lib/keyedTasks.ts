@@ -7,6 +7,12 @@ export class KeyedSerialTaskQueue<K> {
     return this.tails.has(key);
   }
 
+  async waitForIdle(): Promise<void> {
+    while (this.tails.size > 0) {
+      await Promise.all([...this.tails.values()]);
+    }
+  }
+
   run<T>(key: K, task: () => Promise<T>): Promise<T> {
     const previous = this.tails.get(key) ?? Promise.resolve();
     const result = previous.then(task);
