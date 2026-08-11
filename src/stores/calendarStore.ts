@@ -22,6 +22,9 @@ import { useNoteStore } from "./noteStore";
 
 const AUTO_SAVE_DELAY_MS = 1750;
 
+export type CalendarLoadState = "idle" | "loading" | "ready" | "corrupt" | "load_error";
+export type CalendarSaveResult = "saved" | "blocked";
+
 interface CalendarStore {
   data: CalendarData;
   selectedDate: string;
@@ -29,9 +32,14 @@ interface CalendarStore {
   loaded: boolean;
   loadedFrom: CalendarStorageSource;
   cloudUnavailable: boolean;
+  loadState: CalendarLoadState;
+  loadError: string | null;
+  sourcePath: string | null;
+  backupPath: string | null;
 
   loadCalendarData: () => Promise<void>;
-  saveCalendarData: () => Promise<void>;
+  saveCalendarData: () => Promise<CalendarSaveResult>;
+  resetCalendarData: () => Promise<CalendarSaveResult>;
 
   setSelectedDate: (dateKey: string) => void;
   setCurrentMonth: (date: Date) => void;
@@ -83,6 +91,8 @@ export function selectOverdueTodoRows(
 let saveTimer: number | null = null;
 let isSaving = false;
 let pendingSave = false;
+let loadRequestId = 0;
+const CALENDAR_RECOVERY_GUARD_ERROR = "calendar.json recovery guard could not be cleared.";
 
 interface ExecuteSaveOptions {
   throwOnError?: boolean;
@@ -98,6 +108,14 @@ function scheduleSave() {
   }, AUTO_SAVE_DELAY_MS);
 }
 
+function cancelPendingSave() {
+  if (saveTimer !== null) {
+    window.clearTimeout(saveTimer);
+    saveTimer = null;
+  }
+  pendingSave = false;
+}
+
 function waitForSaveIdle(): Promise<void> {
   return new Promise((resolve) => {
     const check = () => {
@@ -111,26 +129,35 @@ function waitForSaveIdle(): Promise<void> {
   });
 }
 
-async function executeSave(options: ExecuteSaveOptions = {}) {
+async function executeSave(options: ExecuteSaveOptions = {}): Promise<CalendarSaveResult> {
+  if (useCalendarStore.getState().loadState !== "ready") {
+    return "blocked";
+  }
+
   if (isSaving) {
     pendingSave = true;
     if (options.throwOnError) {
       await waitForSaveIdle();
       return executeSave(options);
     }
-    return;
+    return "saved";
   }
 
   isSaving = true;
   try {
     const state = useCalendarStore.getState();
+    if (state.loadState !== "ready") {
+      return "blocked";
+    }
     const json = serializeCalendarData(state.data);
     await hwanNote.calendar.save(json, state.loadedFrom);
+    return "saved";
   } catch (error) {
     console.error("Failed to save calendar data:", error);
     if (options.throwOnError) {
       throw error;
     }
+    return "blocked";
   } finally {
     isSaving = false;
     if (pendingSave) {
@@ -142,6 +169,9 @@ async function executeSave(options: ExecuteSaveOptions = {}) {
 
 function mutateAndSave(mutator: (data: CalendarData) => boolean) {
   const state = useCalendarStore.getState();
+  if (state.loadState !== "ready") {
+    return;
+  }
   const next = structuredClone(state.data);
   const changed = mutator(next);
   if (!changed) {
@@ -151,6 +181,19 @@ function mutateAndSave(mutator: (data: CalendarData) => boolean) {
   scheduleSave();
 }
 
+async function confirmCalendarLoaded(
+  data: string | null,
+  loadedFrom: CalendarStorageSource
+): Promise<boolean> {
+  try {
+    await hwanNote.calendar.confirmLoaded(data, loadedFrom);
+    return true;
+  } catch (error) {
+    console.error("Failed to clear calendar recovery guard:", error);
+    return false;
+  }
+}
+
 export const useCalendarStore = create<CalendarStore>((set) => ({
   data: createEmptyCalendarData(),
   selectedDate: formatDateKey(new Date()),
@@ -158,33 +201,183 @@ export const useCalendarStore = create<CalendarStore>((set) => ({
   loaded: false,
   loadedFrom: "local",
   cloudUnavailable: false,
+  loadState: "idle",
+  loadError: null,
+  sourcePath: null,
+  backupPath: null,
 
   loadCalendarData: async () => {
+    const requestId = ++loadRequestId;
+    cancelPendingSave();
+    set({
+      loaded: false,
+      loadState: "loading",
+      loadError: null,
+      backupPath: null,
+    });
+
     try {
       const result = await hwanNote.calendar.load();
-      const data = parseCalendarData(result.data);
+      if (requestId !== loadRequestId) {
+        return;
+      }
+
+      if (result.status === "missing") {
+        const cleared = await confirmCalendarLoaded(null, result.loadedFrom);
+        if (requestId !== loadRequestId) {
+          return;
+        }
+        if (!cleared) {
+          set({
+            data: createEmptyCalendarData(),
+            loaded: true,
+            loadedFrom: result.loadedFrom,
+            cloudUnavailable: result.cloudUnavailable,
+            loadState: "corrupt",
+            loadError: CALENDAR_RECOVERY_GUARD_ERROR,
+            sourcePath: result.sourcePath,
+            backupPath: null,
+          });
+          return;
+        }
+        set({
+          data: createEmptyCalendarData(),
+          loaded: true,
+          loadedFrom: result.loadedFrom,
+          cloudUnavailable: result.cloudUnavailable,
+          loadState: "ready",
+          loadError: null,
+          sourcePath: result.sourcePath,
+          backupPath: null,
+        });
+        return;
+      }
+
+      if (result.status === "read_error") {
+        set({
+          data: createEmptyCalendarData(),
+          loaded: true,
+          loadedFrom: result.loadedFrom,
+          cloudUnavailable: result.cloudUnavailable,
+          loadState: "corrupt",
+          loadError: result.error ?? "calendar.json could not be read.",
+          sourcePath: result.sourcePath,
+          backupPath: result.backupPath,
+        });
+        return;
+      }
+
+      const parsed = parseCalendarData(result.data);
+      if (!parsed.ok) {
+        set({
+          data: createEmptyCalendarData(),
+          loaded: true,
+          loadedFrom: result.loadedFrom,
+          cloudUnavailable: result.cloudUnavailable,
+          loadState: "corrupt",
+          loadError: parsed.error.message,
+          sourcePath: result.sourcePath,
+          backupPath: null,
+        });
+
+        try {
+          const backupPath = await hwanNote.calendar.backup(result.data, result.loadedFrom);
+          if (requestId !== loadRequestId) {
+            return;
+          }
+          const state = useCalendarStore.getState();
+          if (state.loadState === "corrupt" && state.sourcePath === result.sourcePath) {
+            set({ backupPath });
+          }
+        } catch (error) {
+          console.error("Failed to back up invalid calendar data:", error);
+        }
+        return;
+      }
+
+      const cleared = await confirmCalendarLoaded(result.data, result.loadedFrom);
+      if (requestId !== loadRequestId) {
+        return;
+      }
+      if (!cleared) {
+        set({
+          data: parsed.data,
+          loaded: true,
+          loadedFrom: result.loadedFrom,
+          cloudUnavailable: result.cloudUnavailable,
+          loadState: "corrupt",
+          loadError: CALENDAR_RECOVERY_GUARD_ERROR,
+          sourcePath: result.sourcePath,
+          backupPath: null,
+        });
+        return;
+      }
       set({
-        data,
+        data: parsed.data,
         loaded: true,
         loadedFrom: result.loadedFrom,
         cloudUnavailable: result.cloudUnavailable,
+        loadState: "ready",
+        loadError: null,
+        sourcePath: result.sourcePath,
+        backupPath: null,
       });
-    } catch {
+    } catch (error) {
+      if (requestId !== loadRequestId) {
+        return;
+      }
+      console.error("Failed to load calendar data:", error);
       set({
         data: createEmptyCalendarData(),
         loaded: true,
         loadedFrom: "local",
         cloudUnavailable: false,
+        loadState: "load_error",
+        loadError: error instanceof Error ? error.message : String(error),
+        sourcePath: null,
+        backupPath: null,
       });
     }
   },
 
   saveCalendarData: async () => {
-    if (saveTimer !== null) {
-      window.clearTimeout(saveTimer);
-      saveTimer = null;
+    cancelPendingSave();
+    return executeSave({ throwOnError: true });
+  },
+
+  resetCalendarData: async () => {
+    if (useCalendarStore.getState().loadState !== "corrupt") {
+      return "blocked";
     }
-    await executeSave({ throwOnError: true });
+
+    const requestId = ++loadRequestId;
+    cancelPendingSave();
+    if (isSaving) {
+      await waitForSaveIdle();
+    }
+
+    const state = useCalendarStore.getState();
+    if (state.loadState !== "corrupt") {
+      return "blocked";
+    }
+
+    const data = createEmptyCalendarData();
+    try {
+      await hwanNote.calendar.reset(serializeCalendarData(data), state.loadedFrom);
+      if (requestId === loadRequestId) {
+        set({
+          data,
+          loaded: true,
+          loadState: "ready",
+          loadError: null,
+          backupPath: null,
+        });
+      }
+      return "saved";
+    } catch (error) {
+      console.error("Failed to reset calendar data:", error);
+      return "blocked";
+    }
   },
 
   setSelectedDate: (dateKey) => set({ selectedDate: dateKey }),

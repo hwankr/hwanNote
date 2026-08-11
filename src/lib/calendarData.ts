@@ -57,6 +57,23 @@ export interface CalendarDataV4 {
 }
 
 export type CalendarData = CalendarDataV4;
+export type CalendarParseErrorCode =
+  | "empty_file"
+  | "invalid_json"
+  | "invalid_root"
+  | "invalid_schema"
+  | "missing_version"
+  | "invalid_version"
+  | "unsupported_version";
+
+export interface CalendarParseError {
+  code: CalendarParseErrorCode;
+  message: string;
+}
+
+export type CalendarParseResult =
+  | { ok: true; data: CalendarData }
+  | { ok: false; error: CalendarParseError };
 
 export type CalendarTodoGroup =
   | "events"
@@ -105,64 +122,150 @@ export function createEmptyCalendarData(): CalendarData {
   return { version: CALENDAR_DATA_VERSION, todos: {}, inbox: [], noteLinks: {} };
 }
 
-export function parseCalendarData(raw: string): CalendarData {
+export function parseCalendarData(raw: string): CalendarParseResult {
   if (!raw || raw.trim() === "") {
-    return createEmptyCalendarData();
+    return {
+      ok: false,
+      error: {
+        code: "empty_file",
+        message: "calendar.json is empty.",
+      },
+    };
   }
 
   try {
     const parsed = JSON.parse(raw);
 
-    if (typeof parsed !== "object" || parsed === null) {
-      console.error("calendar.json: invalid format, returning empty data");
-      return createEmptyCalendarData();
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      return {
+        ok: false,
+        error: {
+          code: "invalid_root",
+          message: "calendar.json root must be a JSON object.",
+        },
+      };
     }
 
     if (parsed.version === 1) {
-      return migrateCalendarDataV3ToV4(
-        migrateCalendarDataV2ToV3({
-          ...migrateCalendarDataV1ToV2(parsed),
-          version: 2,
-        })
-      );
+      const schemaError = validateCalendarSchema(parsed, 1);
+      if (schemaError) return { ok: false, error: schemaError };
+      return {
+        ok: true,
+        data: migrateCalendarDataV3ToV4(
+          migrateCalendarDataV2ToV3({
+            ...migrateCalendarDataV1ToV2(parsed),
+            version: 2,
+          })
+        ),
+      };
     }
 
     if (parsed.version === 2) {
-      return migrateCalendarDataV3ToV4(migrateCalendarDataV2ToV3(parsed));
+      const schemaError = validateCalendarSchema(parsed, 2);
+      if (schemaError) return { ok: false, error: schemaError };
+      return {
+        ok: true,
+        data: migrateCalendarDataV3ToV4(migrateCalendarDataV2ToV3(parsed)),
+      };
     }
 
     if (parsed.version === 3) {
-      return migrateCalendarDataV3ToV4(parsed);
+      const schemaError = validateCalendarSchema(parsed, 3);
+      if (schemaError) return { ok: false, error: schemaError };
+      return { ok: true, data: migrateCalendarDataV3ToV4(parsed) };
     }
 
     if (parsed.version === CALENDAR_DATA_VERSION) {
-      return normalizeCalendarDataV4(parsed);
+      const schemaError = validateCalendarSchema(parsed, CALENDAR_DATA_VERSION);
+      if (schemaError) return { ok: false, error: schemaError };
+      return { ok: true, data: normalizeCalendarDataV4(parsed) };
     }
 
     if (parsed.version === undefined && ("todos" in parsed || "noteLinks" in parsed)) {
-      return migrateCalendarDataV3ToV4(
-        migrateCalendarDataV2ToV3({
-          ...migrateCalendarDataV1ToV2(parsed),
-          version: 2,
-        })
-      );
+      const schemaError = validateLegacyCalendarSchema(parsed);
+      if (schemaError) return { ok: false, error: schemaError };
+      return {
+        ok: true,
+        data: migrateCalendarDataV3ToV4(
+          migrateCalendarDataV2ToV3({
+            ...migrateCalendarDataV1ToV2(parsed),
+            version: 2,
+          })
+        ),
+      };
     }
 
-    if (typeof parsed.version !== "number") {
-      console.error("calendar.json: missing version, returning empty data");
-      return createEmptyCalendarData();
+    if (parsed.version === undefined) {
+      return {
+        ok: false,
+        error: {
+          code: "missing_version",
+          message: "calendar.json is missing a supported version field.",
+        },
+      };
+    }
+
+    if (typeof parsed.version !== "number" || !Number.isInteger(parsed.version)) {
+      return {
+        ok: false,
+        error: {
+          code: "invalid_version",
+          message: "calendar.json version must be an integer.",
+        },
+      };
     }
 
     if (parsed.version !== CALENDAR_DATA_VERSION) {
-      console.error(`calendar.json: unsupported version ${parsed.version}, returning empty data`);
-      return createEmptyCalendarData();
+      return {
+        ok: false,
+        error: {
+          code: "unsupported_version",
+          message: `calendar.json version ${parsed.version} is not supported.`,
+        },
+      };
     }
 
-    return normalizeCalendarDataV4(parsed);
+    return { ok: true, data: normalizeCalendarDataV4(parsed) };
   } catch (error) {
-    console.error("calendar.json: parse error, returning empty data", error);
-    return createEmptyCalendarData();
+    console.error("calendar.json: parse error", error);
+    return {
+      ok: false,
+      error: {
+        code: "invalid_json",
+        message: "calendar.json is not valid JSON.",
+      },
+    };
   }
+}
+
+function invalidSchema(message: string): CalendarParseError {
+  return { code: "invalid_schema", message };
+}
+
+function validateCalendarSchema(
+  value: Record<string, unknown>,
+  version: 1 | 2 | 3 | 4
+): CalendarParseError | null {
+  if (!isPlainObject(value.todos)) {
+    return invalidSchema(`calendar.json version ${version} must contain a todos object.`);
+  }
+  if (!isPlainObject(value.noteLinks)) {
+    return invalidSchema(`calendar.json version ${version} must contain a noteLinks object.`);
+  }
+  if (version >= 3 && !Array.isArray(value.inbox)) {
+    return invalidSchema(`calendar.json version ${version} must contain an inbox array.`);
+  }
+  return null;
+}
+
+function validateLegacyCalendarSchema(value: Record<string, unknown>): CalendarParseError | null {
+  if ("todos" in value && !isPlainObject(value.todos)) {
+    return invalidSchema("Legacy calendar.json todos must be an object.");
+  }
+  if ("noteLinks" in value && !isPlainObject(value.noteLinks)) {
+    return invalidSchema("Legacy calendar.json noteLinks must be an object.");
+  }
+  return null;
 }
 
 export function serializeCalendarData(data: CalendarData): string {

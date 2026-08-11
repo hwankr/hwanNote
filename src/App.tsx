@@ -15,6 +15,7 @@ import SettingsPanel, { type ThemeMode } from "./components/SettingsPanel";
 import Sidebar, { type AppView, type SidebarTag } from "./components/Sidebar";
 import CalendarPage from "./components/calendar/CalendarPage";
 import { DEFAULT_WEEK_STARTS_ON, isWeekStart, type WeekStart } from "./lib/calendarRange";
+import { ensureCalendarSaved } from "./lib/calendarSaveGuard";
 import { useCalendarStore } from "./stores/calendarStore";
 import StatusBar from "./components/StatusBar";
 import TitleBar from "./components/TitleBar";
@@ -1630,6 +1631,25 @@ export default function App() {
     });
   }, [getTabById, resolveDirtyTabs, runGuardedFlow, setActiveTab]);
 
+  const notifyCalendarSaveBlocked = useCallback(async () => {
+    const { backupPath, loadError, loadState, sourcePath } = useCalendarStore.getState();
+    console.error("Calendar save blocked until recovery or explicit reset:", {
+      loadState,
+      loadError,
+      sourcePath,
+      backupPath,
+    });
+    await message(
+      backupPath
+        ? t("settings.calendarRecoveryRequiredWithBackup", { path: backupPath })
+        : t("settings.calendarRecoveryRequired"),
+      {
+        title: t("settings.calendarRecoveryRequiredTitle"),
+        kind: "error"
+      }
+    );
+  }, [t]);
+
   const handleRequestCloseWindow = useCallback(async () => {
     await runGuardedFlow(async () => {
       const state = useNoteStore.getState();
@@ -1638,20 +1658,24 @@ export default function App() {
         return false;
       }
 
-      try {
-        await useCalendarStore.getState().saveCalendarData();
-      } catch (error) {
-        console.error("Failed to save calendar data before exit:", error);
-        await message(t("settings.calendarSaveFailed"), {
-          title: t("settings.calendarSaveFailedTitle"),
-          kind: "error"
-        });
+      const didSaveCalendar = await ensureCalendarSaved({
+        save: () => useCalendarStore.getState().saveCalendarData(),
+        onBlocked: notifyCalendarSaveBlocked,
+        onError: async (error) => {
+          console.error("Failed to save calendar data before exit:", error);
+          await message(t("settings.calendarSaveFailed"), {
+            title: t("settings.calendarSaveFailedTitle"),
+            kind: "error"
+          });
+        },
+      });
+      if (!didSaveCalendar) {
         return false;
       }
       await hwanNote.window.exit();
       return true;
     });
-  }, [resolveDirtyTabs, runGuardedFlow, t]);
+  }, [notifyCalendarSaveBlocked, resolveDirtyTabs, runGuardedFlow, t]);
 
   const resolveOpenTabsBeforeReload = useCallback(async () => {
     return runGuardedFlow(async () => {
@@ -1703,18 +1727,18 @@ export default function App() {
   }, [confirmDeleteNote, getTabById, removeNote, resolveDirtyTabs, runGuardedFlow, t]);
 
   const flushCalendarBeforeStorageChange = useCallback(async () => {
-    try {
-      await useCalendarStore.getState().saveCalendarData();
-      return true;
-    } catch (error) {
-      console.error("Failed to save calendar data before storage change:", error);
-      await message(t("settings.calendarSaveFailed"), {
-        title: t("settings.calendarSaveFailedTitle"),
-        kind: "error"
-      });
-      return false;
-    }
-  }, [t]);
+    return ensureCalendarSaved({
+      save: () => useCalendarStore.getState().saveCalendarData(),
+      onBlocked: notifyCalendarSaveBlocked,
+      onError: async (error) => {
+        console.error("Failed to save calendar data before storage change:", error);
+        await message(t("settings.calendarSaveFailed"), {
+          title: t("settings.calendarSaveFailedTitle"),
+          kind: "error"
+        });
+      },
+    });
+  }, [notifyCalendarSaveBlocked, t]);
 
   const handleBrowseAutoSaveDir = useCallback(async () => {
     const didResolve = await resolveOpenTabsBeforeReload();

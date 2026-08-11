@@ -1,6 +1,8 @@
-use std::fs;
+use std::collections::HashSet;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
@@ -38,6 +40,58 @@ pub struct PendingOpenIntents(pub Mutex<Vec<String>>);
 impl Default for PendingOpenIntents {
     fn default() -> Self {
         PendingOpenIntents(Mutex::new(Vec::new()))
+    }
+}
+
+pub struct CalendarWriteGuard(Mutex<HashSet<PathBuf>>);
+
+impl Default for CalendarWriteGuard {
+    fn default() -> Self {
+        Self(Mutex::new(HashSet::new()))
+    }
+}
+
+impl CalendarWriteGuard {
+    fn blocked_paths(&self) -> MutexGuard<'_, HashSet<PathBuf>> {
+        self.0.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
+    fn block(&self, calendar_path: &Path) {
+        self.blocked_paths().insert(calendar_path.to_path_buf());
+    }
+
+    fn confirm_loaded(&self, calendar_path: &Path) {
+        self.blocked_paths().remove(calendar_path);
+    }
+
+    #[cfg(test)]
+    fn is_blocked(&self, calendar_path: &Path) -> bool {
+        self.blocked_paths().contains(calendar_path)
+    }
+
+    fn write_if_allowed<F>(&self, calendar_path: &Path, write: F) -> Result<(), String>
+    where
+        F: FnOnce() -> Result<(), String>,
+    {
+        let blocked_paths = self.blocked_paths();
+        if blocked_paths.contains(calendar_path) {
+            return Err(format!(
+                "Calendar save rejected: {} is blocked after a calendar load failure. Back up and recover it, or explicitly reset the calendar first.",
+                calendar_path.display()
+            ));
+        }
+
+        write()
+    }
+
+    fn reset<F>(&self, calendar_path: &Path, write: F) -> Result<(), String>
+    where
+        F: FnOnce() -> Result<(), String>,
+    {
+        let mut blocked_paths = self.blocked_paths();
+        write()?;
+        blocked_paths.remove(calendar_path);
+        Ok(())
     }
 }
 
@@ -110,15 +164,33 @@ enum ResolvedStorageSource {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CalendarLoadResult {
+    status: String,
     data: String,
     loaded_from: String,
     cloud_unavailable: bool,
+    source_path: String,
+    backup_path: Option<String>,
+    error: Option<String>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CalendarSavePayload {
     data: String,
+    loaded_from: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalendarBackupPayload {
+    data: String,
+    loaded_from: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalendarConfirmLoadedPayload {
+    data: Option<String>,
     loaded_from: String,
 }
 
@@ -270,6 +342,264 @@ fn can_save_note(
     can_save_calendar(loaded_from, current_source)
 }
 
+fn calendar_backup_candidate(calendar_path: &Path, sequence: u64) -> PathBuf {
+    let file_name = calendar_path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy();
+    let backup_name = if sequence == 0 {
+        format!("{}.bak", file_name)
+    } else {
+        format!("{}.bak.{}", file_name, sequence)
+    };
+
+    calendar_path.with_file_name(backup_name)
+}
+
+fn write_unique_calendar_backup(calendar_path: &Path, data: &[u8]) -> Result<PathBuf, String> {
+    for sequence in 0_u64.. {
+        let backup_path = calendar_backup_candidate(calendar_path, sequence);
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&backup_path)
+        {
+            Ok(mut backup_file) => {
+                if let Err(error) = backup_file
+                    .write_all(data)
+                    .and_then(|_| backup_file.sync_all())
+                {
+                    drop(backup_file);
+                    let _ = fs::remove_file(&backup_path);
+                    return Err(format!(
+                        "Failed to write calendar backup {}: {}",
+                        backup_path.display(),
+                        error
+                    ));
+                }
+
+                return Ok(backup_path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!(
+                    "Failed to create calendar backup {}: {}",
+                    backup_path.display(),
+                    error
+                ));
+            }
+        }
+    }
+
+    unreachable!("the calendar backup sequence is unbounded")
+}
+
+fn backup_calendar_file(calendar_path: &Path) -> Result<PathBuf, String> {
+    let data = fs::read(calendar_path).map_err(|error| {
+        format!(
+            "Failed to read calendar data for backup {}: {}",
+            calendar_path.display(),
+            error
+        )
+    })?;
+
+    write_unique_calendar_backup(calendar_path, &data)
+}
+
+fn verify_calendar_snapshot(
+    calendar_path: &Path,
+    expected_data: Option<&str>,
+) -> Result<(), String> {
+    match expected_data {
+        Some(expected_data) => {
+            let current_data = fs::read_to_string(calendar_path).map_err(|error| {
+                format!(
+                    "Calendar confirmation rejected because {} could not be read: {}",
+                    calendar_path.display(),
+                    error
+                )
+            })?;
+            if current_data != expected_data {
+                return Err(format!(
+                    "Calendar confirmation rejected because {} changed after it was loaded.",
+                    calendar_path.display()
+                ));
+            }
+            Ok(())
+        }
+        None => match fs::metadata(calendar_path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Ok(_) => Err(format!(
+                "Calendar confirmation rejected because {} appeared after the missing-file result.",
+                calendar_path.display()
+            )),
+            Err(error) => Err(format!(
+                "Calendar confirmation rejected because {} could not be inspected: {}",
+                calendar_path.display(),
+                error
+            )),
+        },
+    }
+}
+
+fn validate_calendar_data_for_confirmation(data: &str) -> Result<(), String> {
+    if data.trim().is_empty() {
+        return Err("Calendar confirmation rejected because calendar.json is empty.".to_string());
+    }
+
+    let parsed: serde_json::Value = serde_json::from_str(data)
+        .map_err(|error| format!("Calendar confirmation rejected: invalid JSON: {}", error))?;
+    let object = parsed
+        .as_object()
+        .ok_or_else(|| "Calendar confirmation rejected: root must be an object.".to_string())?;
+
+    let require_object = |key: &str| -> Result<(), String> {
+        if object.get(key).and_then(serde_json::Value::as_object).is_none() {
+            return Err(format!(
+                "Calendar confirmation rejected: {} must be an object.",
+                key
+            ));
+        }
+        Ok(())
+    };
+    let require_array = |key: &str| -> Result<(), String> {
+        if object.get(key).and_then(serde_json::Value::as_array).is_none() {
+            return Err(format!(
+                "Calendar confirmation rejected: {} must be an array.",
+                key
+            ));
+        }
+        Ok(())
+    };
+
+    match object.get("version") {
+        Some(version) => {
+            let version = version.as_f64().ok_or_else(|| {
+                "Calendar confirmation rejected: version must be an integer.".to_string()
+            })?;
+            if version.fract() != 0.0 {
+                return Err(
+                    "Calendar confirmation rejected: version must be an integer.".to_string(),
+                );
+            }
+            let version = version as i64;
+            if !(1..=4).contains(&version) {
+                return Err(format!(
+                    "Calendar confirmation rejected: unsupported version {}.",
+                    version
+                ));
+            }
+            require_object("todos")?;
+            require_object("noteLinks")?;
+            if version >= 3 {
+                require_array("inbox")?;
+            }
+        }
+        None if object.contains_key("todos") || object.contains_key("noteLinks") => {
+            if object.contains_key("todos") {
+                require_object("todos")?;
+            }
+            if object.contains_key("noteLinks") {
+                require_object("noteLinks")?;
+            }
+        }
+        None => {
+            return Err(
+                "Calendar confirmation rejected: supported version metadata is missing."
+                    .to_string(),
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_empty_calendar_reset(data: &str) -> Result<(), String> {
+    let parsed: serde_json::Value = serde_json::from_str(data)
+        .map_err(|error| format!("Calendar reset payload is not valid JSON: {}", error))?;
+    let object = parsed
+        .as_object()
+        .ok_or_else(|| "Calendar reset payload must be a JSON object.".to_string())?;
+
+    let is_empty_reset = object.len() == 4
+        && object.get("version").and_then(serde_json::Value::as_u64) == Some(4)
+        && object
+            .get("todos")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(serde_json::Map::is_empty)
+        && object
+            .get("inbox")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(Vec::is_empty)
+        && object
+            .get("noteLinks")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(serde_json::Map::is_empty);
+
+    if !is_empty_reset {
+        return Err(
+            "Calendar reset rejected: payload must be an empty version 4 calendar.".to_string(),
+        );
+    }
+
+    Ok(())
+}
+
+fn create_unique_calendar_temp(dir: &Path) -> Result<(fs::File, PathBuf), String> {
+    for sequence in 0_u64.. {
+        let file_name = if sequence == 0 {
+            ".calendar.json.tmp".to_string()
+        } else {
+            format!(".calendar.json.tmp.{}", sequence)
+        };
+        let temp_path = dir.join(file_name);
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+        {
+            Ok(file) => return Ok((file, temp_path)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!(
+                    "Failed to create calendar temp file {}: {}",
+                    temp_path.display(),
+                    error
+                ));
+            }
+        }
+    }
+
+    unreachable!("the calendar temp-file sequence is unbounded")
+}
+
+fn write_calendar_data(dir: &Path, data: &str) -> Result<(), String> {
+    if !dir.exists() {
+        fs::create_dir_all(dir).map_err(|error| error.to_string())?;
+    }
+
+    let path = dir.join(file_manager::CALENDAR_FILENAME);
+    let (mut tmp_file, tmp_path) = create_unique_calendar_temp(dir)?;
+    if let Err(error) = tmp_file
+        .write_all(data.as_bytes())
+        .and_then(|_| tmp_file.sync_all())
+    {
+        drop(tmp_file);
+        let _ = fs::remove_file(&tmp_path);
+        tracing::error!("Failed to write calendar temp file: {}", error);
+        return Err(error.to_string());
+    }
+    drop(tmp_file);
+
+    fs::rename(&tmp_path, &path).map_err(|error| {
+        tracing::error!("Failed to rename calendar temp file: {}", error);
+        let _ = fs::remove_file(&tmp_path);
+        error.to_string()
+    })?;
+
+    Ok(())
+}
+
 // ── Window commands ──
 
 #[tauri::command]
@@ -407,35 +737,99 @@ pub async fn cmd_note_delete(app: AppHandle, note_id: String) -> Result<bool, St
 pub fn cmd_calendar_load(app: AppHandle) -> Result<CalendarLoadResult, String> {
     let (dir, loaded_from) = resolve_calendar_dir(&app);
     let path = dir.join(file_manager::CALENDAR_FILENAME);
+    let source_path = path.to_string_lossy().to_string();
     let cloud_unavailable = loaded_from == ResolvedStorageSource::LocalFallback;
     let loaded_from = resolved_storage_source_to_str(loaded_from).to_string();
 
-    if !path.exists() {
-        return Ok(CalendarLoadResult {
-            data: String::new(),
-            loaded_from,
-            cloud_unavailable,
-        });
-    }
-
     match fs::read_to_string(&path) {
-        Ok(content) => Ok(CalendarLoadResult {
-            data: content,
-            loaded_from,
-            cloud_unavailable,
-        }),
-        Err(e) => {
-            tracing::error!("Failed to read calendar.json: {}", e);
-            // Create backup of corrupted file
-            let bak = dir.join("calendar.json.bak");
-            let _ = fs::copy(&path, &bak);
+        Ok(content) => {
+            app.state::<CalendarWriteGuard>().block(&path);
             Ok(CalendarLoadResult {
+                status: "ok".to_string(),
+                data: content,
+                loaded_from,
+                cloud_unavailable,
+                source_path,
+                backup_path: None,
+                error: None,
+            })
+        }
+        Err(read_error) if read_error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(CalendarLoadResult {
+                status: "missing".to_string(),
                 data: String::new(),
                 loaded_from,
                 cloud_unavailable,
+                source_path,
+                backup_path: None,
+                error: None,
+            })
+        }
+        Err(read_error) => {
+            let read_error = format!("Failed to read calendar.json: {}", read_error);
+            tracing::error!("{}", read_error);
+            app.state::<CalendarWriteGuard>().block(&path);
+            let (backup_path, error) = match backup_calendar_file(&path) {
+                Ok(backup_path) => (Some(backup_path.to_string_lossy().to_string()), read_error),
+                Err(backup_error) => {
+                    tracing::error!(
+                        "Failed to back up unreadable calendar.json: {}",
+                        backup_error
+                    );
+                    (
+                        None,
+                        format!("{} Backup failed: {}", read_error, backup_error),
+                    )
+                }
+            };
+
+            Ok(CalendarLoadResult {
+                status: "read_error".to_string(),
+                data: String::new(),
+                loaded_from,
+                cloud_unavailable,
+                source_path,
+                backup_path,
+                error: Some(error),
             })
         }
     }
+}
+
+#[tauri::command]
+pub fn cmd_calendar_backup(
+    app: AppHandle,
+    payload: CalendarBackupPayload,
+) -> Result<String, String> {
+    let loaded_from = parse_resolved_storage_source(&payload.loaded_from)?;
+    let dir = resolve_loaded_storage_dir(&app, loaded_from)?;
+    let calendar_path = dir.join(file_manager::CALENDAR_FILENAME);
+    app.state::<CalendarWriteGuard>().block(&calendar_path);
+
+    if !dir.exists() {
+        fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    }
+
+    let backup_path = write_unique_calendar_backup(&calendar_path, payload.data.as_bytes())?;
+    Ok(backup_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub fn cmd_calendar_confirm_loaded(
+    app: AppHandle,
+    payload: CalendarConfirmLoadedPayload,
+) -> Result<(), String> {
+    let loaded_from = parse_resolved_storage_source(&payload.loaded_from)?;
+    let dir = resolve_loaded_storage_dir(&app, loaded_from)?;
+    let calendar_path = dir.join(file_manager::CALENDAR_FILENAME);
+    let write_guard = app.state::<CalendarWriteGuard>();
+    write_guard.block(&calendar_path);
+    if let Some(data) = payload.data.as_deref() {
+        validate_calendar_data_for_confirmation(data)?;
+    }
+    verify_calendar_snapshot(&calendar_path, payload.data.as_deref())?;
+    write_guard.confirm_loaded(&calendar_path);
+    Ok(())
 }
 
 #[tauri::command]
@@ -452,28 +846,29 @@ pub fn cmd_calendar_save(app: AppHandle, payload: CalendarSavePayload) -> Result
     }
 
     let dir = resolve_loaded_storage_dir(&app, loaded_from)?;
+    let calendar_path = dir.join(file_manager::CALENDAR_FILENAME);
+    app.state::<CalendarWriteGuard>()
+        .write_if_allowed(&calendar_path, || write_calendar_data(&dir, &payload.data))
+}
 
-    if !dir.exists() {
-        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+#[tauri::command]
+pub fn cmd_calendar_reset(app: AppHandle, payload: CalendarSavePayload) -> Result<(), String> {
+    validate_empty_calendar_reset(&payload.data)?;
+    let loaded_from = parse_resolved_storage_source(&payload.loaded_from)?;
+    let (_, current_source) = resolve_calendar_dir(&app);
+
+    if !can_save_calendar(loaded_from, current_source) {
+        return Err(format!(
+            "Calendar reset rejected: loaded from {}, but current storage resolves to {}.",
+            resolved_storage_source_to_str(loaded_from),
+            resolved_storage_source_to_str(current_source)
+        ));
     }
 
-    let path = dir.join(file_manager::CALENDAR_FILENAME);
-    let tmp_path = dir.join(".calendar.json.tmp");
-
-    // Atomic write: write to temp file, then rename
-    fs::write(&tmp_path, payload.data.as_bytes()).map_err(|e| {
-        tracing::error!("Failed to write calendar temp file: {}", e);
-        e.to_string()
-    })?;
-
-    fs::rename(&tmp_path, &path).map_err(|e| {
-        tracing::error!("Failed to rename calendar temp file: {}", e);
-        // Clean up temp file on failure
-        let _ = fs::remove_file(&tmp_path);
-        e.to_string()
-    })?;
-
-    Ok(())
+    let dir = resolve_loaded_storage_dir(&app, loaded_from)?;
+    let calendar_path = dir.join(file_manager::CALENDAR_FILENAME);
+    app.state::<CalendarWriteGuard>()
+        .reset(&calendar_path, || write_calendar_data(&dir, &payload.data))
 }
 
 // ── Session commands ──
@@ -1021,7 +1416,9 @@ pub fn cmd_cloud_sync_set_active_source(
 #[cfg(test)]
 mod tests {
     use super::{
-        can_save_calendar, can_save_note, loaded_source_writes_to_cloud, select_loaded_storage_dir,
+        backup_calendar_file, can_save_calendar, can_save_note, loaded_source_writes_to_cloud,
+        select_loaded_storage_dir, validate_empty_calendar_reset, verify_calendar_snapshot,
+        write_calendar_data, write_unique_calendar_backup, CalendarWriteGuard,
         ResolvedStorageSource,
     };
     use crate::file_manager::{self, AutoSavePayload};
@@ -1085,6 +1482,117 @@ mod tests {
             ResolvedStorageSource::Cloud,
             ResolvedStorageSource::LocalFallback
         ));
+    }
+
+    #[test]
+    fn calendar_backups_are_unique_and_preserve_each_payload() {
+        let root = make_temp_dir("calendar-backup-unique");
+        let calendar_path = root.join(file_manager::CALENDAR_FILENAME);
+
+        let first_backup = write_unique_calendar_backup(&calendar_path, b"first payload").unwrap();
+        let second_backup =
+            write_unique_calendar_backup(&calendar_path, b"second payload").unwrap();
+
+        assert_ne!(first_backup, second_backup);
+        assert_eq!(first_backup.parent(), Some(root.as_path()));
+        assert_eq!(second_backup.parent(), Some(root.as_path()));
+        assert_eq!(fs::read(first_backup).unwrap(), b"first payload");
+        assert_eq!(fs::read(second_backup).unwrap(), b"second payload");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unreadable_text_calendar_backup_is_byte_for_byte() {
+        let root = make_temp_dir("calendar-backup-bytes");
+        let calendar_path = root.join(file_manager::CALENDAR_FILENAME);
+        let invalid_utf8 = b"{\"title\": \xff\xfe}\0";
+        fs::write(&calendar_path, invalid_utf8).unwrap();
+
+        let backup_path = backup_calendar_file(&calendar_path).unwrap();
+
+        assert_eq!(fs::read(backup_path).unwrap(), invalid_utf8);
+        assert!(fs::read_to_string(&calendar_path).is_err());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn blocked_calendar_rejects_normal_write_until_confirmed() {
+        let guard = CalendarWriteGuard::default();
+        let blocked_path = PathBuf::from("blocked/calendar.json");
+        let other_path = PathBuf::from("other/calendar.json");
+        guard.block(&blocked_path);
+
+        let blocked_write = guard.write_if_allowed(&blocked_path, || {
+            panic!("blocked calendar write must not run")
+        });
+
+        assert!(blocked_write.is_err());
+        assert!(guard.is_blocked(&blocked_path));
+        assert!(guard.write_if_allowed(&other_path, || Ok(())).is_ok());
+
+        guard.confirm_loaded(&blocked_path);
+
+        assert!(!guard.is_blocked(&blocked_path));
+        assert!(guard.write_if_allowed(&blocked_path, || Ok(())).is_ok());
+    }
+
+    #[test]
+    fn reset_clears_block_only_after_successful_write() {
+        let guard = CalendarWriteGuard::default();
+        let root = make_temp_dir("calendar-reset-guard");
+        let calendar_path = root.join(file_manager::CALENDAR_FILENAME);
+        fs::write(&calendar_path, "corrupt data").unwrap();
+        guard.block(&calendar_path);
+
+        let failed_reset = guard.reset(&calendar_path, || Err("write failed".to_string()));
+
+        assert!(failed_reset.is_err());
+        assert!(guard.is_blocked(&calendar_path));
+        assert!(guard.write_if_allowed(&calendar_path, || Ok(())).is_err());
+
+        let reset_data = r#"{"version":4,"todos":{},"inbox":[],"noteLinks":{}}"#;
+        assert!(guard
+            .reset(&calendar_path, || write_calendar_data(&root, reset_data))
+            .is_ok());
+        assert!(!guard.is_blocked(&calendar_path));
+        assert_eq!(fs::read_to_string(&calendar_path).unwrap(), reset_data);
+        assert!(guard.write_if_allowed(&calendar_path, || Ok(())).is_ok());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn calendar_confirmation_rejects_changed_or_unexpected_files() {
+        let root = make_temp_dir("calendar-confirm-snapshot");
+        let calendar_path = root.join(file_manager::CALENDAR_FILENAME);
+        fs::write(&calendar_path, "loaded data").unwrap();
+
+        assert!(verify_calendar_snapshot(&calendar_path, Some("loaded data")).is_ok());
+        assert!(verify_calendar_snapshot(&calendar_path, Some("stale data")).is_err());
+        assert!(verify_calendar_snapshot(&calendar_path, None).is_err());
+
+        fs::remove_file(&calendar_path).unwrap();
+        assert!(verify_calendar_snapshot(&calendar_path, None).is_ok());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn calendar_reset_accepts_only_the_empty_current_schema() {
+        assert!(validate_empty_calendar_reset(
+            r#"{"version":4,"todos":{},"inbox":[],"noteLinks":{}}"#
+        )
+        .is_ok());
+        assert!(validate_empty_calendar_reset(
+            r#"{"version":4,"todos":{"2026-08-11":{"items":[]}},"inbox":[],"noteLinks":{}}"#
+        )
+        .is_err());
+        assert!(validate_empty_calendar_reset(
+            r#"{"version":3,"todos":{},"inbox":[],"noteLinks":{}}"#
+        )
+        .is_err());
     }
 
     #[test]
