@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   autoSave: vi.fn(),
   cleanOrphanNoteLinks: vi.fn(),
+  closeRequestHandlers: [] as Array<(event: { preventDefault: () => void }) => void | Promise<void>>,
   detectCloudProviders: vi.fn(),
   dialogMessage: vi.fn(),
   getAutoSaveDir: vi.fn(),
@@ -23,6 +24,8 @@ const mocks = vi.hoisted(() => ({
   saveSession: vi.fn(),
   setActiveSource: vi.fn(),
   cloudStatus: vi.fn(),
+  updaterInstall: vi.fn(),
+  windowExit: vi.fn(),
 }));
 
 vi.mock("./lib/tauriApi", () => ({
@@ -31,7 +34,7 @@ vi.mock("./lib/tauriApi", () => ({
       minimize: vi.fn().mockResolvedValue(undefined),
       toggleMaximize: vi.fn().mockResolvedValue(false),
       close: vi.fn().mockResolvedValue(undefined),
-      exit: vi.fn().mockResolvedValue(undefined),
+      exit: mocks.windowExit,
     },
     note: {
       autoSave: mocks.autoSave,
@@ -50,7 +53,7 @@ vi.mock("./lib/tauriApi", () => ({
       delete: vi.fn().mockResolvedValue({ folders: [], movedNoteIds: [] }),
     },
     updater: {
-      install: vi.fn().mockResolvedValue(undefined),
+      install: mocks.updaterInstall,
     },
     settings: {
       browseAutoSaveDir: vi.fn().mockResolvedValue(null),
@@ -90,7 +93,10 @@ vi.mock("./stores/calendarStore", () => ({
 
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({
-    onCloseRequested: vi.fn().mockResolvedValue(() => undefined),
+    onCloseRequested: vi.fn((handler) => {
+      mocks.closeRequestHandlers.push(handler);
+      return Promise.resolve(() => undefined);
+    }),
   }),
 }));
 
@@ -178,7 +184,17 @@ vi.mock("./components/Toolbar", async () => {
 
 vi.mock("./components/UpdateToast", async () => {
   const { createElement } = await import("react");
-  return { default: () => createElement("div") };
+  return {
+    default: ({ onInstall }: { onInstall: () => Promise<void> }) =>
+      createElement(
+        "button",
+        {
+          "data-testid": "install-update",
+          onClick: () => void onInstall(),
+        },
+        "install update",
+      ),
+  };
 });
 
 vi.mock("./components/calendar/CalendarPage", async () => {
@@ -344,6 +360,9 @@ describe("App locale changes", () => {
       recoveryCopyPath: null,
     });
     mocks.cleanOrphanNoteLinks.mockReset();
+    mocks.closeRequestHandlers.length = 0;
+    mocks.updaterInstall.mockReset().mockResolvedValue(undefined);
+    mocks.windowExit.mockReset().mockResolvedValue(undefined);
 
     container = document.createElement("div");
     document.body.appendChild(container);
@@ -656,5 +675,276 @@ describe("App locale changes", () => {
       expect.stringContaining("C:/notes/calendar.json.local-recovery.bak"),
       expect.objectContaining({ kind: "error" }),
     );
+  });
+
+  it("waits for calendar and pending note saves before installing an update", async () => {
+    const calendarSave = createDeferred<"saved" | "blocked">();
+    const firstNoteSave = createDeferred<{
+      filePath: string;
+      noteId: string;
+      createdAt: number;
+      updatedAt: number;
+    }>();
+    const followUpNoteSave = createDeferred<{
+      filePath: string;
+      noteId: string;
+      createdAt: number;
+      updatedAt: number;
+    }>();
+    mocks.saveCalendarData.mockReturnValueOnce(calendarSave.promise);
+    mocks.autoSave
+      .mockReturnValueOnce(firstNoteSave.promise)
+      .mockReturnValueOnce(followUpNoteSave.promise);
+
+    await renderApp(root);
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="install-update"]').click();
+    });
+    await flushUntil(() => mocks.saveCalendarData.mock.calls.length === 1, "the pre-update calendar save");
+
+    expect(mocks.updaterInstall).not.toHaveBeenCalled();
+
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="edit-note"]').click();
+    });
+    expect(useNoteStore.getState().notesById[NOTE_ID]).toMatchObject({
+      plainText: "dirty draft",
+      isDirty: true,
+    });
+
+    await act(async () => {
+      calendarSave.resolve("saved");
+      await calendarSave.promise;
+    });
+    await flushUntil(() => mocks.autoSave.mock.calls.length === 1, "the pending note save to start");
+
+    expect(mocks.updaterInstall).not.toHaveBeenCalled();
+    expect(mocks.autoSave).toHaveBeenCalledWith(
+      NOTE_ID,
+      "Disk title",
+      expect.stringContaining("dirty draft"),
+      "",
+      true,
+      false,
+      "local",
+    );
+
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="edit-concurrently"]').click();
+    });
+    expect(useNoteStore.getState().notesById[NOTE_ID]).toMatchObject({
+      plainText: "concurrent edit",
+      isDirty: true,
+    });
+
+    await act(async () => {
+      firstNoteSave.resolve({
+        filePath: "C:/notes/library-note.md",
+        noteId: NOTE_ID,
+        createdAt: 1_000,
+        updatedAt: 2_000,
+      });
+      await firstNoteSave.promise;
+    });
+    await flushUntil(() => mocks.autoSave.mock.calls.length === 2, "the follow-up note save to start");
+
+    expect(mocks.updaterInstall).not.toHaveBeenCalled();
+    expect(mocks.autoSave).toHaveBeenNthCalledWith(
+      2,
+      NOTE_ID,
+      "Disk title",
+      expect.stringContaining("concurrent edit"),
+      "",
+      true,
+      false,
+      "local",
+    );
+
+    await act(async () => {
+      followUpNoteSave.resolve({
+        filePath: "C:/notes/library-note.md",
+        noteId: NOTE_ID,
+        createdAt: 1_000,
+        updatedAt: 3_000,
+      });
+      await followUpNoteSave.promise;
+    });
+    await flushUntil(() => mocks.updaterInstall.mock.calls.length === 1, "the update installation");
+
+    expect(mocks.saveCalendarData.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.autoSave.mock.invocationCallOrder[0],
+    );
+    expect(mocks.autoSave.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.autoSave.mock.invocationCallOrder[1],
+    );
+    expect(mocks.autoSave.mock.invocationCallOrder[1]).toBeLessThan(
+      mocks.updaterInstall.mock.invocationCallOrder[0],
+    );
+    expect(useNoteStore.getState().notesById[NOTE_ID]).toMatchObject({
+      plainText: "concurrent edit",
+      isDirty: false,
+    });
+  });
+
+  it("waits for an already-running note save before installing an update", async () => {
+    const inFlightNoteSave = createDeferred<{
+      filePath: string;
+      noteId: string;
+      createdAt: number;
+      updatedAt: number;
+    }>();
+    mocks.autoSave.mockReturnValueOnce(inFlightNoteSave.promise);
+    mocks.dialogMessage.mockResolvedValueOnce("No");
+
+    await renderApp(root);
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="edit-note"]').click();
+      await vi.advanceTimersByTimeAsync(AUTO_SAVE_DELAY_MS);
+    });
+    await flushUntil(() => mocks.autoSave.mock.calls.length === 1, "the note save to start");
+
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="install-update"]').click();
+    });
+    await flushUntil(() => mocks.saveCalendarData.mock.calls.length === 1, "the pre-update calendar save");
+
+    expect(mocks.updaterInstall).not.toHaveBeenCalled();
+
+    await act(async () => {
+      inFlightNoteSave.resolve({
+        filePath: "C:/notes/library-note.md",
+        noteId: NOTE_ID,
+        createdAt: 1_000,
+        updatedAt: 2_000,
+      });
+      await inFlightNoteSave.promise;
+    });
+    await flushUntil(() => mocks.updaterInstall.mock.calls.length === 1, "the update installation");
+
+    expect(mocks.autoSave.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.saveCalendarData.mock.invocationCallOrder[0],
+    );
+    expect(mocks.saveCalendarData.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.updaterInstall.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("does not install an update when the calendar save is blocked", async () => {
+    mocks.saveCalendarData.mockResolvedValueOnce("blocked");
+
+    await renderApp(root);
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="install-update"]').click();
+    });
+    await flushUntil(() => mocks.saveCalendarData.mock.calls.length === 1, "the blocked calendar save");
+    await flushReactWork();
+
+    expect(mocks.updaterInstall).not.toHaveBeenCalled();
+    expect(mocks.dialogMessage).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ kind: "error" }),
+    );
+  });
+
+  it("does not install an update when the calendar save fails", async () => {
+    const failure = new Error("calendar save failed");
+    consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    mocks.saveCalendarData.mockRejectedValueOnce(failure);
+
+    await renderApp(root);
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="install-update"]').click();
+    });
+    await flushUntil(() => mocks.saveCalendarData.mock.calls.length === 1, "the failed calendar save");
+    await flushReactWork();
+
+    expect(mocks.updaterInstall).not.toHaveBeenCalled();
+    expect(mocks.dialogMessage).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ kind: "error" }),
+    );
+  });
+
+  it("does not install an update when a pending note save fails", async () => {
+    const calendarSave = createDeferred<"saved" | "blocked">();
+    const failure = new Error("note save failed");
+    consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    mocks.saveCalendarData.mockReturnValueOnce(calendarSave.promise);
+    mocks.autoSave.mockRejectedValueOnce(failure);
+
+    await renderApp(root);
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="install-update"]').click();
+    });
+    await flushUntil(() => mocks.saveCalendarData.mock.calls.length === 1, "the pre-update calendar save");
+
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="edit-note"]').click();
+      calendarSave.resolve("saved");
+      await calendarSave.promise;
+    });
+    await flushUntil(() => mocks.autoSave.mock.calls.length === 1, "the failed note save");
+    await flushReactWork();
+
+    expect(mocks.updaterInstall).not.toHaveBeenCalled();
+    expect(useNoteStore.getState().notesById[NOTE_ID]).toMatchObject({
+      plainText: "dirty draft",
+      isDirty: true,
+    });
+    expect(mocks.dialogMessage).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ kind: "error" }),
+    );
+  });
+
+  it("releases the close guard only after saves finish and restores it when installation fails", async () => {
+    const calendarSave = createDeferred<"saved" | "blocked">();
+    const installation = createDeferred<void>();
+    consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    mocks.saveCalendarData.mockReturnValueOnce(calendarSave.promise);
+    mocks.updaterInstall.mockReturnValueOnce(installation.promise);
+
+    await renderApp(root);
+    const closeRequest = mocks.closeRequestHandlers[mocks.closeRequestHandlers.length - 1];
+    if (!closeRequest) {
+      throw new Error("Expected a close-request handler");
+    }
+
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="install-update"]').click();
+    });
+    await flushUntil(() => mocks.saveCalendarData.mock.calls.length === 1, "the pre-update calendar save");
+
+    const preventBeforeSave = vi.fn();
+    await act(async () => {
+      await closeRequest({ preventDefault: preventBeforeSave });
+    });
+    expect(preventBeforeSave).toHaveBeenCalledOnce();
+    expect(mocks.updaterInstall).not.toHaveBeenCalled();
+
+    await act(async () => {
+      calendarSave.resolve("saved");
+      await calendarSave.promise;
+    });
+    await flushUntil(() => mocks.updaterInstall.mock.calls.length === 1, "the update installation");
+
+    const preventDuringInstall = vi.fn();
+    await act(async () => {
+      await closeRequest({ preventDefault: preventDuringInstall });
+    });
+    expect(preventDuringInstall).not.toHaveBeenCalled();
+
+    mocks.saveCalendarData.mockResolvedValueOnce("blocked");
+    await act(async () => {
+      installation.reject(new Error("install failed"));
+      await installation.promise.catch(() => undefined);
+    });
+    await flushReactWork();
+
+    const preventAfterFailure = vi.fn();
+    await act(async () => {
+      await closeRequest({ preventDefault: preventAfterFailure });
+    });
+    expect(preventAfterFailure).toHaveBeenCalledOnce();
   });
 });

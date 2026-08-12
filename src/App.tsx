@@ -1735,6 +1735,53 @@ export default function App() {
     return true;
   }, [closeTab, discardTabChanges, flushTitleDraft, getTabById, handleSaveTab, promptCloseDecision]);
 
+  const drainNoteSaveQueue = useCallback(async () => {
+    const collectPendingTabIds = () => {
+      Object.keys(pendingTitleDraftsRef.current).forEach(flushTitleDraft);
+
+      return [...new Set([
+        ...autoSaveDebouncerRef.current.takePendingKeys(),
+        ...Object.values(useNoteStore.getState().notesById)
+          .filter((tab) => tab.isDirty)
+          .map((tab) => tab.id),
+      ])];
+    };
+
+    let pendingTabIds = collectPendingTabIds();
+    while (true) {
+      if (pendingTabIds.length > 0) {
+        const saveTab = saveTabRef.current;
+        if (!saveTab) {
+          return false;
+        }
+
+        const attemptedRevisions = new Map(
+          pendingTabIds.map((tabId) => [tabId, getTabById(tabId)?.revision])
+        );
+        const results = await Promise.all(pendingTabIds.map((tabId) => saveTab(tabId)));
+        const hasFailedDirtySave = pendingTabIds.some(
+          (tabId, index) => {
+            if (results[index]) {
+              return false;
+            }
+
+            const latestTab = getTabById(tabId);
+            return latestTab?.isDirty === true && latestTab.revision === attemptedRevisions.get(tabId);
+          }
+        );
+        if (hasFailedDirtySave) {
+          return false;
+        }
+      }
+
+      await saveQueueRef.current.waitForIdle();
+      pendingTabIds = collectPendingTabIds();
+      if (pendingTabIds.length === 0) {
+        return true;
+      }
+    }
+  }, [flushTitleDraft, getTabById]);
+
   const runGuardedFlow = useCallback(async (action: () => Promise<boolean>) => {
     if (guardedFlowRef.current) {
       return false;
@@ -1995,8 +2042,43 @@ export default function App() {
   }, [flushCalendarBeforeStorageChange, loadLibraryState, refreshCloudSyncState, resolveOpenTabsBeforeReload]);
 
   const handleInstallUpdate = useCallback(async () => {
-    const didResolve = await resolveOpenTabsBeforeReload();
-    if (!didResolve) {
+    const isReadyToInstall = await runGuardedFlow(async () => {
+      const state = useNoteStore.getState();
+      const didResolve = await resolveDirtyTabs(state.openTabIds, { closeResolvedTabs: false });
+      if (!didResolve) {
+        return false;
+      }
+
+      const didSaveCalendar = await ensureCalendarSaved({
+        save: () => useCalendarStore.getState().saveCalendarData(),
+        onBlocked: notifyCalendarSaveBlocked,
+        onError: async (error) => {
+          console.error("Failed to save calendar data before update installation:", error);
+          await message(t("settings.calendarSaveFailed"), {
+            title: t("settings.calendarSaveFailedTitle"),
+            kind: "error"
+          });
+        },
+      });
+      if (!didSaveCalendar) {
+        return false;
+      }
+
+      const didDrainNoteSaves = await drainNoteSaveQueue();
+      if (!didDrainNoteSaves) {
+        console.error("Failed to drain note saves before update installation.");
+        try {
+          await message(t("update.noteSaveFailed"), {
+            title: t("update.noteSaveFailedTitle"),
+            kind: "error"
+          });
+        } catch {
+          // A failed notification must not release the close guard.
+        }
+      }
+      return didDrainNoteSaves;
+    });
+    if (!isReadyToInstall) {
       return;
     }
 
@@ -2007,7 +2089,7 @@ export default function App() {
       allowImmediateCloseRef.current = false;
       console.error("Failed to install update:", error);
     }
-  }, [resolveOpenTabsBeforeReload]);
+  }, [drainNoteSaveQueue, notifyCalendarSaveBlocked, resolveDirtyTabs, runGuardedFlow, t]);
 
   useEffect(() => {
     void refreshLocalAutoSaveDir().catch(() => {

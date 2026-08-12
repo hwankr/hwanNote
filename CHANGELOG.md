@@ -5,6 +5,20 @@ All notable user-facing changes to HwanNote are documented here.
 This project follows [Semantic Versioning](https://semver.org/) and commit messages use the
 [Conventional Commits](https://www.conventionalcommits.org/) style.
 
+## [0.9.9] - 2026-08-12
+
+Fixes an update-install data-loss risk where HwanNote could release its close
+guard before pending calendar and note writes had finished.
+
+### Fixed
+
+- **Update installation now fails closed on calendar save problems.** HwanNote
+  waits for the guarded calendar save and does not start installation when the
+  save is blocked or fails.
+- **All note writes drain before restart.** Pending title drafts, debounced
+  autosaves, dirty notes, and already-running per-note save tasks are completed
+  before the updater receives permission to close the app.
+
 ## [0.9.8] - 2026-08-12
 
 Fixes a calendar data-loss race where automatic cloud recovery could reload the
