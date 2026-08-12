@@ -919,6 +919,7 @@ export default function App() {
     setNoteRecoveryPending(true);
     noteWritesSuspendedRef.current = true;
     clearAutoSaveTimer();
+    let calendarRecoveryCopyPath: string | null = null;
 
     try {
       await saveQueueRef.current.waitForIdle();
@@ -934,6 +935,14 @@ export default function App() {
           recoveryFailureNotifiedRef.current = false;
         }
         return false;
+      }
+
+      const calendarRecovery = await useCalendarStore.getState().recoverCalendarDataFromCloud();
+      calendarRecoveryCopyPath = calendarRecovery.recoveryCopyPath;
+      if (calendarRecovery.status !== "recovered" || calendarRecovery.loadedFrom !== "cloud") {
+        throw new Error(
+          `Calendar recovery was blocked while storage resolved to ${calendarRecovery.loadedFrom ?? "unknown"}.`
+        );
       }
 
       const currentState = useNoteStore.getState();
@@ -961,28 +970,37 @@ export default function App() {
       noteStorageSourceRef.current = result.loadedFrom;
       setNoteStorageSource(result.loadedFrom);
 
-      await useCalendarStore.getState().loadCalendarData();
       useCalendarStore.getState().cleanOrphanNoteLinks();
 
       noteRecoveryPendingRef.current = false;
       setNoteRecoveryPending(false);
       noteWritesSuspendedRef.current = false;
       recoveryFailureNotifiedRef.current = false;
-      const detail = recovery.recoveredCount > 0
+      const noteDetail = recovery.recoveredCount > 0
         ? tRef.current("settings.cloudSyncRecoveredWithCopies", { count: recovery.recoveredCount })
         : tRef.current("settings.cloudSyncRecovered");
+      const detail = calendarRecoveryCopyPath
+        ? `${noteDetail}\n\n${tRef.current("settings.cloudSyncRecoveredCalendarCopy", {
+            path: calendarRecoveryCopyPath,
+          })}`
+        : noteDetail;
       void message(detail, {
         title: tRef.current("settings.cloudSyncRecoveredTitle"),
         kind: "info"
       }).catch(() => { /* ignore notification failures */ });
       return true;
     } catch (error) {
-      console.error("Failed to reload notes after cloud storage recovery:", error);
+      console.error("Failed to recover the cloud library safely:", error);
       noteRecoveryPendingRef.current = true;
       setNoteRecoveryPending(true);
       if (!recoveryFailureNotifiedRef.current) {
         recoveryFailureNotifiedRef.current = true;
-        void message(tRef.current("settings.cloudSyncRecoveryFailed"), {
+        const detail = calendarRecoveryCopyPath
+          ? tRef.current("settings.cloudSyncRecoveryFailedWithCalendarCopy", {
+              path: calendarRecoveryCopyPath,
+            })
+          : tRef.current("settings.cloudSyncRecoveryFailed");
+        void message(detail, {
           title: tRef.current("settings.cloudSyncRecoveryFailedTitle"),
           kind: "error"
         }).catch(() => { /* ignore notification failures */ });

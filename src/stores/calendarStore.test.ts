@@ -9,6 +9,7 @@ const calendarLoad = vi.fn();
 const calendarSave = vi.fn();
 const calendarBackup = vi.fn();
 const calendarConfirmLoaded = vi.fn();
+const calendarPreserveRecoveryCopy = vi.fn();
 const calendarReset = vi.fn();
 
 vi.mock("../lib/tauriApi", () => ({
@@ -18,6 +19,7 @@ vi.mock("../lib/tauriApi", () => ({
       save: calendarSave,
       backup: calendarBackup,
       confirmLoaded: calendarConfirmLoaded,
+      preserveRecoveryCopy: calendarPreserveRecoveryCopy,
       reset: calendarReset,
     },
   },
@@ -63,6 +65,11 @@ type CalendarStoreApi = ReturnType<CalendarStoreModule["useCalendarStore"]["getS
   sourcePath: string | null;
   backupPath: string | null;
   saveCalendarData: () => Promise<"saved" | "blocked">;
+  recoverCalendarDataFromCloud: () => Promise<{
+    status: "recovered" | "blocked";
+    loadedFrom: "local" | "cloud" | "local_fallback" | null;
+    recoveryCopyPath: string | null;
+  }>;
   resetCalendarData: () => Promise<"saved" | "blocked">;
 };
 
@@ -81,6 +88,7 @@ beforeEach(async () => {
   vi.resetModules();
   vi.clearAllMocks();
   calendarConfirmLoaded.mockResolvedValue(undefined);
+  calendarPreserveRecoveryCopy.mockResolvedValue("C:\\data\\calendar.json.local-recovery.bak");
   vi.useFakeTimers();
   vi.stubGlobal("window", globalThis);
   await importStore();
@@ -98,6 +106,278 @@ afterEach(() => {
   vi.runOnlyPendingTimers();
   vi.useRealTimers();
   vi.unstubAllGlobals();
+});
+
+describe("useCalendarStore cloud recovery coordination", () => {
+  it("saves and backs up a pending local-fallback edit before loading cloud data", async () => {
+    const cloudData = createTodoData();
+    calendarLoad
+      .mockResolvedValueOnce({
+        status: "missing",
+        data: "",
+        loadedFrom: "local_fallback",
+        cloudUnavailable: true,
+        sourcePath: "C:\\local\\calendar.json",
+        backupPath: null,
+        error: null,
+      })
+      .mockResolvedValueOnce({
+        status: "ok",
+        data: serializeCalendarData(cloudData),
+        loadedFrom: "cloud",
+        cloudUnavailable: false,
+        sourcePath: "C:\\cloud\\calendar.json",
+        backupPath: null,
+        error: null,
+      });
+    calendarSave.mockResolvedValue(undefined);
+
+    await storeState().loadCalendarData();
+    storeState().createTodo("2026-08-12", "pending local change");
+
+    const outcome = await storeState().recoverCalendarDataFromCloud();
+
+    const savedJson = calendarSave.mock.calls[0]?.[0] as string;
+    expect(JSON.parse(savedJson).todos["2026-08-12"].items[0].text).toBe("pending local change");
+    expect(calendarSave).toHaveBeenCalledWith(savedJson, "local_fallback");
+    expect(calendarPreserveRecoveryCopy).toHaveBeenCalledWith(savedJson);
+    expect(calendarSave.mock.invocationCallOrder[0]).toBeLessThan(
+      calendarPreserveRecoveryCopy.mock.invocationCallOrder[0]
+    );
+    expect(calendarPreserveRecoveryCopy.mock.invocationCallOrder[0]).toBeLessThan(
+      calendarLoad.mock.invocationCallOrder[1]
+    );
+    expect(outcome).toEqual({
+      status: "recovered",
+      loadedFrom: "cloud",
+      recoveryCopyPath: "C:\\data\\calendar.json.local-recovery.bak",
+    });
+    expect(storeState()).toMatchObject({
+      data: cloudData,
+      loadedFrom: "cloud",
+      loadState: "ready",
+    });
+
+    await vi.advanceTimersByTimeAsync(1_750);
+    expect(calendarSave).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not reload when the local recovery copy cannot be created", async () => {
+    calendarLoad.mockResolvedValueOnce({
+      status: "missing",
+      data: "",
+      loadedFrom: "local_fallback",
+      cloudUnavailable: true,
+      sourcePath: "C:\\local\\calendar.json",
+      backupPath: null,
+      error: null,
+    });
+    calendarSave.mockResolvedValue(undefined);
+    calendarPreserveRecoveryCopy.mockRejectedValueOnce(new Error("backup failed"));
+
+    await storeState().loadCalendarData();
+    storeState().createTodo("2026-08-12", "must remain visible");
+    const snapshot = structuredClone(storeState().data);
+
+    await expect(storeState().recoverCalendarDataFromCloud()).resolves.toEqual({
+      status: "blocked",
+      loadedFrom: "local_fallback",
+      recoveryCopyPath: null,
+    });
+    expect(calendarLoad).toHaveBeenCalledTimes(1);
+    expect(storeState()).toMatchObject({
+      data: snapshot,
+      loadedFrom: "local_fallback",
+      loadState: "ready",
+    });
+  });
+
+  it("keeps the local snapshot when its source save fails even if the recovery copy succeeds", async () => {
+    calendarLoad.mockResolvedValueOnce({
+      status: "missing",
+      data: "",
+      loadedFrom: "local_fallback",
+      cloudUnavailable: true,
+      sourcePath: "C:\\local\\calendar.json",
+      backupPath: null,
+      error: null,
+    });
+    calendarSave.mockRejectedValueOnce(new Error("source save failed"));
+
+    await storeState().loadCalendarData();
+    storeState().createTodo("2026-08-12", "must stay in memory");
+    const snapshot = structuredClone(storeState().data);
+
+    await expect(storeState().recoverCalendarDataFromCloud()).resolves.toEqual({
+      status: "blocked",
+      loadedFrom: "local_fallback",
+      recoveryCopyPath: "C:\\data\\calendar.json.local-recovery.bak",
+    });
+    expect(calendarPreserveRecoveryCopy).toHaveBeenCalledTimes(1);
+    expect(calendarLoad).toHaveBeenCalledTimes(1);
+    expect(storeState()).toMatchObject({
+      data: snapshot,
+      loadedFrom: "local_fallback",
+      loadState: "ready",
+    });
+  });
+
+  it("preserves cloud-loaded edits locally without overwriting the restored cloud calendar", async () => {
+    const originalCloudData = createTodoData();
+    const recoveredCloudData = createEmptyCalendarData();
+    calendarLoad
+      .mockResolvedValueOnce({
+        status: "ok",
+        data: serializeCalendarData(originalCloudData),
+        loadedFrom: "cloud",
+        cloudUnavailable: false,
+        sourcePath: "C:\\cloud\\calendar.json",
+        backupPath: null,
+        error: null,
+      })
+      .mockResolvedValueOnce({
+        status: "ok",
+        data: serializeCalendarData(recoveredCloudData),
+        loadedFrom: "cloud",
+        cloudUnavailable: false,
+        sourcePath: "C:\\cloud\\calendar.json",
+        backupPath: null,
+        error: null,
+      });
+
+    await storeState().loadCalendarData();
+    storeState().createInboxTodo("offline cloud edit");
+
+    const outcome = await storeState().recoverCalendarDataFromCloud();
+
+    expect(calendarSave).not.toHaveBeenCalled();
+    const preservedJson = calendarPreserveRecoveryCopy.mock.calls[0]?.[0] as string;
+    expect(JSON.parse(preservedJson).inbox[0].text).toBe("offline cloud edit");
+    expect(outcome.status).toBe("recovered");
+    expect(storeState().data).toEqual(recoveredCloudData);
+  });
+
+  it("waits for an in-flight autosave before preserving and reloading", async () => {
+    const activeSave = deferred<void>();
+    calendarLoad
+      .mockResolvedValueOnce({
+        status: "missing",
+        data: "",
+        loadedFrom: "local_fallback",
+        cloudUnavailable: true,
+        sourcePath: "C:\\local\\calendar.json",
+        backupPath: null,
+        error: null,
+      })
+      .mockResolvedValueOnce({
+        status: "missing",
+        data: "",
+        loadedFrom: "cloud",
+        cloudUnavailable: false,
+        sourcePath: "C:\\cloud\\calendar.json",
+        backupPath: null,
+        error: null,
+      });
+    calendarSave.mockReturnValueOnce(activeSave.promise).mockResolvedValue(undefined);
+
+    await storeState().loadCalendarData();
+    storeState().createTodo("2026-08-12", "saving now");
+    await vi.advanceTimersByTimeAsync(1_750);
+    const recovery = storeState().recoverCalendarDataFromCloud();
+
+    expect(storeState().loadState).toBe("loading");
+    expect(calendarLoad).toHaveBeenCalledTimes(1);
+    expect(calendarPreserveRecoveryCopy).not.toHaveBeenCalled();
+
+    activeSave.resolve(undefined);
+    await vi.advanceTimersByTimeAsync(25);
+    await expect(recovery).resolves.toMatchObject({ status: "recovered", loadedFrom: "cloud" });
+
+    expect(calendarSave).toHaveBeenCalledTimes(1);
+    expect(calendarSave.mock.invocationCallOrder[0]).toBeLessThan(
+      calendarPreserveRecoveryCopy.mock.invocationCallOrder[0]
+    );
+    expect(calendarPreserveRecoveryCopy.mock.invocationCallOrder[0]).toBeLessThan(
+      calendarLoad.mock.invocationCallOrder[1]
+    );
+  });
+
+  it("rejects an overlapping recovery without stranding the active recovery in loading", async () => {
+    const recoveryCopy = deferred<string>();
+    calendarLoad
+      .mockResolvedValueOnce({
+        status: "missing",
+        data: "",
+        loadedFrom: "local_fallback",
+        cloudUnavailable: true,
+        sourcePath: "C:\\local\\calendar.json",
+        backupPath: null,
+        error: null,
+      })
+      .mockResolvedValueOnce({
+        status: "missing",
+        data: "",
+        loadedFrom: "cloud",
+        cloudUnavailable: false,
+        sourcePath: "C:\\cloud\\calendar.json",
+        backupPath: null,
+        error: null,
+      });
+    calendarSave.mockResolvedValue(undefined);
+    calendarPreserveRecoveryCopy.mockReturnValueOnce(recoveryCopy.promise);
+
+    await storeState().loadCalendarData();
+    storeState().createTodo("2026-08-12", "pending change");
+    const activeRecovery = storeState().recoverCalendarDataFromCloud();
+
+    await expect(storeState().recoverCalendarDataFromCloud()).resolves.toEqual({
+      status: "blocked",
+      loadedFrom: "local_fallback",
+      recoveryCopyPath: null,
+    });
+    expect(storeState().loadState).toBe("loading");
+
+    recoveryCopy.resolve("C:\\data\\calendar.json.local-recovery.bak");
+    await expect(activeRecovery).resolves.toMatchObject({
+      status: "recovered",
+      loadedFrom: "cloud",
+    });
+    expect(storeState()).toMatchObject({
+      loadState: "ready",
+      loadedFrom: "cloud",
+    });
+  });
+
+  it("keeps recovery pending when storage still resolves to local fallback", async () => {
+    calendarLoad
+      .mockResolvedValueOnce({
+        status: "missing",
+        data: "",
+        loadedFrom: "local_fallback",
+        cloudUnavailable: true,
+        sourcePath: "C:\\local\\calendar.json",
+        backupPath: null,
+        error: null,
+      })
+      .mockResolvedValueOnce({
+        status: "missing",
+        data: "",
+        loadedFrom: "local_fallback",
+        cloudUnavailable: true,
+        sourcePath: "C:\\local\\calendar.json",
+        backupPath: null,
+        error: null,
+      });
+
+    await storeState().loadCalendarData();
+
+    await expect(storeState().recoverCalendarDataFromCloud()).resolves.toEqual({
+      status: "blocked",
+      loadedFrom: "local_fallback",
+      recoveryCopyPath: null,
+    });
+    expect(storeState()).toMatchObject({ loadedFrom: "local_fallback", loadState: "ready" });
+  });
 });
 
 describe("useCalendarStore corruption handling", () => {
