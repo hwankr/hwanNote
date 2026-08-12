@@ -5,6 +5,26 @@ All notable user-facing changes to HwanNote are documented here.
 This project follows [Semantic Versioning](https://semver.org/) and commit messages use the
 [Conventional Commits](https://www.conventionalcommits.org/) style.
 
+## [0.9.8] - 2026-08-12
+
+Fixes a calendar data-loss race where automatic cloud recovery could reload the
+cloud calendar before a pending local edit reached its delayed autosave.
+
+### Fixed
+
+- **Cloud recovery serializes calendar writes and reloads.** Recovery now pauses
+  calendar mutations, waits for an active save, and flushes pending fallback
+  edits to their original local source before reading the restored cloud file.
+- **Local changes receive a durable recovery copy.** Calendar edits at risk
+  during a source transition are preserved in a uniquely named local recovery
+  file without overwriting either the local or cloud `calendar.json`.
+- **Unsafe recovery attempts fail closed.** A failed source save, recovery-copy
+  write, corrupt load, or non-cloud reload keeps recovery pending and leaves the
+  current note library untouched for a safe retry.
+- **Recovery copies are bounded and deduplicated.** Repeated retries reuse an
+  identical recovery file, while size and retention limits prevent uncontrolled
+  disk growth.
+
 ## [0.9.7] - 2026-08-12
 
 Fixes a data-loss risk where changing the interface language could reload the

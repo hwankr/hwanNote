@@ -439,6 +439,145 @@ fn backup_calendar_file(calendar_path: &Path) -> Result<PathBuf, String> {
     write_unique_calendar_backup(calendar_path, &data)
 }
 
+fn calendar_recovery_copy_candidate(local_dir: &Path, sequence: u64) -> PathBuf {
+    let base_name = format!("{}.local-recovery.bak", file_manager::CALENDAR_FILENAME);
+    let file_name = if sequence == 0 {
+        base_name
+    } else {
+        format!("{}.{}", base_name, sequence)
+    };
+
+    local_dir.join(file_name)
+}
+
+const MAX_CALENDAR_RECOVERY_COPY_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_CALENDAR_RECOVERY_COPY_COUNT: u64 = 16;
+const MAX_CALENDAR_RECOVERY_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_CALENDAR_RECOVERY_CREATE_ATTEMPTS: u8 = 3;
+
+fn preserve_calendar_recovery_copy(local_dir: &Path, data: &str) -> Result<PathBuf, String> {
+    let payload = data.as_bytes();
+    let payload_len = u64::try_from(payload.len())
+        .map_err(|_| "Calendar recovery copy rejected: payload size overflowed.".to_string())?;
+    if payload_len > MAX_CALENDAR_RECOVERY_COPY_BYTES {
+        return Err(format!(
+            "Calendar recovery copy rejected: payload is {} bytes, exceeding the {} byte limit.",
+            payload_len, MAX_CALENDAR_RECOVERY_COPY_BYTES
+        ));
+    }
+    validate_calendar_data_for_confirmation(data)?;
+    fs::create_dir_all(local_dir).map_err(|error| {
+        format!(
+            "Failed to create local calendar recovery directory {}: {}",
+            local_dir.display(),
+            error
+        )
+    })?;
+
+    for attempt in 0..MAX_CALENDAR_RECOVERY_CREATE_ATTEMPTS {
+        let mut first_available_path = None;
+        let mut total_bytes = 0_u64;
+
+        for sequence in 0..MAX_CALENDAR_RECOVERY_COPY_COUNT {
+            let recovery_path = calendar_recovery_copy_candidate(local_dir, sequence);
+            let metadata = match fs::symlink_metadata(&recovery_path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    if first_available_path.is_none() {
+                        first_available_path = Some(recovery_path);
+                    }
+                    continue;
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "Failed to inspect local calendar recovery copy {}: {}",
+                        recovery_path.display(),
+                        error
+                    ));
+                }
+            };
+
+            if !metadata.file_type().is_file() {
+                return Err(format!(
+                    "Calendar recovery copy rejected: reserved path {} is not a regular file.",
+                    recovery_path.display()
+                ));
+            }
+
+            total_bytes = total_bytes.checked_add(metadata.len()).ok_or_else(|| {
+                "Calendar recovery copy rejected: retained size overflowed.".to_string()
+            })?;
+
+            if metadata.len() == payload_len {
+                let existing = fs::read(&recovery_path).map_err(|error| {
+                    format!(
+                        "Failed to compare local calendar recovery copy {}: {}",
+                        recovery_path.display(),
+                        error
+                    )
+                })?;
+                if existing == payload {
+                    return Ok(recovery_path);
+                }
+            }
+        }
+
+        let recovery_path = first_available_path.ok_or_else(|| {
+            format!(
+                "Calendar recovery copy rejected: the {}-copy retention limit was reached.",
+                MAX_CALENDAR_RECOVERY_COPY_COUNT
+            )
+        })?;
+        let next_total = total_bytes.checked_add(payload_len).ok_or_else(|| {
+            "Calendar recovery copy rejected: retained size overflowed.".to_string()
+        })?;
+        if next_total > MAX_CALENDAR_RECOVERY_TOTAL_BYTES {
+            return Err(format!(
+                "Calendar recovery copy rejected: retained copies would exceed the {} byte limit.",
+                MAX_CALENDAR_RECOVERY_TOTAL_BYTES
+            ));
+        }
+
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&recovery_path)
+        {
+            Ok(mut recovery_file) => {
+                if let Err(error) = recovery_file
+                    .write_all(data.as_bytes())
+                    .and_then(|_| recovery_file.sync_all())
+                {
+                    drop(recovery_file);
+                    let _ = fs::remove_file(&recovery_path);
+                    return Err(format!(
+                        "Failed to write local calendar recovery copy {}: {}",
+                        recovery_path.display(),
+                        error
+                    ));
+                }
+
+                return Ok(recovery_path);
+            }
+            Err(error)
+                if error.kind() == std::io::ErrorKind::AlreadyExists
+                    && attempt + 1 < MAX_CALENDAR_RECOVERY_CREATE_ATTEMPTS =>
+            {
+                continue;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "Failed to create local calendar recovery copy {}: {}",
+                    recovery_path.display(),
+                    error
+                ));
+            }
+        }
+    }
+
+    Err("Calendar recovery copy rejected after repeated concurrent creation attempts.".to_string())
+}
+
 fn verify_calendar_snapshot(
     calendar_path: &Path,
     expected_data: Option<&str>,
@@ -867,6 +1006,14 @@ pub fn cmd_calendar_backup(
 
     let backup_path = write_unique_calendar_backup(&calendar_path, payload.data.as_bytes())?;
     Ok(backup_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub fn cmd_calendar_preserve_recovery_copy(app: AppHandle, data: String) -> Result<String, String> {
+    let documents = dirs::document_dir().unwrap_or_else(|| PathBuf::from("."));
+    let local_dir = get_calendar_local_dir(&app, &documents);
+    let recovery_path = preserve_calendar_recovery_copy(&local_dir, &data)?;
+    Ok(recovery_path.to_string_lossy().to_string())
 }
 
 #[tauri::command]
@@ -1471,11 +1618,13 @@ pub fn cmd_cloud_sync_set_active_source(
 #[cfg(test)]
 mod tests {
     use super::{
-        backup_calendar_file, can_save_calendar, can_save_note, create_unique_calendar_temp,
-        loaded_source_writes_to_cloud, select_loaded_storage_dir, select_note_library_mutation_dir,
-        validate_calendar_data_for_confirmation, validate_empty_calendar_reset,
-        verify_calendar_snapshot, write_calendar_data, write_unique_calendar_backup,
-        CalendarWriteGuard, ResolvedStorageSource,
+        backup_calendar_file, calendar_recovery_copy_candidate, can_save_calendar, can_save_note,
+        create_unique_calendar_temp, loaded_source_writes_to_cloud,
+        preserve_calendar_recovery_copy, select_loaded_storage_dir,
+        select_note_library_mutation_dir, validate_calendar_data_for_confirmation,
+        validate_empty_calendar_reset, verify_calendar_snapshot, write_calendar_data,
+        write_unique_calendar_backup, CalendarWriteGuard, ResolvedStorageSource,
+        MAX_CALENDAR_RECOVERY_COPY_BYTES, MAX_CALENDAR_RECOVERY_COPY_COUNT,
     };
     use crate::file_manager::{self, AutoSavePayload};
     use std::fs;
@@ -1569,6 +1718,128 @@ mod tests {
 
         assert_eq!(fs::read(backup_path).unwrap(), invalid_utf8);
         assert!(fs::read_to_string(&calendar_path).is_err());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn calendar_recovery_copies_are_unique_and_never_overwrite_existing_files() {
+        let root = make_temp_dir("calendar-recovery-unique");
+        let calendar_path = root.join(file_manager::CALENDAR_FILENAME);
+        let existing_recovery_path = root.join("calendar.json.local-recovery.bak");
+        fs::write(&calendar_path, b"canonical calendar sentinel").unwrap();
+        fs::write(&existing_recovery_path, b"existing recovery sentinel").unwrap();
+
+        let first_data = r#"{"version":4,"todos":{},"inbox":[],"noteLinks":{},"copy":1}"#;
+        let second_data = r#"{"version":4,"todos":{},"inbox":[],"noteLinks":{},"copy":2}"#;
+        let first_copy = preserve_calendar_recovery_copy(&root, first_data).unwrap();
+        let second_copy = preserve_calendar_recovery_copy(&root, second_data).unwrap();
+
+        assert_eq!(first_copy, root.join("calendar.json.local-recovery.bak.1"));
+        assert_eq!(second_copy, root.join("calendar.json.local-recovery.bak.2"));
+        assert_eq!(
+            fs::read(&calendar_path).unwrap(),
+            b"canonical calendar sentinel"
+        );
+        assert_eq!(
+            fs::read(&existing_recovery_path).unwrap(),
+            b"existing recovery sentinel"
+        );
+        assert_eq!(fs::read(first_copy).unwrap(), first_data.as_bytes());
+        assert_eq!(fs::read(second_copy).unwrap(), second_data.as_bytes());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn calendar_recovery_copy_creates_directory_and_preserves_utf8_bytes() {
+        let root = make_temp_dir("calendar-recovery-bytes");
+        let local_dir = root.join("configured").join("nested");
+        let data = "{\r\n  \"version\": 4,\r\n  \"todos\": {},\r\n  \"inbox\": [],\r\n  \"noteLinks\": {},\r\n  \"label\": \"복구 사본\"\r\n}\r\n";
+
+        let recovery_path = preserve_calendar_recovery_copy(&local_dir, data).unwrap();
+
+        assert_eq!(
+            recovery_path,
+            local_dir.join("calendar.json.local-recovery.bak")
+        );
+        assert_eq!(fs::read(recovery_path).unwrap(), data.as_bytes());
+
+        let invalid_dir = root.join("invalid");
+        assert!(preserve_calendar_recovery_copy(&invalid_dir, "{}").is_err());
+        assert!(!invalid_dir.exists());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn identical_calendar_recovery_payload_reuses_the_existing_copy() {
+        let root = make_temp_dir("calendar-recovery-deduplicated");
+        let data = r#"{"version":4,"todos":{},"inbox":[],"noteLinks":{},"label":"same"}"#;
+
+        let first_copy = preserve_calendar_recovery_copy(&root, data).unwrap();
+        let repeated_copy = preserve_calendar_recovery_copy(&root, data).unwrap();
+
+        assert_eq!(first_copy, repeated_copy);
+        assert!(!calendar_recovery_copy_candidate(&root, 1).exists());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn oversized_calendar_recovery_payload_is_rejected_before_creating_a_directory() {
+        let root = make_temp_dir("calendar-recovery-oversized");
+        let local_dir = root.join("not-created");
+        let oversized_label = "x".repeat(MAX_CALENDAR_RECOVERY_COPY_BYTES as usize);
+        let data = format!(
+            r#"{{"version":4,"todos":{{}},"inbox":[],"noteLinks":{{}},"label":"{}"}}"#,
+            oversized_label
+        );
+
+        let error = preserve_calendar_recovery_copy(&local_dir, &data).unwrap_err();
+
+        assert!(error.contains("exceeding"));
+        assert!(!local_dir.exists());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn calendar_recovery_copy_limit_fails_closed_without_overwriting() {
+        let root = make_temp_dir("calendar-recovery-limit");
+        for sequence in 0..MAX_CALENDAR_RECOVERY_COPY_COUNT {
+            fs::write(
+                calendar_recovery_copy_candidate(&root, sequence),
+                format!("retained copy {}", sequence),
+            )
+            .unwrap();
+        }
+        let data = r#"{"version":4,"todos":{},"inbox":[],"noteLinks":{},"label":"new"}"#;
+
+        let error = preserve_calendar_recovery_copy(&root, data).unwrap_err();
+
+        assert!(error.contains("retention limit"));
+        for sequence in 0..MAX_CALENDAR_RECOVERY_COPY_COUNT {
+            assert_eq!(
+                fs::read_to_string(calendar_recovery_copy_candidate(&root, sequence)).unwrap(),
+                format!("retained copy {}", sequence)
+            );
+        }
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn non_file_in_calendar_recovery_namespace_is_rejected() {
+        let root = make_temp_dir("calendar-recovery-reserved-path");
+        let reserved_path = calendar_recovery_copy_candidate(&root, 0);
+        fs::create_dir(&reserved_path).unwrap();
+        let data = r#"{"version":4,"todos":{},"inbox":[],"noteLinks":{}}"#;
+
+        let error = preserve_calendar_recovery_copy(&root, data).unwrap_err();
+
+        assert!(error.contains("not a regular file"));
+        assert!(reserved_path.is_dir());
 
         fs::remove_dir_all(root).unwrap();
     }

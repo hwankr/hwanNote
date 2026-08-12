@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
   loadSession: vi.fn(),
   onFolderMissing: vi.fn(),
   onOpenIntent: vi.fn(),
+  recoverCalendarDataFromCloud: vi.fn(),
   saveCalendarData: vi.fn(),
   saveSession: vi.fn(),
   setActiveSource: vi.fn(),
@@ -80,6 +81,7 @@ vi.mock("./stores/calendarStore", () => ({
       loadError: null,
       loadState: "ready",
       removeNoteLinks: vi.fn(),
+      recoverCalendarDataFromCloud: mocks.recoverCalendarDataFromCloud,
       saveCalendarData: mocks.saveCalendarData,
       sourcePath: "",
     }),
@@ -191,7 +193,7 @@ import { useNoteStore } from "./stores/noteStore";
 const NOTE_ID = "library-note";
 const AUTO_SAVE_DELAY_MS = 1_750;
 
-function createLoadResult(loadedFrom: "local" | "cloud", markdown = "disk copy") {
+function createLoadResult(loadedFrom: "local" | "cloud" | "local_fallback", markdown = "disk copy") {
   return {
     notes: [
       {
@@ -336,6 +338,11 @@ describe("App locale changes", () => {
     mocks.onFolderMissing.mockReset().mockReturnValue(() => undefined);
     mocks.onOpenIntent.mockReset().mockReturnValue(() => undefined);
     mocks.loadCalendarData.mockReset().mockResolvedValue(undefined);
+    mocks.recoverCalendarDataFromCloud.mockReset().mockResolvedValue({
+      status: "recovered",
+      loadedFrom: "cloud",
+      recoveryCopyPath: null,
+    });
     mocks.cleanOrphanNoteLinks.mockReset();
 
     container = document.createElement("div");
@@ -530,5 +537,124 @@ describe("App locale changes", () => {
       isDirty: true,
       persistence: "library",
     });
+  });
+
+  it("waits for calendar preservation before applying an automatic cloud recovery", async () => {
+    const calendarRecovery = createDeferred<{
+      status: "recovered";
+      loadedFrom: "cloud";
+      recoveryCopyPath: string;
+    }>();
+    mocks.loadAll.mockReset().mockResolvedValueOnce(createLoadResult("local_fallback", "local fallback"));
+    mocks.cloudStatus.mockReset().mockResolvedValue({
+      enabled: true,
+      provider: "google-drive",
+      syncFolder: "C:/cloud",
+      activeSource: "cloud",
+      resolvedSource: "local_fallback",
+      cloudUnavailable: true,
+    });
+
+    await renderApp(root);
+    mocks.loadAll.mockResolvedValueOnce(createLoadResult("cloud", "cloud copy"));
+    mocks.cloudStatus.mockResolvedValue({
+      enabled: true,
+      provider: "google-drive",
+      syncFolder: "C:/cloud",
+      activeSource: "cloud",
+      resolvedSource: "cloud",
+      cloudUnavailable: false,
+    });
+    mocks.recoverCalendarDataFromCloud.mockReturnValueOnce(calendarRecovery.promise);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_500);
+    });
+    await flushUntil(
+      () => mocks.recoverCalendarDataFromCloud.mock.calls.length === 1,
+      "calendar preservation to start",
+    );
+
+    expect(useNoteStore.getState().notesById[NOTE_ID]).toMatchObject({
+      plainText: "local fallback",
+    });
+    expect(mocks.cleanOrphanNoteLinks).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_500);
+      window.dispatchEvent(new Event("focus"));
+    });
+    await flushReactWork();
+    expect(mocks.recoverCalendarDataFromCloud).toHaveBeenCalledTimes(1);
+    expect(mocks.loadAll).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      calendarRecovery.resolve({
+        status: "recovered",
+        loadedFrom: "cloud",
+        recoveryCopyPath: "C:/notes/calendar.json.local-recovery.bak",
+      });
+      await calendarRecovery.promise;
+    });
+    await flushReactWork();
+
+    expect(useNoteStore.getState().notesById[NOTE_ID]).toMatchObject({
+      plainText: "cloud copy",
+    });
+    expect(mocks.cleanOrphanNoteLinks).toHaveBeenCalledTimes(2);
+    expect(mocks.recoverCalendarDataFromCloud.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.cleanOrphanNoteLinks.mock.invocationCallOrder[1],
+    );
+    expect(mocks.dialogMessage).toHaveBeenCalledWith(
+      expect.stringContaining("C:/notes/calendar.json.local-recovery.bak"),
+      expect.objectContaining({ kind: "info" }),
+    );
+  });
+
+  it("does not apply cloud notes when calendar preservation blocks recovery", async () => {
+    consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    mocks.loadAll.mockReset().mockResolvedValueOnce(createLoadResult("local_fallback", "local fallback"));
+    mocks.cloudStatus.mockReset().mockResolvedValue({
+      enabled: true,
+      provider: "google-drive",
+      syncFolder: "C:/cloud",
+      activeSource: "cloud",
+      resolvedSource: "local_fallback",
+      cloudUnavailable: true,
+    });
+
+    await renderApp(root);
+    mocks.loadAll.mockResolvedValueOnce(createLoadResult("cloud", "cloud copy"));
+    mocks.cloudStatus.mockResolvedValue({
+      enabled: true,
+      provider: "google-drive",
+      syncFolder: "C:/cloud",
+      activeSource: "cloud",
+      resolvedSource: "cloud",
+      cloudUnavailable: false,
+    });
+    mocks.recoverCalendarDataFromCloud.mockResolvedValueOnce({
+      status: "blocked",
+      loadedFrom: "local_fallback",
+      recoveryCopyPath: "C:/notes/calendar.json.local-recovery.bak",
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_500);
+    });
+    await flushUntil(
+      () => mocks.recoverCalendarDataFromCloud.mock.calls.length === 1,
+      "calendar recovery to block",
+    );
+    await flushReactWork();
+
+    expect(useNoteStore.getState().notesById[NOTE_ID]).toMatchObject({
+      plainText: "local fallback",
+    });
+    expect(mocks.cleanOrphanNoteLinks).toHaveBeenCalledTimes(1);
+    expect(mocks.dialogMessage).toHaveBeenCalledWith(
+      expect.stringContaining("C:/notes/calendar.json.local-recovery.bak"),
+      expect.objectContaining({ kind: "error" }),
+    );
   });
 });

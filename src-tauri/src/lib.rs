@@ -97,6 +97,7 @@ pub fn run() {
             cmd_cloud_sync_set_active_source,
             cmd_calendar_load,
             cmd_calendar_backup,
+            cmd_calendar_preserve_recovery_copy,
             cmd_calendar_confirm_loaded,
             cmd_calendar_reset,
             cmd_calendar_save,

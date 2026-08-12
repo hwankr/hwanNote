@@ -238,6 +238,9 @@ export const hwanNote = {
     backup: (data: string, loadedFrom: CalendarStorageSource) =>
       invoke<string>("cmd_calendar_backup", { payload: { data, loadedFrom } }),
 
+    preserveRecoveryCopy: (data: string): Promise<string> =>
+      invoke<string>("cmd_calendar_preserve_recovery_copy", { data }),
+
     reset: (data: string, loadedFrom: CalendarStorageSource) =>
       invoke<void>("cmd_calendar_reset", { payload: { data, loadedFrom } }),
   },
