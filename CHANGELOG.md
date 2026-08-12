@@ -5,6 +5,24 @@ All notable user-facing changes to HwanNote are documented here.
 This project follows [Semantic Versioning](https://semver.org/) and commit messages use the
 [Conventional Commits](https://www.conventionalcommits.org/) style.
 
+## [0.9.7] - 2026-08-12
+
+Fixes a data-loss risk where changing the interface language could reload the
+note library, cancel a pending autosave, and replace an unsaved library tab with
+its older on-disk copy.
+
+### Fixed
+
+- **Language changes no longer reload notes.** Initial note hydration now runs
+  once independently of locale-aware display sorting, including under React
+  Strict Mode.
+- **Reloads preserve edits made during I/O.** Before an intentional library
+  reload, dirty tabs are saved; edits that race with a same-source reload stay
+  in place and resume autosaving afterward.
+- **Source changes fail closed or recover conflicts.** A reload is refused when
+  dirty tabs cannot be saved, while edits made during a real storage-source
+  transition are retained as unsaved recovery tabs instead of being overwritten.
+
 ## [0.9.6] - 2026-08-12
 
 Fixes a cloud-sync data-loss risk where deleting a cloud note or changing its

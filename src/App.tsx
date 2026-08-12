@@ -8,6 +8,7 @@ import {
   type CloudProviderInfo,
   type CloudSyncSource,
   type LoadedNote,
+  type NoteLoadResult,
   type NoteStorageSource
 } from "./lib/tauriApi";
 import Editor, { restoreEditorFocus } from "./components/Editor";
@@ -38,6 +39,7 @@ import { applyTheme, type ThemeName } from "./styles/themes";
 import { normalizeFolderPath } from "./lib/folderPaths";
 import { KeyedDebouncer, KeyedSerialTaskQueue } from "./lib/keyedTasks";
 import { mergeRecoveredNoteTabs } from "./lib/noteRecovery";
+import { mergeReloadedNoteTabs } from "./lib/noteReload";
 import { canRunNoteLibraryMutation } from "./lib/noteMutationGuard";
 import {
   hasRichTextFormatting,
@@ -194,6 +196,17 @@ function normalizeNoteTitle(value: string) {
   return value.trim().slice(0, 50);
 }
 
+function normalizePersistedFolders(folders: readonly unknown[]) {
+  return Array.from(
+    new Set(
+      folders
+        .filter((entry): entry is string => typeof entry === "string")
+        .map(normalizeFolderPath)
+        .filter(Boolean)
+    )
+  );
+}
+
 function formatRecoveredNoteTitle(template: string, title: string) {
   const tokenIndex = template.indexOf(RECOVERY_TITLE_TOKEN);
   if (tokenIndex < 0) {
@@ -310,6 +323,8 @@ export default function App() {
   const openIntentBufferRef = useRef<string[]>([]);
   const inFlightIntentKeysRef = useRef<Set<string>>(new Set());
   const hydrationCompleteRef = useRef(false);
+  const initialHydrationPromiseRef = useRef<Promise<NoteLoadResult | null> | null>(null);
+  const initialHydrationFinalizedRef = useRef(false);
   const guardedFlowRef = useRef(false);
   const allowImmediateCloseRef = useRef(false);
   const pendingTitleDraftsRef = useRef<Record<string, string>>({});
@@ -321,6 +336,8 @@ export default function App() {
   const recoveryInFlightRef = useRef(false);
   const recoveryFailureNotifiedRef = useRef(false);
   const noteRecoveryPendingRef = useRef(false);
+  const tRef = useRef(t);
+  tRef.current = t;
 
   const isNoteLibraryMutationAllowed = useCallback((loadedFrom: NoteStorageSource) => {
     return canRunNoteLibraryMutation({
@@ -753,16 +770,64 @@ export default function App() {
     []
   );
 
+  const saveDirtyLibraryTabsBeforeReload = useCallback(async () => {
+    Object.keys(pendingTitleDraftsRef.current).forEach(flushTitleDraft);
+
+    const dirtyTabIds = Object.values(useNoteStore.getState().notesById)
+      .filter((tab) => tab.persistence === "library" && tab.isDirty)
+      .map((tab) => tab.id);
+    if (dirtyTabIds.length === 0) {
+      return true;
+    }
+
+    const saveTab = saveTabRef.current;
+    if (!saveTab) {
+      dirtyTabIds.forEach(armAutoSaveForTab);
+      return false;
+    }
+
+    dirtyTabIds.forEach((tabId) => clearAutoSaveTimer(tabId));
+    const results = await Promise.all(dirtyTabIds.map((tabId) => saveTab(tabId)));
+    const remainingDirtyTabIds = dirtyTabIds.filter(
+      (tabId) => useNoteStore.getState().notesById[tabId]?.isDirty
+    );
+    const savedAll = results.every(Boolean) && remainingDirtyTabIds.length === 0;
+
+    if (!savedAll) {
+      remainingDirtyTabIds.forEach(armAutoSaveForTab);
+    }
+
+    return savedAll;
+  }, [armAutoSaveForTab, clearAutoSaveTimer, flushTitleDraft]);
+
   const hydrateLoadedNotes = useCallback(
-    async (loaded: LoadedNote[]) => {
-      const preservedOpenOnlyTabs = hydrationCompleteRef.current
-        ? (() => {
-            const state = useNoteStore.getState();
-            return state.openTabIds
-              .map((id) => state.notesById[id])
-              .filter((tab): tab is NoteTab => Boolean(tab) && tab.persistence !== "library");
-          })()
-        : [];
+    async (loaded: LoadedNote[], loadedFrom: NoteStorageSource) => {
+      const reloadedLibraryTabs = loaded.map(mapLoadedNoteToTab);
+
+      if (hydrationCompleteRef.current) {
+        Object.keys(pendingTitleDraftsRef.current).forEach(flushTitleDraft);
+        const state = useNoteStore.getState();
+        const merged = mergeReloadedNoteTabs({
+          reloadedLibraryTabs,
+          currentTabs: Object.values(state.notesById),
+          currentSession: {
+            openTabIds: state.openTabIds,
+            activeTabId: state.activeTabId
+          },
+          sameStorageSource: loadedFrom === noteStorageSourceRef.current,
+          createRecoveryId: (sourceTab) =>
+            `note-recovered-${Date.now()}-${sourceTab.id.replace(/[^a-zA-Z0-9_-]/g, "-")}-${Math.random()
+              .toString(36)
+              .slice(2, 8)}`,
+          recoveryTitle: (title) =>
+            formatRecoveredNoteTitle(
+              tRef.current("settings.cloudSyncRecoveredCopyTitle", { title: RECOVERY_TITLE_TOKEN }),
+              title
+            )
+        });
+        hydrateTabs(merged.tabs, merged.session);
+        return merged;
+      }
 
       let session: PersistedTabSession;
       try {
@@ -776,15 +841,28 @@ export default function App() {
         session = readTabSessionFromStorage();
       }
 
-      hydrateTabs([...loaded.map(mapLoadedNoteToTab), ...preservedOpenOnlyTabs], session);
+      hydrateTabs(reloadedLibraryTabs, session);
+      return {
+        tabs: reloadedLibraryTabs,
+        session,
+        preservedDirtyTabIds: [],
+        recoveredCount: 0
+      };
     },
-    [hydrateTabs, mapLoadedNoteToTab]
+    [flushTitleDraft, hydrateTabs, mapLoadedNoteToTab]
   );
 
   const loadLibraryState = useCallback(async () => {
     const noteApi = hwanNote.note;
     if (!noteApi?.loadAll) {
       return null;
+    }
+
+    if (hydrationCompleteRef.current) {
+      const savedDirtyTabs = await saveDirtyLibraryTabsBeforeReload();
+      if (!savedDirtyTabs) {
+        throw new Error("Refusing to reload the note library while dirty tabs remain unsaved.");
+      }
     }
 
     const shouldResumeWrites = !noteWritesSuspendedRef.current;
@@ -795,32 +873,37 @@ export default function App() {
     try {
       await saveQueueRef.current.waitForIdle();
       const result = await noteApi.loadAll();
-      await hydrateLoadedNotes(result.notes);
+      const merged = await hydrateLoadedNotes(result.notes, result.loadedFrom);
       noteStorageSourceRef.current = result.loadedFrom;
       setNoteStorageSource(result.loadedFrom);
 
-      setPersistedFolders(
-        Array.from(
-          new Set(
-            result.folders
-              .filter((entry): entry is string => typeof entry === "string")
-              .map(normalizeFolderPath)
-              .filter(Boolean)
-          )
-        ).sort((a, b) => a.localeCompare(b, localeTag))
-      );
+      setPersistedFolders(normalizePersistedFolders(result.folders));
 
       loadedSuccessfully = true;
       noteRecoveryPendingRef.current = false;
       setNoteRecoveryPending(false);
       recoveryFailureNotifiedRef.current = false;
+
+      if (merged.recoveredCount > 0) {
+        void message(
+          tRef.current("settings.cloudSyncRecoveredWithCopies", { count: merged.recoveredCount }),
+          {
+            title: tRef.current("settings.cloudSyncRecoveredTitle"),
+            kind: "info"
+          }
+        ).catch(() => { /* ignore notification failures */ });
+      }
+
       return result;
     } finally {
       if (shouldResumeWrites || loadedSuccessfully) {
         noteWritesSuspendedRef.current = false;
+        Object.values(useNoteStore.getState().notesById)
+          .filter((tab) => tab.persistence === "library" && tab.isDirty)
+          .forEach((tab) => armAutoSaveForTab(tab.id));
       }
     }
-  }, [clearAutoSaveTimer, hydrateLoadedNotes, localeTag]);
+  }, [armAutoSaveForTab, clearAutoSaveTimer, hydrateLoadedNotes, saveDirtyLibraryTabsBeforeReload]);
 
   const recoverCloudLibrary = useCallback(async () => {
     const recoverySource = noteStorageSourceRef.current;
@@ -868,21 +951,12 @@ export default function App() {
             .slice(2, 8)}`,
         recoveryTitle: (title) =>
           formatRecoveredNoteTitle(
-            t("settings.cloudSyncRecoveredCopyTitle", { title: RECOVERY_TITLE_TOKEN }),
+            tRef.current("settings.cloudSyncRecoveredCopyTitle", { title: RECOVERY_TITLE_TOKEN }),
             title
           )
       });
 
-      setPersistedFolders(
-        Array.from(
-          new Set(
-            result.folders
-              .filter((entry): entry is string => typeof entry === "string")
-              .map(normalizeFolderPath)
-              .filter(Boolean)
-          )
-        ).sort((a, b) => a.localeCompare(b, localeTag))
-      );
+      setPersistedFolders(normalizePersistedFolders(result.folders));
       hydrateTabs(recovery.tabs, recovery.session);
       noteStorageSourceRef.current = result.loadedFrom;
       setNoteStorageSource(result.loadedFrom);
@@ -895,10 +969,10 @@ export default function App() {
       noteWritesSuspendedRef.current = false;
       recoveryFailureNotifiedRef.current = false;
       const detail = recovery.recoveredCount > 0
-        ? t("settings.cloudSyncRecoveredWithCopies", { count: recovery.recoveredCount })
-        : t("settings.cloudSyncRecovered");
+        ? tRef.current("settings.cloudSyncRecoveredWithCopies", { count: recovery.recoveredCount })
+        : tRef.current("settings.cloudSyncRecovered");
       void message(detail, {
-        title: t("settings.cloudSyncRecoveredTitle"),
+        title: tRef.current("settings.cloudSyncRecoveredTitle"),
         kind: "info"
       }).catch(() => { /* ignore notification failures */ });
       return true;
@@ -908,8 +982,8 @@ export default function App() {
       setNoteRecoveryPending(true);
       if (!recoveryFailureNotifiedRef.current) {
         recoveryFailureNotifiedRef.current = true;
-        void message(t("settings.cloudSyncRecoveryFailed"), {
-          title: t("settings.cloudSyncRecoveryFailedTitle"),
+        void message(tRef.current("settings.cloudSyncRecoveryFailed"), {
+          title: tRef.current("settings.cloudSyncRecoveryFailedTitle"),
           kind: "error"
         }).catch(() => { /* ignore notification failures */ });
       }
@@ -917,7 +991,7 @@ export default function App() {
     } finally {
       recoveryInFlightRef.current = false;
     }
-  }, [clearAutoSaveTimer, hydrateTabs, localeTag, mapLoadedNoteToTab, t]);
+  }, [clearAutoSaveTimer, hydrateTabs, mapLoadedNoteToTab]);
 
   const refreshLocalAutoSaveDir = useCallback(async () => {
     const settingsApi = hwanNote.settings;
@@ -1177,12 +1251,6 @@ export default function App() {
 
   useEffect(() => {
     const noteApi = hwanNote.note;
-    if (!noteApi?.loadAll) {
-      return;
-    }
-
-    let disposed = false;
-
     const stopListening = noteApi.onOpenIntent?.((filePath) => {
       if (!filePath) {
         return;
@@ -1196,13 +1264,25 @@ export default function App() {
       openIntentBufferRef.current.push(filePath);
     });
 
+    return () => stopListening?.();
+  }, [ingestExternalTxtIntent]);
+
+  useEffect(() => {
+    const noteApi = hwanNote.note;
+    if (!noteApi?.loadAll || initialHydrationFinalizedRef.current) {
+      return;
+    }
+
+    let disposed = false;
+
     const run = async () => {
       try {
-        const loaded = await loadLibraryState();
-        if (disposed) {
-          return;
+        if (!initialHydrationPromiseRef.current) {
+          initialHydrationPromiseRef.current = loadLibraryState();
         }
-        if (!loaded) {
+
+        const loaded = await initialHydrationPromiseRef.current;
+        if (disposed || initialHydrationFinalizedRef.current || !loaded) {
           return;
         }
 
@@ -1221,6 +1301,7 @@ export default function App() {
         const buffered = openIntentBufferRef.current;
         openIntentBufferRef.current = [];
         hydrationCompleteRef.current = true;
+        initialHydrationFinalizedRef.current = true;
 
         await ingestExternalTxtIntents([...buffered, ...pendingFromBackend]);
       } catch (error) {
@@ -1232,9 +1313,8 @@ export default function App() {
 
     return () => {
       disposed = true;
-      stopListening?.();
     };
-  }, [ingestExternalTxtIntent, ingestExternalTxtIntents, loadLibraryState]);
+  }, [ingestExternalTxtIntents, loadLibraryState]);
 
   useEffect(() => {
     if (selectedFolder && !folderPaths.includes(selectedFolder)) {
