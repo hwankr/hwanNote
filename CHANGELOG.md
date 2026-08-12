@@ -5,6 +5,25 @@ All notable user-facing changes to HwanNote are documented here.
 This project follows [Semantic Versioning](https://semver.org/) and commit messages use the
 [Conventional Commits](https://www.conventionalcommits.org/) style.
 
+## [0.9.6] - 2026-08-12
+
+Fixes a cloud-sync data-loss risk where deleting a cloud note or changing its
+folder after the cloud directory disappeared could target a same-ID note or
+folder in local fallback storage instead.
+
+### Fixed
+
+- **Library mutations stay bound to their load source.** Note deletion and
+  folder creation, rename, and deletion now carry the library's resolved
+  `loadedFrom` value into Rust and never recalculate a fallback destination.
+- **Unavailable cloud targets fail closed.** A mutation for a cloud-loaded
+  library is rejected when cloud storage is unavailable, leaving any same-ID
+  local note and matching local folder untouched.
+- **Recovery pauses note and folder changes.** HwanNote blocks destructive and
+  folder-changing actions while cloud recovery or a library transition is in
+  progress, and rechecks the captured source after confirmation dialogs before
+  invoking the filesystem command.
+
 ## [0.9.5] - 2026-08-11
 
 Fixes a calendar corruption recovery bug where a malformed `calendar.json` could
