@@ -38,6 +38,7 @@ import { applyTheme, type ThemeName } from "./styles/themes";
 import { normalizeFolderPath } from "./lib/folderPaths";
 import { KeyedDebouncer, KeyedSerialTaskQueue } from "./lib/keyedTasks";
 import { mergeRecoveredNoteTabs } from "./lib/noteRecovery";
+import { canRunNoteLibraryMutation } from "./lib/noteMutationGuard";
 import {
   hasRichTextFormatting,
   markdownToTiptapDocument,
@@ -320,6 +321,39 @@ export default function App() {
   const recoveryInFlightRef = useRef(false);
   const recoveryFailureNotifiedRef = useRef(false);
   const noteRecoveryPendingRef = useRef(false);
+
+  const isNoteLibraryMutationAllowed = useCallback((loadedFrom: NoteStorageSource) => {
+    return canRunNoteLibraryMutation({
+      recoveryPending: noteRecoveryPendingRef.current,
+      recoveryInFlight: recoveryInFlightRef.current,
+      writesSuspended: noteWritesSuspendedRef.current,
+      loadedFrom,
+      currentSource: noteStorageSourceRef.current,
+    });
+  }, []);
+
+  const notifyNoteLibraryMutationBlocked = useCallback(async () => {
+    try {
+      await message(t("settings.cloudSyncMutationBlocked"), {
+        title: t("settings.cloudSyncMutationBlockedTitle"),
+        kind: "warning",
+      });
+    } catch {
+      // A failed notification must not release the mutation guard.
+    }
+  }, [t]);
+
+  const ensureNoteLibraryMutationAllowed = useCallback(
+    async (loadedFrom: NoteStorageSource) => {
+      if (isNoteLibraryMutationAllowed(loadedFrom)) {
+        return true;
+      }
+
+      await notifyNoteLibraryMutationBlocked();
+      return false;
+    },
+    [isNoteLibraryMutationAllowed, notifyNoteLibraryMutationBlocked]
+  );
 
   const tabById = useMemo(() => {
     const map = new Map<string, NoteTab>();
@@ -1251,12 +1285,17 @@ export default function App() {
   }, [createTab, flushAutoSaveBeforeFocusChange, focusedPane, focusedTabId, moveTabToFolder, openTabIds, setActiveTab, setPaneTab]);
 
   const handleMoveNoteToFolder = useCallback((noteId: string, folderPath: string) => {
+    if (!isNoteLibraryMutationAllowed(noteStorageSourceRef.current)) {
+      void notifyNoteLibraryMutationBlocked();
+      return;
+    }
+
     const normalizedFolder = normalizeFolderPath(folderPath);
     moveTabToFolder(noteId, normalizedFolder);
     queueMicrotask(() => {
       armAutoSaveForTab(noteId);
     });
-  }, [armAutoSaveForTab, moveTabToFolder]);
+  }, [armAutoSaveForTab, isNoteLibraryMutationAllowed, moveTabToFolder, notifyNoteLibraryMutationBlocked]);
 
   const resolveCurrentFolderContext = useCallback(() => {
     if (selectedFolder) {
@@ -1698,6 +1737,11 @@ export default function App() {
       return false;
     }
 
+    const loadedFrom = noteStorageSourceRef.current;
+    if (!(await ensureNoteLibraryMutationAllowed(loadedFrom))) {
+      return false;
+    }
+
     const confirmed = await confirmDeleteNote(initialTab);
     if (!confirmed) {
       return false;
@@ -1713,10 +1757,16 @@ export default function App() {
         return false;
       }
 
+      if (!(await ensureNoteLibraryMutationAllowed(loadedFrom))) {
+        return false;
+      }
+
       try {
-        await hwanNote.note.delete(id);
-        removeNote(id);
-        useCalendarStore.getState().removeNoteLinks(id);
+        await hwanNote.note.delete(id, loadedFrom);
+        if (isNoteLibraryMutationAllowed(loadedFrom)) {
+          removeNote(id);
+          useCalendarStore.getState().removeNoteLinks(id);
+        }
         return true;
       } catch (error) {
         console.error("Failed to delete note:", error);
@@ -1724,7 +1774,7 @@ export default function App() {
         return false;
       }
     });
-  }, [confirmDeleteNote, getTabById, removeNote, resolveDirtyTabs, runGuardedFlow, t]);
+  }, [confirmDeleteNote, ensureNoteLibraryMutationAllowed, getTabById, isNoteLibraryMutationAllowed, removeNote, resolveDirtyTabs, runGuardedFlow, t]);
 
   const flushCalendarBeforeStorageChange = useCallback(async () => {
     return ensureCalendarSaved({
@@ -2311,8 +2361,16 @@ export default function App() {
               return;
             }
 
+            const loadedFrom = noteStorageSourceRef.current;
+            if (!(await ensureNoteLibraryMutationAllowed(loadedFrom))) {
+              return;
+            }
+
             try {
-              const folders = await hwanNote.folder.create(normalized);
+              const folders = await hwanNote.folder.create(normalized, loadedFrom);
+              if (!isNoteLibraryMutationAllowed(loadedFrom)) {
+                return;
+              }
               setPersistedFolders(
                 Array.from(
                   new Set(
@@ -2334,17 +2392,27 @@ export default function App() {
               return;
             }
 
+            const loadedFrom = noteStorageSourceRef.current;
+            if (!(await ensureNoteLibraryMutationAllowed(loadedFrom))) {
+              return;
+            }
+
             const didResolve = await resolveOpenTabsBeforeReload();
             if (!didResolve) {
               return;
             }
 
-            try {
-              await hwanNote.folder.rename(normalizedFrom, normalizedTo);
-              await loadLibraryState();
+            if (!(await ensureNoteLibraryMutationAllowed(loadedFrom))) {
+              return;
+            }
 
-              if (selectedFolder) {
-                setSelectedFolder(replaceFolderPrefix(selectedFolder, normalizedFrom, normalizedTo));
+            try {
+              await hwanNote.folder.rename(normalizedFrom, normalizedTo, loadedFrom);
+              if (isNoteLibraryMutationAllowed(loadedFrom)) {
+                await loadLibraryState();
+                if (selectedFolder) {
+                  setSelectedFolder(replaceFolderPrefix(selectedFolder, normalizedFrom, normalizedTo));
+                }
               }
             } catch (error) {
               console.error("Failed to rename folder:", error);
@@ -2356,17 +2424,27 @@ export default function App() {
               return;
             }
 
+            const loadedFrom = noteStorageSourceRef.current;
+            if (!(await ensureNoteLibraryMutationAllowed(loadedFrom))) {
+              return;
+            }
+
             const didResolve = await resolveOpenTabsBeforeReload();
             if (!didResolve) {
               return;
             }
 
-            try {
-              await hwanNote.folder.delete(normalized);
-              await loadLibraryState();
+            if (!(await ensureNoteLibraryMutationAllowed(loadedFrom))) {
+              return;
+            }
 
-              if (selectedFolder && (selectedFolder === normalized || selectedFolder.startsWith(`${normalized}/`))) {
-                setSelectedFolder(null);
+            try {
+              await hwanNote.folder.delete(normalized, loadedFrom);
+              if (isNoteLibraryMutationAllowed(loadedFrom)) {
+                await loadLibraryState();
+                if (selectedFolder && (selectedFolder === normalized || selectedFolder.startsWith(`${normalized}/`))) {
+                  setSelectedFolder(null);
+                }
               }
             } catch (error) {
               console.error("Failed to delete folder:", error);

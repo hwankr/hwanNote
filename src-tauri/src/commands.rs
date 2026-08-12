@@ -342,6 +342,39 @@ fn can_save_note(
     can_save_calendar(loaded_from, current_source)
 }
 
+fn resolve_note_library_mutation_dir(
+    app: &AppHandle,
+    loaded_from: &str,
+    operation: &str,
+) -> Result<PathBuf, String> {
+    let loaded_from = parse_resolved_storage_source(loaded_from)?;
+    let (_, current_source) = resolve_calendar_dir(app);
+    let documents = dirs::document_dir().unwrap_or_else(|| PathBuf::from("."));
+    let local_dir = get_calendar_local_dir(app, &documents);
+    let cloud_dir = config_manager::get_cloud_notes_dir(app);
+
+    select_note_library_mutation_dir(local_dir, cloud_dir, loaded_from, current_source, operation)
+}
+
+fn select_note_library_mutation_dir(
+    local_dir: PathBuf,
+    cloud_dir: Option<PathBuf>,
+    loaded_from: ResolvedStorageSource,
+    current_source: ResolvedStorageSource,
+    operation: &str,
+) -> Result<PathBuf, String> {
+    if !can_save_note(loaded_from, current_source) {
+        return Err(format!(
+            "{} rejected: loaded from {}, but current storage resolves to {}.",
+            operation,
+            resolved_storage_source_to_str(loaded_from),
+            resolved_storage_source_to_str(current_source)
+        ));
+    }
+
+    select_loaded_storage_dir(local_dir, cloud_dir, loaded_from)
+}
+
 fn calendar_backup_candidate(calendar_path: &Path, sequence: u64) -> PathBuf {
     let file_name = calendar_path
         .file_name()
@@ -707,31 +740,45 @@ pub fn cmd_folder_list(app: AppHandle) -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
-pub fn cmd_folder_create(app: AppHandle, folder_path: String) -> Result<Vec<String>, String> {
-    let effective_dir = resolve_effective_dir(&app);
-    file_manager::create_folder(&effective_dir, &folder_path)
+pub fn cmd_folder_create(
+    app: AppHandle,
+    folder_path: String,
+    loaded_from: String,
+) -> Result<Vec<String>, String> {
+    let target_dir = resolve_note_library_mutation_dir(&app, &loaded_from, "Folder creation")?;
+    file_manager::create_folder(&target_dir, &folder_path)
 }
 
 #[tauri::command]
-pub fn cmd_folder_rename(app: AppHandle, from: String, to: String) -> Result<Vec<String>, String> {
-    let effective_dir = resolve_effective_dir(&app);
-    file_manager::rename_folder(&effective_dir, &from, &to)
+pub fn cmd_folder_rename(
+    app: AppHandle,
+    from: String,
+    to: String,
+    loaded_from: String,
+) -> Result<Vec<String>, String> {
+    let target_dir = resolve_note_library_mutation_dir(&app, &loaded_from, "Folder rename")?;
+    file_manager::rename_folder(&target_dir, &from, &to)
 }
 
 #[tauri::command]
 pub fn cmd_folder_delete(
     app: AppHandle,
     folder_path: String,
+    loaded_from: String,
 ) -> Result<FolderDeleteResult, String> {
-    let effective_dir = resolve_effective_dir(&app);
-    file_manager::delete_folder(&effective_dir, &folder_path)
+    let target_dir = resolve_note_library_mutation_dir(&app, &loaded_from, "Folder deletion")?;
+    file_manager::delete_folder(&target_dir, &folder_path)
 }
 
 #[tauri::command]
-pub async fn cmd_note_delete(app: AppHandle, note_id: String) -> Result<bool, String> {
-    let effective_dir = resolve_effective_dir(&app);
+pub async fn cmd_note_delete(
+    app: AppHandle,
+    note_id: String,
+    loaded_from: String,
+) -> Result<bool, String> {
+    let target_dir = resolve_note_library_mutation_dir(&app, &loaded_from, "Note deletion")?;
     tauri::async_runtime::spawn_blocking(move || {
-        file_manager::delete_note_file_and_index(&effective_dir, &note_id, |path| {
+        file_manager::delete_note_file_and_index(&target_dir, &note_id, |path| {
             trash::delete(path).map_err(|e| e.to_string())
         })
     })
@@ -1425,7 +1472,7 @@ pub fn cmd_cloud_sync_set_active_source(
 mod tests {
     use super::{
         backup_calendar_file, can_save_calendar, can_save_note, create_unique_calendar_temp,
-        loaded_source_writes_to_cloud, select_loaded_storage_dir,
+        loaded_source_writes_to_cloud, select_loaded_storage_dir, select_note_library_mutation_dir,
         validate_calendar_data_for_confirmation, validate_empty_calendar_reset,
         verify_calendar_snapshot, write_calendar_data, write_unique_calendar_backup,
         CalendarWriteGuard, ResolvedStorageSource,
@@ -1702,5 +1749,104 @@ mod tests {
             .is_empty());
 
         fs::remove_dir_all(local_dir).unwrap();
+    }
+
+    #[test]
+    fn cloud_loaded_mutation_is_rejected_without_touching_local_same_id_note() {
+        let root = make_temp_dir("cloud-mutation-fallback");
+        let local_dir = root.join("local");
+        let missing_cloud_dir = root.join("missing-cloud");
+        fs::create_dir_all(&local_dir).unwrap();
+        file_manager::auto_save_markdown_note(&local_dir, &note_payload("# Local\n")).unwrap();
+
+        let result = select_note_library_mutation_dir(
+            local_dir.clone(),
+            Some(missing_cloud_dir),
+            ResolvedStorageSource::Cloud,
+            ResolvedStorageSource::LocalFallback,
+            "Note deletion",
+        );
+
+        assert!(result.is_err());
+        let local_notes = file_manager::load_markdown_notes(&local_dir).unwrap();
+        assert_eq!(local_notes.len(), 1);
+        assert_eq!(local_notes[0].markdown, "# Local\n");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fallback_loaded_delete_targets_local_after_cloud_returns() {
+        let root = make_temp_dir("fallback-delete-target");
+        let local_dir = root.join("local");
+        let cloud_dir = root.join("cloud");
+        fs::create_dir_all(&local_dir).unwrap();
+        fs::create_dir_all(&cloud_dir).unwrap();
+        file_manager::auto_save_markdown_note(&local_dir, &note_payload("# Local\n")).unwrap();
+        file_manager::auto_save_markdown_note(&cloud_dir, &note_payload("# Cloud\n")).unwrap();
+
+        let target_dir = select_note_library_mutation_dir(
+            local_dir.clone(),
+            Some(cloud_dir.clone()),
+            ResolvedStorageSource::LocalFallback,
+            ResolvedStorageSource::Cloud,
+            "Note deletion",
+        )
+        .unwrap();
+        let deleted =
+            file_manager::delete_note_file_and_index(&target_dir, "shared-note", |path| {
+                fs::remove_file(path).map_err(|error| error.to_string())
+            })
+            .unwrap();
+
+        assert!(deleted);
+        assert!(file_manager::load_markdown_notes(&local_dir)
+            .unwrap()
+            .is_empty());
+        let cloud_notes = file_manager::load_markdown_notes(&cloud_dir).unwrap();
+        assert_eq!(cloud_notes.len(), 1);
+        assert_eq!(cloud_notes[0].markdown, "# Cloud\n");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fallback_loaded_folder_changes_leave_cloud_folder_unchanged() {
+        let root = make_temp_dir("fallback-folder-target");
+        let local_dir = root.join("local");
+        let cloud_dir = root.join("cloud");
+        fs::create_dir_all(&local_dir).unwrap();
+        fs::create_dir_all(&cloud_dir).unwrap();
+        let mut local_payload = note_payload("# Local\n");
+        local_payload.folder_path = Some("alpha".to_string());
+        let mut cloud_payload = note_payload("# Cloud\n");
+        cloud_payload.folder_path = Some("alpha".to_string());
+        file_manager::auto_save_markdown_note(&local_dir, &local_payload).unwrap();
+        file_manager::auto_save_markdown_note(&cloud_dir, &cloud_payload).unwrap();
+
+        let target_dir = select_note_library_mutation_dir(
+            local_dir.clone(),
+            Some(cloud_dir.clone()),
+            ResolvedStorageSource::LocalFallback,
+            ResolvedStorageSource::Cloud,
+            "Folder rename",
+        )
+        .unwrap();
+        file_manager::rename_folder(&target_dir, "alpha", "beta").unwrap();
+
+        assert_eq!(
+            file_manager::list_folders(&local_dir).unwrap(),
+            vec!["beta"]
+        );
+        assert_eq!(
+            file_manager::list_folders(&cloud_dir).unwrap(),
+            vec!["alpha"]
+        );
+        let cloud_notes = file_manager::load_markdown_notes(&cloud_dir).unwrap();
+        assert_eq!(cloud_notes.len(), 1);
+        assert_eq!(cloud_notes[0].folder_path, "alpha");
+        assert_eq!(cloud_notes[0].markdown, "# Cloud\n");
+
+        fs::remove_dir_all(root).unwrap();
     }
 }

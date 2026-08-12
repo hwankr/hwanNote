@@ -188,22 +188,22 @@ export const hwanNote = {
     saveTxt: (filePath: string, content: string) =>
       invoke<boolean>("cmd_note_save_txt", { filePath, content }),
 
-    delete: (noteId: string) =>
-      invoke<boolean>("cmd_note_delete", { noteId }),
+    delete: (noteId: string, loadedFrom: NoteStorageSource) =>
+      invoke<boolean>("cmd_note_delete", { noteId, loadedFrom }),
   },
 
   folder: {
     list: () =>
       invoke<string[]>("cmd_folder_list"),
 
-    create: (folderPath: string) =>
-      invoke<string[]>("cmd_folder_create", { folderPath }),
+    create: (folderPath: string, loadedFrom: NoteStorageSource) =>
+      invoke<string[]>("cmd_folder_create", { folderPath, loadedFrom }),
 
-    rename: (from: string, to: string) =>
-      invoke<string[]>("cmd_folder_rename", { from, to }),
+    rename: (from: string, to: string, loadedFrom: NoteStorageSource) =>
+      invoke<string[]>("cmd_folder_rename", { from, to, loadedFrom }),
 
-    delete: (folderPath: string) =>
-      invoke<FolderDeleteResult>("cmd_folder_delete", { folderPath }),
+    delete: (folderPath: string, loadedFrom: NoteStorageSource) =>
+      invoke<FolderDeleteResult>("cmd_folder_delete", { folderPath, loadedFrom }),
   },
 
   updater: {
