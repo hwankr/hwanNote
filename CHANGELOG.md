@@ -5,6 +5,30 @@ All notable user-facing changes to HwanNote are documented here.
 This project follows [Semantic Versioning](https://semver.org/) and commit messages use the
 [Conventional Commits](https://www.conventionalcommits.org/) style.
 
+## [0.9.13] - 2026-08-20
+
+Hardens the note-library boundary against symbolic-link and Windows junction
+escapes.
+
+### Security
+
+- **Library I/O is anchored to one canonical root.** Scans, note reads and
+  writes, folder mutations, deletes, calendar files, and migrations resolve
+  targets beneath the canonical library identity and fail closed on escapes.
+- **Links inside a library are rejected.** Linux symbolic links and every
+  Windows reparse point, including junctions, are never traversed, overwritten,
+  renamed, or recursively deleted.
+- **Recursive scans are cycle-safe.** Canonical directory identities are
+  visited at most once, preventing self- and ancestor-link scan loops.
+- **Destructive operations revalidate targets.** Autosave replacement, note
+  deletion, folder rename/delete, index replacement, and migration copy paths
+  are checked again immediately before mutation; folder deletion no longer
+  relies on recursive deletion that could cross a link boundary.
+- **Cross-platform regressions are covered.** Tests exercise outside-root
+  directory links, file-link overwrite/delete attempts, cycles, normal nested
+  folders, migration boundaries, and permission-aware link-test skips without
+  deleting external sentinels.
+
 ## [0.9.12] - 2026-08-20
 
 Prevents incomplete note-library scans from being mistaken for file deletions.
