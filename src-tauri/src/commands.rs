@@ -9,7 +9,7 @@ use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
 
 use crate::config_manager;
-use crate::config_manager::LibrarySource;
+use crate::config_manager::{LibrarySource, LocalAutoSaveDirState};
 use crate::file_manager::{self, AutoSavePayload, AutoSaveResult, FolderDeleteResult, LoadedNote};
 
 // ── State for pending update ──
@@ -103,8 +103,11 @@ pub const OPEN_INTENT_EVENT: &str = "note:open-intent";
 #[serde(rename_all = "camelCase")]
 pub struct AutoSaveDirInfo {
     custom_dir: Option<String>,
-    effective_dir: String,
+    effective_dir: Option<String>,
     is_default: bool,
+    status: String,
+    expected_dir: String,
+    error: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -143,7 +146,7 @@ pub struct CloudSyncStatus {
     provider: Option<String>,
     sync_folder: Option<String>,
     active_source: String,
-    resolved_source: String,
+    resolved_source: Option<String>,
     cloud_unavailable: bool,
 }
 
@@ -218,55 +221,129 @@ pub struct NoteAutoSavePayload {
 
 // ── Helpers ──
 
-fn resolve_effective_dir(app: &AppHandle) -> PathBuf {
-    resolve_calendar_dir(app).0
+const CUSTOM_AUTO_SAVE_DIR_UNAVAILABLE_ERROR: &str = "custom_auto_save_dir_unavailable";
+
+fn configured_local_dir_unavailable_error(path: &Path) -> String {
+    format!(
+        "{}: {}",
+        CUSTOM_AUTO_SAVE_DIR_UNAVAILABLE_ERROR,
+        path.display()
+    )
 }
 
-fn resolve_calendar_dir(app: &AppHandle) -> (PathBuf, ResolvedStorageSource) {
+fn build_auto_save_dir_info(state: LocalAutoSaveDirState) -> AutoSaveDirInfo {
+    let expected_dir = state.expected_dir().to_string_lossy().to_string();
+    let custom_dir = state
+        .configured_dir()
+        .map(|path| path.to_string_lossy().to_string());
+    let is_default = state.is_default();
+    let status = match &state {
+        LocalAutoSaveDirState::Unset(_) => "unset",
+        LocalAutoSaveDirState::Available(_) => "available",
+        LocalAutoSaveDirState::Unavailable(_) => "unavailable",
+    }
+    .to_string();
+    let (effective_dir, error) = match &state {
+        LocalAutoSaveDirState::Unset(path) | LocalAutoSaveDirState::Available(path) => {
+            (Some(path.to_string_lossy().to_string()), None)
+        }
+        LocalAutoSaveDirState::Unavailable(_) => (
+            None,
+            Some(CUSTOM_AUTO_SAVE_DIR_UNAVAILABLE_ERROR.to_string()),
+        ),
+    };
+
+    AutoSaveDirInfo {
+        custom_dir,
+        effective_dir,
+        is_default,
+        status,
+        expected_dir,
+        error,
+    }
+}
+
+fn resolve_effective_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(resolve_calendar_dir(app)?.0)
+}
+
+fn resolve_calendar_dir(app: &AppHandle) -> Result<(PathBuf, ResolvedStorageSource), String> {
     resolve_storage_dir(app, true)
 }
 
 fn resolve_storage_dir(
     app: &AppHandle,
     emit_missing_event: bool,
-) -> (PathBuf, ResolvedStorageSource) {
+) -> Result<(PathBuf, ResolvedStorageSource), String> {
     let documents = dirs::document_dir().unwrap_or_else(|| PathBuf::from("."));
-    let local_dir = get_calendar_local_dir(app, &documents);
-    let provider = config_manager::get_cloud_sync_provider(app);
     let active_source = config_manager::get_cloud_sync_source(app);
+    let cloud_dir = if active_source == LibrarySource::Cloud {
+        config_manager::get_cloud_notes_dir(app)
+    } else {
+        None
+    };
+    let (path, source) = resolve_storage_dir_with_local_dir(
+        || get_calendar_local_dir(app, &documents),
+        cloud_dir.clone(),
+        active_source,
+    )?;
 
-    if provider.is_some() && active_source == LibrarySource::Cloud {
-        if let Some(cloud_dir) = config_manager::get_cloud_notes_dir(app) {
-            if !cloud_dir.exists() {
-                tracing::warn!(
-                    "Cloud sync folder missing: {:?}, falling back to local: {:?}",
-                    cloud_dir,
-                    local_dir
-                );
-                if emit_missing_event {
-                    if let Some(window) = app.get_webview_window("main") {
-                        let _ = window.emit(
-                            "cloud:folder-missing",
-                            CloudFolderMissingPayload {
-                                expected_path: cloud_dir.to_string_lossy().to_string(),
-                                fallback_path: local_dir.to_string_lossy().to_string(),
-                            },
-                        );
-                    }
+    if source == ResolvedStorageSource::LocalFallback {
+        if let Some(cloud_dir) = cloud_dir {
+            tracing::warn!(
+                "Cloud sync folder missing: {:?}, falling back to local: {:?}",
+                cloud_dir,
+                path
+            );
+            if emit_missing_event {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.emit(
+                        "cloud:folder-missing",
+                        CloudFolderMissingPayload {
+                            expected_path: cloud_dir.to_string_lossy().to_string(),
+                            fallback_path: path.to_string_lossy().to_string(),
+                        },
+                    );
                 }
-                return (local_dir, ResolvedStorageSource::LocalFallback);
             }
-            return (cloud_dir, ResolvedStorageSource::Cloud);
         }
-
-        return (local_dir, ResolvedStorageSource::LocalFallback);
     }
 
-    (local_dir, ResolvedStorageSource::Local)
+    Ok((path, source))
 }
 
-fn get_calendar_local_dir(app: &AppHandle, documents: &Path) -> PathBuf {
-    config_manager::get_local_auto_save_dir(app, &file_manager::get_auto_save_dir(documents))
+fn resolve_storage_dir_with_local_dir<F>(
+    local_dir: F,
+    cloud_dir: Option<PathBuf>,
+    active_source: LibrarySource,
+) -> Result<(PathBuf, ResolvedStorageSource), String>
+where
+    F: FnOnce() -> Result<PathBuf, String>,
+{
+    if active_source == LibrarySource::Cloud {
+        if let Some(cloud_dir) = cloud_dir {
+            if cloud_dir.is_dir() {
+                return Ok((cloud_dir, ResolvedStorageSource::Cloud));
+            }
+        }
+
+        return Ok((local_dir()?, ResolvedStorageSource::LocalFallback));
+    }
+
+    Ok((local_dir()?, ResolvedStorageSource::Local))
+}
+
+fn get_calendar_local_dir(app: &AppHandle, documents: &Path) -> Result<PathBuf, String> {
+    let state = config_manager::get_local_auto_save_dir_state(
+        app,
+        &file_manager::get_auto_save_dir(documents),
+    );
+    match state {
+        LocalAutoSaveDirState::Unset(path) | LocalAutoSaveDirState::Available(path) => Ok(path),
+        LocalAutoSaveDirState::Unavailable(path) => {
+            Err(configured_local_dir_unavailable_error(&path))
+        }
+    }
 }
 
 fn resolve_loaded_storage_dir(
@@ -274,23 +351,29 @@ fn resolve_loaded_storage_dir(
     loaded_from: ResolvedStorageSource,
 ) -> Result<PathBuf, String> {
     let documents = dirs::document_dir().unwrap_or_else(|| PathBuf::from("."));
-    let local_dir = get_calendar_local_dir(app, &documents);
     let cloud_dir = config_manager::get_cloud_notes_dir(app);
-    select_loaded_storage_dir(local_dir, cloud_dir, loaded_from)
+    select_loaded_storage_dir(
+        || get_calendar_local_dir(app, &documents),
+        cloud_dir,
+        loaded_from,
+    )
 }
 
-fn select_loaded_storage_dir(
-    local_dir: PathBuf,
+fn select_loaded_storage_dir<F>(
+    local_dir: F,
     cloud_dir: Option<PathBuf>,
     loaded_from: ResolvedStorageSource,
-) -> Result<PathBuf, String> {
+) -> Result<PathBuf, String>
+where
+    F: FnOnce() -> Result<PathBuf, String>,
+{
     if !loaded_source_writes_to_cloud(loaded_from) {
-        return Ok(local_dir);
+        return local_dir();
     }
 
     let cloud_dir =
         cloud_dir.ok_or_else(|| "Cloud storage directory is not configured.".to_string())?;
-    if cloud_dir.exists() {
+    if cloud_dir.is_dir() {
         Ok(cloud_dir)
     } else {
         Err("Cloud storage directory is not available.".to_string())
@@ -348,21 +431,29 @@ fn resolve_note_library_mutation_dir(
     operation: &str,
 ) -> Result<PathBuf, String> {
     let loaded_from = parse_resolved_storage_source(loaded_from)?;
-    let (_, current_source) = resolve_calendar_dir(app);
+    let (_, current_source) = resolve_calendar_dir(app)?;
     let documents = dirs::document_dir().unwrap_or_else(|| PathBuf::from("."));
-    let local_dir = get_calendar_local_dir(app, &documents);
     let cloud_dir = config_manager::get_cloud_notes_dir(app);
 
-    select_note_library_mutation_dir(local_dir, cloud_dir, loaded_from, current_source, operation)
+    select_note_library_mutation_dir(
+        || get_calendar_local_dir(app, &documents),
+        cloud_dir,
+        loaded_from,
+        current_source,
+        operation,
+    )
 }
 
-fn select_note_library_mutation_dir(
-    local_dir: PathBuf,
+fn select_note_library_mutation_dir<F>(
+    local_dir: F,
     cloud_dir: Option<PathBuf>,
     loaded_from: ResolvedStorageSource,
     current_source: ResolvedStorageSource,
     operation: &str,
-) -> Result<PathBuf, String> {
+) -> Result<PathBuf, String>
+where
+    F: FnOnce() -> Result<PathBuf, String>,
+{
     if !can_save_note(loaded_from, current_source) {
         return Err(format!(
             "{} rejected: loaded from {}, but current storage resolves to {}.",
@@ -832,7 +923,7 @@ pub fn cmd_note_auto_save(
     payload: NoteAutoSavePayload,
 ) -> Result<AutoSaveResult, String> {
     let loaded_from = parse_resolved_storage_source(&payload.loaded_from)?;
-    let (_, current_source) = resolve_calendar_dir(&app);
+    let (_, current_source) = resolve_calendar_dir(&app)?;
 
     if !can_save_note(loaded_from, current_source) {
         return Err(format!(
@@ -857,7 +948,7 @@ pub fn cmd_note_auto_save(
 
 #[tauri::command]
 pub fn cmd_note_load_all(app: AppHandle) -> Result<NoteLoadResult, String> {
-    let (effective_dir, loaded_from) = resolve_calendar_dir(&app);
+    let (effective_dir, loaded_from) = resolve_calendar_dir(&app)?;
     let notes = file_manager::load_markdown_notes(&effective_dir)?;
     let folders = file_manager::list_folders(&effective_dir).unwrap_or_else(|error| {
         tracing::warn!("Failed to load note folders: {}", error);
@@ -874,7 +965,7 @@ pub fn cmd_note_load_all(app: AppHandle) -> Result<NoteLoadResult, String> {
 
 #[tauri::command]
 pub fn cmd_folder_list(app: AppHandle) -> Result<Vec<String>, String> {
-    let effective_dir = resolve_effective_dir(&app);
+    let effective_dir = resolve_effective_dir(&app)?;
     file_manager::list_folders(&effective_dir)
 }
 
@@ -929,7 +1020,7 @@ pub async fn cmd_note_delete(
 
 #[tauri::command]
 pub fn cmd_calendar_load(app: AppHandle) -> Result<CalendarLoadResult, String> {
-    let (dir, loaded_from) = resolve_calendar_dir(&app);
+    let (dir, loaded_from) = resolve_calendar_dir(&app)?;
     let path = dir.join(file_manager::CALENDAR_FILENAME);
     let source_path = path.to_string_lossy().to_string();
     let cloud_unavailable = loaded_from == ResolvedStorageSource::LocalFallback;
@@ -1011,7 +1102,7 @@ pub fn cmd_calendar_backup(
 #[tauri::command]
 pub fn cmd_calendar_preserve_recovery_copy(app: AppHandle, data: String) -> Result<String, String> {
     let documents = dirs::document_dir().unwrap_or_else(|| PathBuf::from("."));
-    let local_dir = get_calendar_local_dir(&app, &documents);
+    let local_dir = get_calendar_local_dir(&app, &documents)?;
     let recovery_path = preserve_calendar_recovery_copy(&local_dir, &data)?;
     Ok(recovery_path.to_string_lossy().to_string())
 }
@@ -1037,7 +1128,7 @@ pub fn cmd_calendar_confirm_loaded(
 #[tauri::command]
 pub fn cmd_calendar_save(app: AppHandle, payload: CalendarSavePayload) -> Result<(), String> {
     let loaded_from = parse_resolved_storage_source(&payload.loaded_from)?;
-    let (_, current_source) = resolve_calendar_dir(&app);
+    let (_, current_source) = resolve_calendar_dir(&app)?;
 
     if !can_save_calendar(loaded_from, current_source) {
         return Err(format!(
@@ -1057,7 +1148,7 @@ pub fn cmd_calendar_save(app: AppHandle, payload: CalendarSavePayload) -> Result
 pub fn cmd_calendar_reset(app: AppHandle, payload: CalendarSavePayload) -> Result<(), String> {
     validate_empty_calendar_reset(&payload.data)?;
     let loaded_from = parse_resolved_storage_source(&payload.loaded_from)?;
-    let (_, current_source) = resolve_calendar_dir(&app);
+    let (_, current_source) = resolve_calendar_dir(&app)?;
 
     if !can_save_calendar(loaded_from, current_source) {
         return Err(format!(
@@ -1247,29 +1338,23 @@ pub fn cmd_settings_set_autosave_dir(
     config_manager::set_custom_auto_save_dir(&app, dir.as_deref())?;
 
     let documents = dirs::document_dir().unwrap_or_else(|| PathBuf::from("."));
-    let local_dir =
-        config_manager::get_local_auto_save_dir(&app, &file_manager::get_auto_save_dir(&documents));
-    let custom_dir = config_manager::get_custom_auto_save_dir(&app);
+    let state = config_manager::get_local_auto_save_dir_state(
+        &app,
+        &file_manager::get_auto_save_dir(&documents),
+    );
 
-    Ok(AutoSaveDirInfo {
-        custom_dir: custom_dir.clone(),
-        effective_dir: local_dir.to_string_lossy().to_string(),
-        is_default: custom_dir.is_none(),
-    })
+    Ok(build_auto_save_dir_info(state))
 }
 
 #[tauri::command]
 pub fn cmd_settings_get_autosave_dir(app: AppHandle) -> AutoSaveDirInfo {
     let documents = dirs::document_dir().unwrap_or_else(|| PathBuf::from("."));
-    let local_dir =
-        config_manager::get_local_auto_save_dir(&app, &file_manager::get_auto_save_dir(&documents));
-    let custom_dir = config_manager::get_custom_auto_save_dir(&app);
+    let state = config_manager::get_local_auto_save_dir_state(
+        &app,
+        &file_manager::get_auto_save_dir(&documents),
+    );
 
-    AutoSaveDirInfo {
-        custom_dir: custom_dir.clone(),
-        effective_dir: local_dir.to_string_lossy().to_string(),
-        is_default: custom_dir.is_none(),
-    }
+    build_auto_save_dir_info(state)
 }
 
 // ── Updater commands ──
@@ -1459,7 +1544,6 @@ pub fn cmd_updater_install(app: AppHandle) {
                 error: Some(error.to_string()),
             },
         );
-        return;
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -1520,10 +1604,7 @@ pub async fn cmd_cloud_sync_enable(
 
     let (migration_result, calendar_copied) = if copy_existing {
         let documents = dirs::document_dir().unwrap_or_else(|| PathBuf::from("."));
-        let src = config_manager::get_local_auto_save_dir(
-            &app,
-            &file_manager::get_auto_save_dir(&documents),
-        );
+        let src = get_calendar_local_dir(&app, &documents)?;
         let dst = cloud_notes_dir.clone();
 
         tauri::async_runtime::spawn_blocking(move || {
@@ -1572,7 +1653,11 @@ pub fn cmd_cloud_sync_status(app: AppHandle) -> CloudSyncStatus {
     let provider = config_manager::get_cloud_sync_provider(&app);
     let enabled = provider.is_some();
     let active_source = config_manager::get_cloud_sync_source(&app);
-    let (_, resolved_source) = resolve_storage_dir(&app, false);
+    let resolved_source = resolve_storage_dir(&app, false)
+        .ok()
+        .map(|(_, source)| source);
+    let cloud_unavailable = active_source == LibrarySource::Cloud
+        && config_manager::get_cloud_notes_dir(&app).is_none_or(|path| !path.is_dir());
 
     let sync_folder = if enabled {
         let providers = config_manager::detect_cloud_providers();
@@ -1589,8 +1674,9 @@ pub fn cmd_cloud_sync_status(app: AppHandle) -> CloudSyncStatus {
         provider,
         sync_folder,
         active_source: library_source_to_str(active_source).to_string(),
-        resolved_source: resolved_storage_source_to_str(resolved_source).to_string(),
-        cloud_unavailable: resolved_source == ResolvedStorageSource::LocalFallback,
+        resolved_source: resolved_source
+            .map(|source| resolved_storage_source_to_str(source).to_string()),
+        cloud_unavailable,
     }
 }
 
@@ -1618,14 +1704,17 @@ pub fn cmd_cloud_sync_set_active_source(
 #[cfg(test)]
 mod tests {
     use super::{
-        backup_calendar_file, calendar_recovery_copy_candidate, can_save_calendar, can_save_note,
+        backup_calendar_file, build_auto_save_dir_info, calendar_recovery_copy_candidate,
+        can_save_calendar, can_save_note, configured_local_dir_unavailable_error,
         create_unique_calendar_temp, loaded_source_writes_to_cloud,
-        preserve_calendar_recovery_copy, select_loaded_storage_dir,
-        select_note_library_mutation_dir, validate_calendar_data_for_confirmation,
-        validate_empty_calendar_reset, verify_calendar_snapshot, write_calendar_data,
-        write_unique_calendar_backup, CalendarWriteGuard, ResolvedStorageSource,
-        MAX_CALENDAR_RECOVERY_COPY_BYTES, MAX_CALENDAR_RECOVERY_COPY_COUNT,
+        preserve_calendar_recovery_copy, resolve_storage_dir_with_local_dir,
+        select_loaded_storage_dir, select_note_library_mutation_dir,
+        validate_calendar_data_for_confirmation, validate_empty_calendar_reset,
+        verify_calendar_snapshot, write_calendar_data, write_unique_calendar_backup,
+        CalendarWriteGuard, ResolvedStorageSource, MAX_CALENDAR_RECOVERY_COPY_BYTES,
+        MAX_CALENDAR_RECOVERY_COPY_COUNT,
     };
+    use crate::config_manager::{LibrarySource, LocalAutoSaveDirState};
     use crate::file_manager::{self, AutoSavePayload};
     use std::fs;
     use std::path::PathBuf;
@@ -1982,7 +2071,7 @@ mod tests {
 
         file_manager::auto_save_markdown_note(&cloud_dir, &note_payload("# Cloud\n")).unwrap();
         let target_dir = select_loaded_storage_dir(
-            local_dir.clone(),
+            || Ok(local_dir.clone()),
             Some(cloud_dir.clone()),
             ResolvedStorageSource::LocalFallback,
         )
@@ -2012,7 +2101,7 @@ mod tests {
     fn missing_cloud_target_never_falls_back_for_cloud_loaded_note() {
         let local_dir = make_temp_dir("missing-cloud-target");
         let result =
-            select_loaded_storage_dir(local_dir.clone(), None, ResolvedStorageSource::Cloud);
+            select_loaded_storage_dir(|| Ok(local_dir.clone()), None, ResolvedStorageSource::Cloud);
 
         assert!(result.is_err());
         assert!(file_manager::load_markdown_notes(&local_dir)
@@ -2031,7 +2120,7 @@ mod tests {
         file_manager::auto_save_markdown_note(&local_dir, &note_payload("# Local\n")).unwrap();
 
         let result = select_note_library_mutation_dir(
-            local_dir.clone(),
+            || Ok(local_dir.clone()),
             Some(missing_cloud_dir),
             ResolvedStorageSource::Cloud,
             ResolvedStorageSource::LocalFallback,
@@ -2057,7 +2146,7 @@ mod tests {
         file_manager::auto_save_markdown_note(&cloud_dir, &note_payload("# Cloud\n")).unwrap();
 
         let target_dir = select_note_library_mutation_dir(
-            local_dir.clone(),
+            || Ok(local_dir.clone()),
             Some(cloud_dir.clone()),
             ResolvedStorageSource::LocalFallback,
             ResolvedStorageSource::Cloud,
@@ -2096,7 +2185,7 @@ mod tests {
         file_manager::auto_save_markdown_note(&cloud_dir, &cloud_payload).unwrap();
 
         let target_dir = select_note_library_mutation_dir(
-            local_dir.clone(),
+            || Ok(local_dir.clone()),
             Some(cloud_dir.clone()),
             ResolvedStorageSource::LocalFallback,
             ResolvedStorageSource::Cloud,
@@ -2117,6 +2206,174 @@ mod tests {
         assert_eq!(cloud_notes.len(), 1);
         assert_eq!(cloud_notes[0].folder_path, "alpha");
         assert_eq!(cloud_notes[0].markdown, "# Cloud\n");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn auto_save_dir_info_marks_only_unset_state_as_default() {
+        let default_info = build_auto_save_dir_info(LocalAutoSaveDirState::Unset(PathBuf::from(
+            "C:/Users/test/Documents/HwanNote/Notes",
+        )));
+        let custom_info = build_auto_save_dir_info(LocalAutoSaveDirState::Available(
+            PathBuf::from("D:/Library"),
+        ));
+
+        assert!(default_info.is_default);
+        assert_eq!(default_info.status, "unset");
+        assert_eq!(default_info.custom_dir, None);
+        assert_eq!(
+            default_info.effective_dir.as_deref(),
+            Some("C:/Users/test/Documents/HwanNote/Notes")
+        );
+        assert_eq!(
+            default_info.expected_dir,
+            "C:/Users/test/Documents/HwanNote/Notes"
+        );
+        assert_eq!(default_info.error, None);
+
+        assert!(!custom_info.is_default);
+        assert_eq!(custom_info.status, "available");
+        assert_eq!(custom_info.custom_dir.as_deref(), Some("D:/Library"));
+        assert_eq!(custom_info.effective_dir.as_deref(), Some("D:/Library"));
+        assert_eq!(custom_info.expected_dir, "D:/Library");
+        assert_eq!(custom_info.error, None);
+    }
+
+    #[test]
+    fn auto_save_dir_info_reports_unavailable_custom_directory_without_switching_to_default() {
+        let unavailable_path = PathBuf::from("Z:/DetachedLibrary");
+        let info =
+            build_auto_save_dir_info(LocalAutoSaveDirState::Unavailable(unavailable_path.clone()));
+
+        assert!(!info.is_default);
+        assert_eq!(info.status, "unavailable");
+        assert_eq!(info.custom_dir.as_deref(), Some("Z:/DetachedLibrary"));
+        assert_eq!(info.effective_dir, None);
+        assert_eq!(info.expected_dir, "Z:/DetachedLibrary");
+        assert_eq!(
+            info.error.as_deref(),
+            Some("custom_auto_save_dir_unavailable")
+        );
+    }
+
+    #[test]
+    fn storage_resolution_uses_default_only_when_the_local_directory_is_unset() {
+        let default_dir = PathBuf::from("C:/Users/test/Documents/HwanNote/Notes");
+        let resolved = resolve_storage_dir_with_local_dir(
+            || Ok(default_dir.clone()),
+            None,
+            LibrarySource::Local,
+        )
+        .unwrap();
+
+        assert_eq!(resolved, (default_dir, ResolvedStorageSource::Local));
+    }
+
+    #[test]
+    fn storage_resolution_blocks_local_loads_and_writes_when_the_custom_directory_is_missing() {
+        let root = make_temp_dir("missing-custom-blocks-local");
+        let default_dir = root.join("default-must-not-be-created");
+        let error = resolve_storage_dir_with_local_dir(
+            || {
+                Err(configured_local_dir_unavailable_error(
+                    PathBuf::from("Z:/DetachedLibrary").as_path(),
+                ))
+            },
+            None,
+            LibrarySource::Local,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("custom_auto_save_dir_unavailable"));
+        assert!(error.contains("Z:/DetachedLibrary"));
+        assert!(!default_dir.exists());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn local_loaded_write_rejects_an_unavailable_custom_directory() {
+        let error = select_loaded_storage_dir(
+            || {
+                Err(configured_local_dir_unavailable_error(
+                    PathBuf::from("Z:/DetachedLibrary").as_path(),
+                ))
+            },
+            None,
+            ResolvedStorageSource::Local,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("custom_auto_save_dir_unavailable"));
+        assert!(error.contains("Z:/DetachedLibrary"));
+    }
+
+    #[test]
+    fn available_cloud_does_not_evaluate_an_unavailable_custom_local_directory() {
+        let cloud_dir = make_temp_dir("available-cloud-with-missing-custom");
+        let resolved = resolve_storage_dir_with_local_dir(
+            || panic!("available cloud storage must not evaluate the local directory"),
+            Some(cloud_dir.clone()),
+            LibrarySource::Cloud,
+        )
+        .unwrap();
+
+        assert_eq!(resolved, (cloud_dir.clone(), ResolvedStorageSource::Cloud));
+
+        fs::remove_dir_all(cloud_dir).unwrap();
+    }
+
+    #[test]
+    fn cloud_loaded_write_does_not_evaluate_an_unavailable_custom_local_directory() {
+        let cloud_dir = make_temp_dir("cloud-write-with-missing-custom");
+        let target = select_loaded_storage_dir(
+            || panic!("cloud-loaded writes must not evaluate the local directory"),
+            Some(cloud_dir.clone()),
+            ResolvedStorageSource::Cloud,
+        )
+        .unwrap();
+
+        assert_eq!(target, cloud_dir.clone());
+
+        fs::remove_dir_all(cloud_dir).unwrap();
+    }
+
+    #[test]
+    fn missing_cloud_uses_local_fallback_only_when_local_directory_is_available() {
+        let root = make_temp_dir("missing-cloud-fallback-check");
+        let local_dir = root.join("local");
+        let missing_cloud_dir = root.join("missing-cloud");
+        fs::create_dir(&local_dir).unwrap();
+        let resolved = resolve_storage_dir_with_local_dir(
+            || Ok(local_dir.clone()),
+            Some(missing_cloud_dir),
+            LibrarySource::Cloud,
+        )
+        .unwrap();
+
+        assert_eq!(resolved, (local_dir, ResolvedStorageSource::LocalFallback));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_cloud_and_unavailable_custom_local_directory_return_custom_error() {
+        let root = make_temp_dir("missing-cloud-custom-error");
+        let missing_cloud_dir = root.join("missing-cloud");
+        let error = resolve_storage_dir_with_local_dir(
+            || {
+                Err(configured_local_dir_unavailable_error(
+                    PathBuf::from("Z:/DetachedLibrary").as_path(),
+                ))
+            },
+            Some(missing_cloud_dir),
+            LibrarySource::Cloud,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("custom_auto_save_dir_unavailable"));
+        assert!(!error.contains("local_fallback"));
 
         fs::remove_dir_all(root).unwrap();
     }

@@ -144,7 +144,7 @@ fn strip_inbox_root_alias(path: &str) -> String {
 
     if segments
         .first()
-        .map_or(false, |segment| segment.eq_ignore_ascii_case("inbox"))
+        .is_some_and(|segment| segment.eq_ignore_ascii_case("inbox"))
     {
         segments.remove(0);
     }
@@ -186,7 +186,7 @@ pub fn sanitize_folder_path(folder_path: Option<&str>) -> Result<String, String>
 
     if segments
         .first()
-        .map_or(false, |segment| segment.eq_ignore_ascii_case("inbox"))
+        .is_some_and(|segment| segment.eq_ignore_ascii_case("inbox"))
     {
         segments.remove(0);
     }
@@ -237,7 +237,7 @@ fn encode_manual_title_hex(title: &str) -> String {
 }
 
 fn decode_manual_title_hex(value: &str) -> Option<String> {
-    if value.len() % 2 != 0 {
+    if !value.len().is_multiple_of(2) {
         return None;
     }
 
@@ -401,7 +401,7 @@ fn should_skip_subtree(path: &Path, skip_subtree: Option<&Path>) -> bool {
 }
 
 fn walk_markdown_files_skipping(
-    root_dir: &Path,
+    _root_dir: &Path,
     current_dir: &Path,
     skip_subtree: Option<&Path>,
 ) -> Vec<PathBuf> {
@@ -426,7 +426,7 @@ fn walk_markdown_files_skipping(
         }
 
         if path.is_dir() {
-            let nested = walk_markdown_files_skipping(root_dir, &path, skip_subtree);
+            let nested = walk_markdown_files_skipping(_root_dir, &path, skip_subtree);
             files.extend(nested);
         } else if path.is_file() {
             if let Some(ext) = path.extension() {
@@ -564,7 +564,8 @@ fn reconcile_index_with_files(
         }
 
         let generated_id = generate_note_id(rel_path);
-        if !index.entries.contains_key(&generated_id) {
+        if let std::collections::hash_map::Entry::Vacant(entry) = index.entries.entry(generated_id)
+        {
             let metadata = fs::metadata(full_path).map_err(|e| e.to_string())?;
             let created_at = metadata
                 .created()
@@ -580,15 +581,12 @@ fn reconcile_index_with_files(
                 .ok()
                 .and_then(|markdown| extract_manual_title_metadata(&markdown).0);
 
-            index.entries.insert(
-                generated_id,
-                NoteIndexEntry {
-                    relative_path: rel_path.clone(),
-                    created_at,
-                    manual_title,
-                    is_pinned: None,
-                },
-            );
+            entry.insert(NoteIndexEntry {
+                relative_path: rel_path.clone(),
+                created_at,
+                manual_title,
+                is_pinned: None,
+            });
             used_paths.insert(rel_path.clone());
             index_changed = true;
         }
@@ -1085,12 +1083,11 @@ where
         None => return Ok(false),
     };
 
-    match file_path
+    if file_path
         .try_exists()
         .map_err(|e| format!("Failed to check note file before delete: {e}"))?
     {
-        true => trash_note_file_or_accept_missing(&file_path, delete_file)?,
-        false => {}
+        trash_note_file_or_accept_missing(&file_path, delete_file)?;
     }
 
     let removed = remove_note_from_index_if_path_unlocked(auto_save_dir, note_id, &file_path)?;

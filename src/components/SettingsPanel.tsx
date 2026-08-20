@@ -2,7 +2,7 @@ import { type KeyboardEvent, useState } from "react";
 import { useI18n } from "../i18n/context";
 import type { AppLanguage } from "../i18n/messages";
 import type { WeekStart } from "../lib/calendarRange";
-import type { CloudProviderInfo, CloudSyncSource } from "../lib/tauriApi";
+import type { AutoSaveDirInfo, CloudProviderInfo, CloudSyncSource } from "../lib/tauriApi";
 import {
   SHORTCUT_DEFINITIONS,
   SHORTCUT_GROUPS,
@@ -23,8 +23,7 @@ interface SettingsPanelProps {
   editorFontSize: number;
   editorSpellcheck: boolean;
   tabSize: number;
-  autoSaveDir: string;
-  autoSaveDirIsDefault: boolean;
+  autoSaveDirInfo: AutoSaveDirInfo | null;
   onBrowseAutoSaveDir: () => void;
   onResetAutoSaveDir: () => void;
   cloudSyncProvider: string | null;
@@ -54,8 +53,7 @@ export default function SettingsPanel({
   editorFontSize,
   editorSpellcheck,
   tabSize,
-  autoSaveDir,
-  autoSaveDirIsDefault,
+  autoSaveDirInfo,
   onBrowseAutoSaveDir,
   onResetAutoSaveDir,
   cloudSyncProvider,
@@ -275,7 +273,7 @@ export default function SettingsPanel({
             <label>{t("settings.autoSaveDir")}</label>
             <div className="settings-autosave-row">
               <div className="settings-readonly settings-autosave-path">
-                {autoSaveDir || t("settings.autoSaveLoading")}
+                {autoSaveDirInfo?.expectedDir || t("settings.autoSaveLoading")}
               </div>
               <button
                 type="button"
@@ -284,7 +282,7 @@ export default function SettingsPanel({
               >
                 {t("settings.autoSaveBrowse")}
               </button>
-              {!autoSaveDirIsDefault && (
+              {autoSaveDirInfo && !autoSaveDirInfo.isDefault && (
                 <button
                   type="button"
                   className="settings-autosave-btn settings-autosave-reset"
@@ -294,6 +292,15 @@ export default function SettingsPanel({
                 </button>
               )}
             </div>
+            {autoSaveDirInfo?.status === "unavailable" ? (
+              <div className="settings-autosave-error" role="alert">
+                <strong>{t("settings.autoSaveDirUnavailableTitle")}</strong>
+                <span>
+                  {t("settings.autoSaveDirUnavailable", { path: autoSaveDirInfo.expectedDir })}
+                </span>
+                <span>{t("settings.autoSaveDirUnavailableHelp")}</span>
+              </div>
+            ) : null}
             <div className="settings-subtext">{t("settings.autoSaveDirHelp")}</div>
           </div>
 

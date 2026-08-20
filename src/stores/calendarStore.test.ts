@@ -685,15 +685,16 @@ describe("useCalendarStore corruption handling", () => {
     expect(calendarSave).not.toHaveBeenCalled();
   });
 
-  it("enters load_error when the load invocation itself fails and blocks save", async () => {
-    calendarLoad.mockRejectedValue(new Error("invoke failed"));
+  it("blocks calendar saving when a configured custom directory is unavailable", async () => {
+    const unavailableError = "custom_auto_save_dir_unavailable: Z:\\Detached\\HwanNote";
+    calendarLoad.mockRejectedValue(new Error(unavailableError));
 
     await storeState().loadCalendarData();
 
     expect(storeState()).toMatchObject({
       data: createEmptyCalendarData(),
       loadState: "load_error",
-      loadError: expect.any(String),
+      loadError: unavailableError,
       sourcePath: null,
       backupPath: null,
     });

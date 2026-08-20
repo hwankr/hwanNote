@@ -5,6 +5,7 @@ import { confirm as confirmDialog, message } from "@tauri-apps/plugin-dialog";
 import { type PointerEvent as ReactPointerEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   hwanNote,
+  type AutoSaveDirInfo,
   type CloudProviderInfo,
   type CloudSyncSource,
   type LoadedNote,
@@ -78,6 +79,7 @@ const MAX_SPLIT_RATIO = 0.75;
 const DEFAULT_SPLIT_RATIO = 0.5;
 const AUTO_SAVE_DELAY_MS = 1750;
 const CLOUD_RECOVERY_POLL_INTERVAL_MS = 1500;
+const AUTO_SAVE_DIR_POLL_INTERVAL_MS = 5000;
 const RECOVERY_TITLE_TOKEN = "__HWAN_NOTE_RECOVERY_TITLE__";
 
 type SortMode = "updated" | "title" | "created";
@@ -324,6 +326,7 @@ export default function App() {
   const inFlightIntentKeysRef = useRef<Set<string>>(new Set());
   const hydrationCompleteRef = useRef(false);
   const initialHydrationPromiseRef = useRef<Promise<NoteLoadResult | null> | null>(null);
+  const initialHydrationFinalizingRef = useRef<Promise<void> | null>(null);
   const initialHydrationFinalizedRef = useRef(false);
   const guardedFlowRef = useRef(false);
   const allowImmediateCloseRef = useRef(false);
@@ -633,8 +636,8 @@ export default function App() {
   const [editorFontSize, setEditorFontSize] = useState(DEFAULT_EDITOR_FONT_SIZE);
   const [editorLineHeight, setEditorLineHeight] = useState(DEFAULT_EDITOR_LINE_HEIGHT);
   const [editorSpellcheck, setEditorSpellcheck] = useState(true);
-  const [autoSaveDir, setAutoSaveDir] = useState("");
-  const [autoSaveDirIsDefault, setAutoSaveDirIsDefault] = useState(true);
+  const [autoSaveDirInfo, setAutoSaveDirInfo] = useState<AutoSaveDirInfo | null>(null);
+  const [autoSaveDirRecoveryPending, setAutoSaveDirRecoveryPending] = useState(false);
   const [shortcuts, setShortcuts] = useState<ShortcutMap>(() => createDefaultShortcuts());
   const [tabSize, setTabSize] = useState(DEFAULT_TAB_SIZE);
   const [cloudSyncProvider, setCloudSyncProvider] = useState<string | null>(null);
@@ -1014,14 +1017,12 @@ export default function App() {
   const refreshLocalAutoSaveDir = useCallback(async () => {
     const settingsApi = hwanNote.settings;
     if (!settingsApi?.getAutoSaveDir) {
-      setAutoSaveDir("");
-      setAutoSaveDirIsDefault(true);
-      return;
+      return null;
     }
 
     const result = await settingsApi.getAutoSaveDir();
-    setAutoSaveDir(result.effectiveDir);
-    setAutoSaveDirIsDefault(result.isDefault);
+    setAutoSaveDirInfo(result);
+    return result;
   }, []);
 
   const refreshCloudSyncState = useCallback(async () => {
@@ -1114,6 +1115,46 @@ export default function App() {
       await ingestExternalTxtIntent(filePath);
     }
   }, [ingestExternalTxtIntent]);
+
+  const finalizeInitialHydration = useCallback(async () => {
+    if (initialHydrationFinalizedRef.current) {
+      return;
+    }
+    if (initialHydrationFinalizingRef.current) {
+      return initialHydrationFinalizingRef.current;
+    }
+
+    const finalize = async () => {
+      let pendingFromBackend: string[] = [];
+      try {
+        pendingFromBackend = hwanNote.note.drainOpenIntents
+          ? await hwanNote.note.drainOpenIntents()
+          : [];
+      } catch (error) {
+        console.error("Failed to drain pending external open requests:", error);
+      }
+
+      if (initialHydrationFinalizedRef.current) {
+        return;
+      }
+
+      const buffered = openIntentBufferRef.current;
+      openIntentBufferRef.current = [];
+      hydrationCompleteRef.current = true;
+      initialHydrationFinalizedRef.current = true;
+      initialHydrationPromiseRef.current = null;
+
+      await ingestExternalTxtIntents([...buffered, ...pendingFromBackend]);
+    };
+
+    const finalizing = finalize().finally(() => {
+      if (initialHydrationFinalizingRef.current === finalizing) {
+        initialHydrationFinalizingRef.current = null;
+      }
+    });
+    initialHydrationFinalizingRef.current = finalizing;
+    return finalizing;
+  }, [ingestExternalTxtIntents]);
 
   useEffect(() => {
     const savedThemeMode = window.localStorage.getItem(THEME_MODE_KEY);
@@ -1308,20 +1349,11 @@ export default function App() {
         await useCalendarStore.getState().loadCalendarData();
         useCalendarStore.getState().cleanOrphanNoteLinks();
 
-        const pendingFromBackend = noteApi.drainOpenIntents
-          ? await noteApi.drainOpenIntents()
-          : [];
-
         if (disposed) {
           return;
         }
 
-        const buffered = openIntentBufferRef.current;
-        openIntentBufferRef.current = [];
-        hydrationCompleteRef.current = true;
-        initialHydrationFinalizedRef.current = true;
-
-        await ingestExternalTxtIntents([...buffered, ...pendingFromBackend]);
+        await finalizeInitialHydration();
       } catch (error) {
         console.error("Failed to load notes from file system:", error);
       }
@@ -1332,7 +1364,7 @@ export default function App() {
     return () => {
       disposed = true;
     };
-  }, [ingestExternalTxtIntents, loadLibraryState]);
+  }, [finalizeInitialHydration, loadLibraryState]);
 
   useEffect(() => {
     if (selectedFolder && !folderPaths.includes(selectedFolder)) {
@@ -1935,62 +1967,93 @@ export default function App() {
     });
   }, [notifyCalendarSaveBlocked, t]);
 
-  const handleBrowseAutoSaveDir = useCallback(async () => {
+  const prepareLocalStorageTransition = useCallback(async (currentStatus: AutoSaveDirInfo["status"] | null) => {
     const didResolve = await resolveOpenTabsBeforeReload();
     if (!didResolve) {
-      return;
+      return false;
     }
 
+    const calendarLoadState = useCalendarStore.getState().loadState;
+    if (currentStatus === "unavailable" && calendarLoadState !== "ready") {
+      return true;
+    }
+
+    return flushCalendarBeforeStorageChange();
+  }, [flushCalendarBeforeStorageChange, resolveOpenTabsBeforeReload]);
+
+  const reloadCurrentStorage = useCallback(async () => {
+    await loadLibraryState();
+    await useCalendarStore.getState().loadCalendarData();
+    useCalendarStore.getState().cleanOrphanNoteLinks();
+    await finalizeInitialHydration();
+  }, [finalizeInitialHydration, loadLibraryState]);
+
+  const handleBrowseAutoSaveDir = useCallback(async () => {
     const settingsApi = hwanNote.settings;
     if (!settingsApi) return;
 
     const selected = await settingsApi.browseAutoSaveDir();
     if (!selected) return;
 
-    const didSaveCalendar = await flushCalendarBeforeStorageChange();
-    if (!didSaveCalendar) {
+    const latestInfo = await refreshLocalAutoSaveDir().catch(() => autoSaveDirInfo);
+    const prepared = await prepareLocalStorageTransition(latestInfo?.status ?? null);
+    if (!prepared) {
       return;
     }
 
     try {
       const result = await settingsApi.setAutoSaveDir(selected);
-      setAutoSaveDir(result.effectiveDir);
-      setAutoSaveDirIsDefault(result.isDefault);
-
-      await loadLibraryState();
-      await useCalendarStore.getState().loadCalendarData();
-      useCalendarStore.getState().cleanOrphanNoteLinks();
+      setAutoSaveDirInfo(result);
+      setAutoSaveDirRecoveryPending(false);
+      await reloadCurrentStorage();
     } catch (error) {
       console.error("Failed to set auto-save directory:", error);
     }
-  }, [flushCalendarBeforeStorageChange, loadLibraryState, resolveOpenTabsBeforeReload]);
+  }, [autoSaveDirInfo, prepareLocalStorageTransition, refreshLocalAutoSaveDir, reloadCurrentStorage]);
 
   const handleResetAutoSaveDir = useCallback(async () => {
-    const didResolve = await resolveOpenTabsBeforeReload();
-    if (!didResolve) {
-      return;
-    }
-
     const settingsApi = hwanNote.settings;
     if (!settingsApi) return;
 
-    const didSaveCalendar = await flushCalendarBeforeStorageChange();
-    if (!didSaveCalendar) {
+    const latestInfo = await refreshLocalAutoSaveDir().catch(() => autoSaveDirInfo);
+    const prepared = await prepareLocalStorageTransition(latestInfo?.status ?? null);
+    if (!prepared) {
       return;
     }
 
     try {
       const result = await settingsApi.setAutoSaveDir(null);
-      setAutoSaveDir(result.effectiveDir);
-      setAutoSaveDirIsDefault(result.isDefault);
-
-      await loadLibraryState();
-      await useCalendarStore.getState().loadCalendarData();
-      useCalendarStore.getState().cleanOrphanNoteLinks();
+      setAutoSaveDirInfo(result);
+      setAutoSaveDirRecoveryPending(false);
+      await reloadCurrentStorage();
     } catch (error) {
       console.error("Failed to reset auto-save directory:", error);
     }
-  }, [flushCalendarBeforeStorageChange, loadLibraryState, resolveOpenTabsBeforeReload]);
+  }, [autoSaveDirInfo, prepareLocalStorageTransition, refreshLocalAutoSaveDir, reloadCurrentStorage]);
+
+  const handleRetryAutoSaveDir = useCallback(async () => {
+    const wasUnavailable =
+      autoSaveDirInfo?.status === "unavailable" || autoSaveDirRecoveryPending;
+    try {
+      const refreshed = await refreshLocalAutoSaveDir();
+      if (!refreshed || refreshed.status === "unavailable") {
+        setAutoSaveDirRecoveryPending(false);
+        return;
+      }
+
+      setAutoSaveDirRecoveryPending(true);
+      const prepared = await prepareLocalStorageTransition(wasUnavailable ? "unavailable" : refreshed.status);
+      if (!prepared) {
+        return;
+      }
+
+      await reloadCurrentStorage();
+      setAutoSaveDirRecoveryPending(false);
+      await refreshCloudSyncState().catch(() => { /* keep local-path recovery independent */ });
+    } catch (error) {
+      console.error("Failed to retry the auto-save directory:", error);
+    }
+  }, [autoSaveDirInfo?.status, autoSaveDirRecoveryPending, prepareLocalStorageTransition, refreshCloudSyncState, refreshLocalAutoSaveDir, reloadCurrentStorage]);
 
   const handleCloudSyncChange = useCallback(async (provider: string | null, options?: { copyLocalNotes: boolean }) => {
     const didResolve = await resolveOpenTabsBeforeReload();
@@ -2092,11 +2155,59 @@ export default function App() {
   }, [drainNoteSaveQueue, notifyCalendarSaveBlocked, resolveDirtyTabs, runGuardedFlow, t]);
 
   useEffect(() => {
-    void refreshLocalAutoSaveDir().catch(() => {
-      setAutoSaveDir("");
-      setAutoSaveDirIsDefault(true);
+    void refreshLocalAutoSaveDir().catch((error) => {
+      console.error("Failed to read the auto-save directory status:", error);
     });
   }, [refreshLocalAutoSaveDir]);
+
+  useEffect(() => {
+    let disposed = false;
+    const checkForMissingCustomDirectory = async () => {
+      try {
+        const result = await hwanNote.settings.getAutoSaveDir();
+        if (disposed) {
+          return;
+        }
+        if (result.status === "unavailable") {
+          setAutoSaveDirInfo(result);
+          setAutoSaveDirRecoveryPending(false);
+          return;
+        }
+        if (autoSaveDirInfo?.status === "unavailable") {
+          setAutoSaveDirInfo(result);
+          setAutoSaveDirRecoveryPending(true);
+          return;
+        }
+        if (!autoSaveDirRecoveryPending) {
+          setAutoSaveDirInfo(result);
+        }
+      } catch {
+        // A later poll or focus event retries the read-only status check.
+      }
+    };
+    const handleFocus = () => {
+      void checkForMissingCustomDirectory();
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        void checkForMissingCustomDirectory();
+      }
+    };
+
+    const intervalId = window.setInterval(
+      checkForMissingCustomDirectory,
+      AUTO_SAVE_DIR_POLL_INTERVAL_MS
+    );
+    window.addEventListener("focus", handleFocus);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      disposed = true;
+      window.clearInterval(intervalId);
+      window.removeEventListener("focus", handleFocus);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [autoSaveDirInfo?.status, autoSaveDirRecoveryPending]);
 
   useEffect(() => {
     void refreshCloudSyncState().catch(() => { /* ignore */ });
@@ -2509,6 +2620,39 @@ export default function App() {
         />
       )}
 
+      {autoSaveDirInfo?.status === "unavailable" || autoSaveDirRecoveryPending ? (
+        <section className="storage-unavailable-banner no-drag" role="alert">
+          <div className="storage-unavailable-copy">
+            <strong>
+              {autoSaveDirRecoveryPending
+                ? t("settings.autoSaveDirRecoveredTitle")
+                : t("settings.autoSaveDirUnavailableTitle")}
+            </strong>
+            <span>
+              {t("settings.autoSaveDirUnavailable", { path: autoSaveDirInfo.expectedDir })}
+            </span>
+            <span>
+              {autoSaveDirRecoveryPending
+                ? t("settings.autoSaveDirRecoveredHelp")
+                : t("settings.autoSaveDirUnavailableHelp")}
+            </span>
+          </div>
+          <div className="storage-unavailable-actions">
+            <button type="button" onClick={() => void handleRetryAutoSaveDir()}>
+              {autoSaveDirRecoveryPending
+                ? t("settings.autoSaveReload")
+                : t("settings.autoSaveRetry")}
+            </button>
+            <button type="button" onClick={() => void handleBrowseAutoSaveDir()}>
+              {t("settings.autoSaveBrowse")}
+            </button>
+            <button type="button" onClick={() => void handleResetAutoSaveDir()}>
+              {t("settings.autoSaveReset")}
+            </button>
+          </div>
+        </section>
+      ) : null}
+
       <div className="workspace">
         <Sidebar
           visible={sidebarVisible}
@@ -2748,8 +2892,7 @@ export default function App() {
         editorFontSize={editorFontSize}
         editorSpellcheck={editorSpellcheck}
         tabSize={tabSize}
-        autoSaveDir={autoSaveDir}
-        autoSaveDirIsDefault={autoSaveDirIsDefault}
+        autoSaveDirInfo={autoSaveDirInfo}
         onBrowseAutoSaveDir={() => void handleBrowseAutoSaveDir()}
         onResetAutoSaveDir={() => void handleResetAutoSaveDir()}
         cloudSyncProvider={cloudSyncProvider}

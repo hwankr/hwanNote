@@ -41,4 +41,18 @@ describe("note library mutation IPC", () => {
       loadedFrom: "local_fallback",
     });
   });
+
+  it("keeps custom directory reads and explicit changes on dedicated settings commands", () => {
+    hwanNote.settings.getAutoSaveDir();
+    hwanNote.settings.setAutoSaveDir("D:/Notes");
+    hwanNote.settings.setAutoSaveDir(null);
+
+    expect(invokeMock).toHaveBeenNthCalledWith(1, "cmd_settings_get_autosave_dir");
+    expect(invokeMock).toHaveBeenNthCalledWith(2, "cmd_settings_set_autosave_dir", {
+      dir: "D:/Notes",
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(3, "cmd_settings_set_autosave_dir", {
+      dir: null,
+    });
+  });
 });

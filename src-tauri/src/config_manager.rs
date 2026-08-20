@@ -22,6 +22,39 @@ pub enum LibrarySource {
     Cloud,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CustomAutoSaveDirState {
+    Unset,
+    Available(PathBuf),
+    Unavailable(PathBuf),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LocalAutoSaveDirState {
+    Unset(PathBuf),
+    Available(PathBuf),
+    Unavailable(PathBuf),
+}
+
+impl LocalAutoSaveDirState {
+    pub fn expected_dir(&self) -> &Path {
+        match self {
+            Self::Unset(path) | Self::Available(path) | Self::Unavailable(path) => path,
+        }
+    }
+
+    pub fn configured_dir(&self) -> Option<&Path> {
+        match self {
+            Self::Unset(_) => None,
+            Self::Available(path) | Self::Unavailable(path) => Some(path),
+        }
+    }
+
+    pub fn is_default(&self) -> bool {
+        matches!(self, Self::Unset(_))
+    }
+}
+
 fn get_config_path(app: &AppHandle) -> PathBuf {
     app.path()
         .app_config_dir()
@@ -105,24 +138,32 @@ fn classify_legacy_cloud_sync_dir(
     None
 }
 
-pub fn get_custom_auto_save_dir(app: &AppHandle) -> Option<String> {
-    let config = read_config(app);
-    let dir = config.auto_save_dir?;
+fn classify_custom_auto_save_dir(config: &AppConfig) -> CustomAutoSaveDirState {
+    let Some(dir) = config.auto_save_dir.as_deref() else {
+        return CustomAutoSaveDirState::Unset;
+    };
     if dir.is_empty() {
-        return None;
+        return CustomAutoSaveDirState::Unset;
     }
     if config
         .cloud_sync_provider
         .as_deref()
-        .is_some_and(|provider| is_cloud_notes_dir_for_provider(provider, &dir))
+        .is_some_and(|provider| is_cloud_notes_dir_for_provider(provider, dir))
     {
-        return None;
+        return CustomAutoSaveDirState::Unset;
     }
-    if Path::new(&dir).exists() {
-        Some(dir)
+
+    let path = PathBuf::from(dir);
+    if path.is_dir() {
+        CustomAutoSaveDirState::Available(path)
     } else {
-        None
+        CustomAutoSaveDirState::Unavailable(path)
     }
+}
+
+pub fn get_custom_auto_save_dir_state(app: &AppHandle) -> CustomAutoSaveDirState {
+    let config = read_config(app);
+    classify_custom_auto_save_dir(&config)
 }
 
 pub fn set_custom_auto_save_dir(app: &AppHandle, dir: Option<&str>) -> Result<(), String> {
@@ -131,8 +172,8 @@ pub fn set_custom_auto_save_dir(app: &AppHandle, dir: Option<&str>) -> Result<()
         if !path.is_absolute() {
             return Err("Path must be absolute".to_string());
         }
-        if !path.exists() {
-            return Err("Directory does not exist".to_string());
+        if !path.is_dir() {
+            return Err("Path must be an existing directory".to_string());
         }
     }
     let mut config = read_config(app);
@@ -166,10 +207,18 @@ pub fn set_cloud_sync_provider(app: &AppHandle, provider: Option<&str>) -> Resul
     write_config(app, &config)
 }
 
-pub fn get_local_auto_save_dir(app: &AppHandle, default_dir: &Path) -> PathBuf {
-    match get_custom_auto_save_dir(app) {
-        Some(custom) => PathBuf::from(custom),
-        None => default_dir.to_path_buf(),
+pub fn get_local_auto_save_dir_state(app: &AppHandle, default_dir: &Path) -> LocalAutoSaveDirState {
+    classify_local_auto_save_dir(get_custom_auto_save_dir_state(app), default_dir)
+}
+
+fn classify_local_auto_save_dir(
+    custom_state: CustomAutoSaveDirState,
+    default_dir: &Path,
+) -> LocalAutoSaveDirState {
+    match custom_state {
+        CustomAutoSaveDirState::Unset => LocalAutoSaveDirState::Unset(default_dir.to_path_buf()),
+        CustomAutoSaveDirState::Available(path) => LocalAutoSaveDirState::Available(path),
+        CustomAutoSaveDirState::Unavailable(path) => LocalAutoSaveDirState::Unavailable(path),
     }
 }
 
@@ -353,7 +402,14 @@ pub fn migrate_legacy_cloud_sync_config(_app: &AppHandle) -> Result<(), String> 
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_legacy_cloud_sync_dir, CloudProviderInfo, LibrarySource};
+    use super::{
+        classify_custom_auto_save_dir, classify_legacy_cloud_sync_dir,
+        classify_local_auto_save_dir, AppConfig, CloudProviderInfo, CustomAutoSaveDirState,
+        LibrarySource, LocalAutoSaveDirState,
+    };
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn provider(id: &str, path: &str) -> CloudProviderInfo {
         CloudProviderInfo {
@@ -362,6 +418,21 @@ mod tests {
             available: true,
             sync_folder: Some(path.to_string()),
         }
+    }
+
+    fn make_temp_dir(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "hwan-note-config-test-{}-{}-{}",
+            name,
+            std::process::id(),
+            nonce
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
     }
 
     #[test]
@@ -389,5 +460,116 @@ mod tests {
         let providers = vec![provider("google_drive", r"G:\내 드라이브")];
         let result = classify_legacy_cloud_sync_dir(r"D:\Notes", &providers);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn classify_custom_auto_save_dir_returns_unset_when_no_directory_is_configured() {
+        let config = AppConfig::default();
+
+        let state = classify_custom_auto_save_dir(&config);
+
+        assert_eq!(state, CustomAutoSaveDirState::Unset);
+    }
+
+    #[test]
+    fn only_unset_custom_directory_selects_the_default_directory() {
+        let default_dir = PathBuf::from("C:/Users/test/Documents/HwanNote/Notes");
+        let custom_dir = PathBuf::from("D:/Library");
+
+        assert_eq!(
+            classify_local_auto_save_dir(CustomAutoSaveDirState::Unset, &default_dir),
+            LocalAutoSaveDirState::Unset(default_dir)
+        );
+        assert_eq!(
+            classify_local_auto_save_dir(
+                CustomAutoSaveDirState::Unavailable(custom_dir.clone()),
+                PathBuf::from("C:/Users/test/Documents/HwanNote/Notes").as_path(),
+            ),
+            LocalAutoSaveDirState::Unavailable(custom_dir)
+        );
+    }
+
+    #[test]
+    fn classify_custom_auto_save_dir_returns_unavailable_when_configured_directory_is_missing() {
+        let root = make_temp_dir("missing-custom");
+        let missing_dir = root.join("detached");
+        let config = AppConfig {
+            auto_save_dir: Some(missing_dir.to_string_lossy().to_string()),
+            cloud_sync_provider: None,
+            cloud_sync_source: None,
+        };
+
+        let state = classify_custom_auto_save_dir(&config);
+
+        assert_eq!(state, CustomAutoSaveDirState::Unavailable(missing_dir));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn classify_custom_auto_save_dir_rejects_a_regular_file() {
+        let root = make_temp_dir("custom-path-file");
+        let file_path = root.join("not-a-directory");
+        fs::write(&file_path, "not a library directory").unwrap();
+        let config = AppConfig {
+            auto_save_dir: Some(file_path.to_string_lossy().to_string()),
+            cloud_sync_provider: None,
+            cloud_sync_source: None,
+        };
+
+        assert_eq!(
+            classify_custom_auto_save_dir(&config),
+            CustomAutoSaveDirState::Unavailable(file_path)
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn classify_custom_auto_save_dir_restores_the_configured_directory_when_it_reappears() {
+        let dir = make_temp_dir("custom-dir-restore");
+        let config = AppConfig {
+            auto_save_dir: Some(dir.to_string_lossy().to_string()),
+            cloud_sync_provider: None,
+            cloud_sync_source: None,
+        };
+
+        assert_eq!(
+            classify_custom_auto_save_dir(&config),
+            CustomAutoSaveDirState::Available(dir.clone())
+        );
+
+        fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(
+            classify_custom_auto_save_dir(&config),
+            CustomAutoSaveDirState::Unavailable(dir.clone())
+        );
+
+        fs::create_dir_all(&dir).unwrap();
+        assert_eq!(
+            classify_custom_auto_save_dir(&config),
+            CustomAutoSaveDirState::Available(dir.clone())
+        );
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn legacy_config_json_deserializes_without_runtime_state_fields() {
+        let raw = r#"{
+            "autoSaveDir": "D:\\Notes",
+            "cloudSyncProvider": "onedrive"
+        }"#;
+
+        let config: AppConfig = serde_json::from_str(raw).unwrap();
+
+        assert_eq!(config.auto_save_dir.as_deref(), Some(r"D:\Notes"));
+        assert_eq!(config.cloud_sync_provider.as_deref(), Some("onedrive"));
+        assert_eq!(config.cloud_sync_source, None);
+
+        let serialized = serde_json::to_value(&config).unwrap();
+        assert_eq!(serialized["autoSaveDir"], r"D:\Notes");
+        assert_eq!(serialized["cloudSyncProvider"], "onedrive");
+        assert!(serialized.get("localAutoSaveDirState").is_none());
     }
 }
