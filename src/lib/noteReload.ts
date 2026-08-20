@@ -6,6 +6,7 @@ export interface MergeReloadedNoteTabsInput {
   currentTabs: readonly NoteTab[];
   currentSession: PersistedTabSession;
   sameStorageSource: boolean;
+  authoritativeSnapshot: boolean;
   createRecoveryId: (sourceTab: NoteTab) => string;
   recoveryTitle: (originalTitle: string) => string;
 }
@@ -26,22 +27,28 @@ export function mergeReloadedNoteTabs({
   currentTabs,
   currentSession,
   sameStorageSource,
+  authoritativeSnapshot,
   createRecoveryId,
   recoveryTitle
 }: MergeReloadedNoteTabsInput): MergeReloadedNoteTabsResult {
+  const currentLibraryTabs = currentTabs.filter((tab) => tab.persistence === "library");
   const dirtyLibraryTabs = currentTabs.filter(
     (tab) => tab.persistence === "library" && tab.isDirty
   );
   const dirtyLibraryById = new Map(dirtyLibraryTabs.map((tab) => [tab.id, tab]));
   const preservedNonLibraryTabs = currentTabs.filter((tab) => tab.persistence !== "library");
+  const reloadedIds = new Set(reloadedLibraryTabs.map((tab) => tab.id));
+  const absentCurrentLibraryTabs = currentLibraryTabs
+    .filter((tab) => !reloadedIds.has(tab.id));
 
   if (sameStorageSource) {
-    const reloadedIds = new Set(reloadedLibraryTabs.map((tab) => tab.id));
+    const missingLibraryTabs = authoritativeSnapshot
+      ? absentCurrentLibraryTabs.filter((tab) => tab.isDirty)
+      : absentCurrentLibraryTabs;
     const mergedLibraryTabs = reloadedLibraryTabs.map(
       (tab) => dirtyLibraryById.get(tab.id) ?? tab
     );
-    const missingDirtyTabs = dirtyLibraryTabs.filter((tab) => !reloadedIds.has(tab.id));
-    const tabs = [...mergedLibraryTabs, ...missingDirtyTabs, ...preservedNonLibraryTabs];
+    const tabs = [...mergedLibraryTabs, ...missingLibraryTabs, ...preservedNonLibraryTabs];
     const availableIds = new Set(tabs.map((tab) => tab.id));
     const openTabIds = dedupeIds(currentSession.openTabIds).filter((id) => availableIds.has(id));
     const activeTabId =
@@ -57,9 +64,16 @@ export function mergeReloadedNoteTabs({
     };
   }
 
+  const preservedMissingLibraryTabs = authoritativeSnapshot ? [] : absentCurrentLibraryTabs;
+  const preservedMissingLibraryIds = new Set(
+    preservedMissingLibraryTabs.map((tab) => tab.id)
+  );
   const recovered = mergeRecoveredNoteTabs({
-    reloadedLibraryTabs,
-    currentTabs: [...dirtyLibraryTabs, ...preservedNonLibraryTabs],
+    reloadedLibraryTabs: [...reloadedLibraryTabs, ...preservedMissingLibraryTabs],
+    currentTabs: [
+      ...dirtyLibraryTabs.filter((tab) => !preservedMissingLibraryIds.has(tab.id)),
+      ...preservedNonLibraryTabs
+    ],
     currentSession,
     createId: createRecoveryId,
     recoveryTitle
@@ -68,7 +82,9 @@ export function mergeReloadedNoteTabs({
   return {
     tabs: recovered.tabs,
     session: recovered.session,
-    preservedDirtyTabIds: [],
+    preservedDirtyTabIds: preservedMissingLibraryTabs
+      .filter((tab) => tab.isDirty)
+      .map((tab) => tab.id),
     recoveredCount: recovered.recoveredCount
   };
 }

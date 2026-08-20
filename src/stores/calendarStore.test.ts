@@ -4,6 +4,7 @@ import {
   serializeCalendarData,
   type CalendarData,
 } from "../lib/calendarData";
+import type { NoteTab } from "./noteStore";
 
 const calendarLoad = vi.fn();
 const calendarSave = vi.fn();
@@ -56,6 +57,35 @@ function createTodoData(): CalendarData {
     inbox: [],
     noteLinks: {},
   };
+}
+
+function createLibraryNote(id: string): NoteTab {
+  return {
+    id,
+    revision: 0,
+    title: id,
+    isTitleManual: true,
+    content: { type: "doc", content: [{ type: "paragraph" }] },
+    plainText: "",
+    isDirty: false,
+    isPinned: false,
+    folderPath: "",
+    createdAt: 1,
+    updatedAt: 1,
+    lastSavedAt: 1,
+    fileFormat: "md",
+    persistence: "library",
+    savedSnapshot: null,
+  };
+}
+
+async function hydrateNoteLibrary(noteIds: string[]) {
+  const { useNoteStore } = await import("./noteStore");
+  const tabs = noteIds.map(createLibraryNote);
+  useNoteStore.getState().hydrateTabs(tabs, {
+    openTabIds: tabs.map((tab) => tab.id),
+    activeTabId: tabs[0]?.id ?? null,
+  });
 }
 
 type CalendarStoreModule = typeof import("./calendarStore");
@@ -377,6 +407,63 @@ describe("useCalendarStore cloud recovery coordination", () => {
       recoveryCopyPath: null,
     });
     expect(storeState()).toMatchObject({ loadedFrom: "local_fallback", loadState: "ready" });
+  });
+});
+
+describe("useCalendarStore orphan note link cleanup", () => {
+  const dateKey = "2026-08-20";
+
+  async function prepareLinkedNotes(loadState: "ready" | "loading" = "ready") {
+    await hydrateNoteLibrary(["present-note"]);
+    useCalendarStore.setState({
+      data: {
+        ...createEmptyCalendarData(),
+        noteLinks: {
+          [dateKey]: ["present-note", "scan-missed-note"],
+        },
+      },
+      loaded: loadState === "ready",
+      loadState,
+    });
+  }
+
+  it("preserves noteLinks when the note snapshot is incomplete", async () => {
+    await prepareLinkedNotes();
+
+    storeState().cleanOrphanNoteLinks(false);
+    await vi.advanceTimersByTimeAsync(1_750);
+
+    expect(storeState().data.noteLinks[dateKey]).toEqual([
+      "present-note",
+      "scan-missed-note",
+    ]);
+    expect(calendarSave).not.toHaveBeenCalled();
+  });
+
+  it("preserves noteLinks until the calendar itself is ready", async () => {
+    await prepareLinkedNotes("loading");
+
+    storeState().cleanOrphanNoteLinks(true);
+    await vi.advanceTimersByTimeAsync(1_750);
+
+    expect(storeState().data.noteLinks[dateKey]).toEqual([
+      "present-note",
+      "scan-missed-note",
+    ]);
+    expect(calendarSave).not.toHaveBeenCalled();
+  });
+
+  it("removes and saves actual orphans for an authoritative ready snapshot", async () => {
+    calendarSave.mockResolvedValue(undefined);
+    await prepareLinkedNotes();
+
+    storeState().cleanOrphanNoteLinks(true);
+
+    expect(storeState().data.noteLinks[dateKey]).toEqual(["present-note"]);
+    await vi.advanceTimersByTimeAsync(1_750);
+    expect(calendarSave).toHaveBeenCalledTimes(1);
+    const saved = JSON.parse(calendarSave.mock.calls[0]?.[0] as string) as CalendarData;
+    expect(saved.noteLinks[dateKey]).toEqual(["present-note"]);
   });
 });
 

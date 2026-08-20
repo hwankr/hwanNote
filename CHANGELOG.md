@@ -5,6 +5,27 @@ All notable user-facing changes to HwanNote are documented here.
 This project follows [Semantic Versioning](https://semver.org/) and commit messages use the
 [Conventional Commits](https://www.conventionalcommits.org/) style.
 
+## [0.9.12] - 2026-08-20
+
+Prevents incomplete note-library scans from being mistaken for file deletions.
+
+### Fixed
+
+- **Note scans now fail closed.** Directory, entry, Markdown read, metadata,
+  symlink, and reparse-point failures are surfaced with their path and cause;
+  incomplete scans cannot reconcile or rewrite the note index.
+- **Corrupt indexes remain recoverable.** Invalid index bytes are copied to a
+  unique protected backup, the original is left untouched, and note, folder,
+  delete, save, and migration writes remain blocked until recovery.
+- **Metadata and calendar links survive partial loads.** Existing note IDs,
+  creation times, pin state, folders, and calendar `noteLinks` are retained;
+  automatic orphan cleanup runs only after an authoritative complete scan.
+- **Recovery is visible and retryable.** A persistent localized panel reports
+  the failing operation, path, cause, and backup location, then resumes loading
+  and autosave only after a successful rescan.
+- **Real deletions still reconcile.** A complete scan continues to remove only
+  index entries and calendar links whose Markdown files are actually gone.
+
 ## [0.9.11] - 2026-08-20
 
 Completes the unavailable custom-storage recovery flow introduced in 0.9.10.

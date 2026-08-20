@@ -10,7 +10,10 @@ use tauri_plugin_dialog::DialogExt;
 
 use crate::config_manager;
 use crate::config_manager::{LibrarySource, LocalAutoSaveDirState};
-use crate::file_manager::{self, AutoSavePayload, AutoSaveResult, FolderDeleteResult, LoadedNote};
+use crate::file_manager::{
+    self, AutoSavePayload, AutoSaveResult, FolderDeleteResult, LoadedNote, NoteLoadIssue,
+    NoteLoadState,
+};
 
 // ── State for pending update ──
 
@@ -204,6 +207,10 @@ pub struct NoteLoadResult {
     folders: Vec<String>,
     loaded_from: String,
     cloud_unavailable: bool,
+    load_state: NoteLoadState,
+    issues: Vec<NoteLoadIssue>,
+    index_source_path: Option<String>,
+    index_backup_path: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -949,17 +956,17 @@ pub fn cmd_note_auto_save(
 #[tauri::command]
 pub fn cmd_note_load_all(app: AppHandle) -> Result<NoteLoadResult, String> {
     let (effective_dir, loaded_from) = resolve_calendar_dir(&app)?;
-    let notes = file_manager::load_markdown_notes(&effective_dir)?;
-    let folders = file_manager::list_folders(&effective_dir).unwrap_or_else(|error| {
-        tracing::warn!("Failed to load note folders: {}", error);
-        Vec::new()
-    });
+    let library = file_manager::load_markdown_library(&effective_dir);
 
     Ok(NoteLoadResult {
-        notes,
-        folders,
+        notes: library.notes,
+        folders: library.folders,
         loaded_from: resolved_storage_source_to_str(loaded_from).to_string(),
         cloud_unavailable: loaded_from == ResolvedStorageSource::LocalFallback,
+        load_state: library.load_state,
+        issues: library.issues,
+        index_source_path: library.index_source_path,
+        index_backup_path: library.index_backup_path,
     })
 }
 

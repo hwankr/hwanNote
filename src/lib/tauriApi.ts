@@ -26,11 +26,25 @@ export interface LoadedNote {
 
 export type NoteStorageSource = "local" | "cloud" | "local_fallback";
 
+export type NoteLoadState = "ready" | "incomplete" | "index_corrupt";
+export type NoteLoadIssueKind = "scan" | "file_read" | "file_metadata" | "index";
+
+export interface NoteLoadIssue {
+  kind: NoteLoadIssueKind;
+  operation: string;
+  path: string;
+  reason: string;
+}
+
 export interface NoteLoadResult {
   notes: LoadedNote[];
   folders: string[];
   loadedFrom: NoteStorageSource;
   cloudUnavailable: boolean;
+  loadState: NoteLoadState;
+  issues: NoteLoadIssue[];
+  indexSourcePath: string | null;
+  indexBackupPath: string | null;
 }
 
 export interface SessionData {

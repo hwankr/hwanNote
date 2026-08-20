@@ -66,7 +66,7 @@ export interface CalendarStore {
   addNoteLink: (dateKey: string, noteId: string) => void;
   removeNoteLink: (dateKey: string, noteId: string) => void;
   removeNoteLinks: (noteId: string) => void;
-  cleanOrphanNoteLinks: () => void;
+  cleanOrphanNoteLinks: (authoritative: boolean) => void;
 }
 
 export type CalendarStoreSelectorState = Pick<CalendarStore, "data">;
@@ -776,7 +776,11 @@ export const useCalendarStore: UseBoundStore<StoreApi<CalendarStore>> = create<C
     });
   },
 
-  cleanOrphanNoteLinks: () => {
+  cleanOrphanNoteLinks: (authoritative) => {
+    if (!authoritative || useCalendarStore.getState().loadState !== "ready") {
+      return;
+    }
+
     const noteIds = new Set(Object.keys(useNoteStore.getState().notesById));
     const { data } = useCalendarStore.getState();
     let hasOrphans = false;
