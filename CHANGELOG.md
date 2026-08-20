@@ -5,6 +5,30 @@ All notable user-facing changes to HwanNote are documented here.
 This project follows [Semantic Versioning](https://semver.org/) and commit messages use the
 [Conventional Commits](https://www.conventionalcommits.org/) style.
 
+## [0.9.10] - 2026-08-20
+
+Fixes a library-splitting risk where a temporarily disconnected custom local
+storage path could silently redirect new data into the default Documents folder.
+
+### Fixed
+
+- **Custom storage availability is explicit.** HwanNote now distinguishes an
+  unset path, an available custom path, and a configured but unavailable path
+  without changing the existing `config.json` format.
+- **Unavailable paths fail closed.** Note and calendar loads, saves, folder
+  changes, recovery copies, and migrations stop instead of creating or writing
+  a second library under Documents.
+- **Reconnects restore the configured library.** The original path remains in
+  configuration while a drive is disconnected and becomes usable again when
+  the directory reappears; changing storage still requires an explicit reset
+  or folder selection.
+- **Recovery guidance is localized.** Persistent Korean and English UI shows
+  the expected path and offers retry, folder selection, and explicit reset
+  actions.
+- **Cloud fallback remains separate.** A missing cloud directory uses
+  `local_fallback` only when the configured local library is available, while a
+  custom local-path failure is reported independently.
+
 ## [0.9.9] - 2026-08-12
 
 Fixes an update-install data-loss risk where HwanNote could release its close

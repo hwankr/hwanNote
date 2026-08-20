@@ -9,6 +9,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   autoSave: vi.fn(),
+  browseAutoSaveDir: vi.fn(),
+  calendarLoadState: "ready" as "idle" | "loading" | "ready" | "corrupt" | "load_error",
   cleanOrphanNoteLinks: vi.fn(),
   closeRequestHandlers: [] as Array<(event: { preventDefault: () => void }) => void | Promise<void>>,
   detectCloudProviders: vi.fn(),
@@ -22,6 +24,7 @@ const mocks = vi.hoisted(() => ({
   recoverCalendarDataFromCloud: vi.fn(),
   saveCalendarData: vi.fn(),
   saveSession: vi.fn(),
+  setAutoSaveDir: vi.fn(),
   setActiveSource: vi.fn(),
   cloudStatus: vi.fn(),
   updaterInstall: vi.fn(),
@@ -56,8 +59,8 @@ vi.mock("./lib/tauriApi", () => ({
       install: mocks.updaterInstall,
     },
     settings: {
-      browseAutoSaveDir: vi.fn().mockResolvedValue(null),
-      setAutoSaveDir: vi.fn(),
+      browseAutoSaveDir: mocks.browseAutoSaveDir,
+      setAutoSaveDir: mocks.setAutoSaveDir,
       getAutoSaveDir: mocks.getAutoSaveDir,
     },
     session: {
@@ -82,7 +85,7 @@ vi.mock("./stores/calendarStore", () => ({
       cleanOrphanNoteLinks: mocks.cleanOrphanNoteLinks,
       loadCalendarData: mocks.loadCalendarData,
       loadError: null,
-      loadState: "ready",
+      loadState: mocks.calendarLoadState,
       removeNoteLinks: vi.fn(),
       recoverCalendarDataFromCloud: mocks.recoverCalendarDataFromCloud,
       saveCalendarData: mocks.saveCalendarData,
@@ -341,7 +344,20 @@ describe("App locale changes", () => {
       customDir: null,
       effectiveDir: "C:/notes",
       isDefault: true,
+      status: "unset",
+      expectedDir: "C:/notes",
+      error: null,
     });
+    mocks.browseAutoSaveDir.mockReset().mockResolvedValue(null);
+    mocks.setAutoSaveDir.mockReset().mockResolvedValue({
+      customDir: null,
+      effectiveDir: "C:/notes",
+      isDefault: true,
+      status: "unset",
+      expectedDir: "C:/notes",
+      error: null,
+    });
+    mocks.calendarLoadState = "ready";
     mocks.cloudStatus.mockReset().mockResolvedValue({
       enabled: false,
       provider: null,
@@ -374,6 +390,212 @@ describe("App locale changes", () => {
     container.remove();
     vi.useRealTimers();
     consoleErrorSpy?.mockRestore();
+  });
+
+  it("shows the unavailable custom path in Korean and English without claiming a default fallback", async () => {
+    consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    mocks.getAutoSaveDir.mockResolvedValue({
+      customDir: "Z:/Detached/HwanNote",
+      effectiveDir: null,
+      isDefault: false,
+      status: "unavailable",
+      expectedDir: "Z:/Detached/HwanNote",
+      error: "custom_auto_save_dir_unavailable",
+    });
+    mocks.loadAll.mockRejectedValue(new Error("custom path unavailable"));
+
+    await renderApp(root);
+
+    const banner = requiredElement<HTMLElement>(container, ".storage-unavailable-banner");
+    expect(banner.textContent).toContain("사용자 지정 저장 경로에 연결할 수 없습니다");
+    expect(banner.textContent).toContain("Z:/Detached/HwanNote");
+    expect(banner.textContent).toContain("기본 Documents 폴더는 자동으로 사용하지 않습니다");
+    expect(banner.textContent).not.toContain("기본 경로를 사용합니다");
+    expect(mocks.loadAll).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="switch-language"]').click();
+    });
+    await flushReactWork();
+
+    expect(banner.textContent).toContain("The custom storage path is unavailable");
+    expect(banner.textContent).toContain("will not use the default Documents folder automatically");
+  });
+
+  it("allows an explicit reset after an unavailable path blocked initial loading", async () => {
+    consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    mocks.calendarLoadState = "idle";
+    mocks.getAutoSaveDir.mockResolvedValue({
+      customDir: "Z:/Detached/HwanNote",
+      effectiveDir: null,
+      isDefault: false,
+      status: "unavailable",
+      expectedDir: "Z:/Detached/HwanNote",
+      error: "custom_auto_save_dir_unavailable",
+    });
+    mocks.loadAll.mockRejectedValue(new Error("custom path unavailable"));
+
+    await renderApp(root);
+    mocks.loadAll.mockResolvedValue(createLoadResult("local", "default library"));
+
+    const resetButton = Array.from(
+      requiredElement<HTMLElement>(container, ".storage-unavailable-actions").querySelectorAll("button")
+    ).find((button) => button.textContent === "기본값으로 복원");
+    if (!resetButton) {
+      throw new Error("Expected the explicit reset action");
+    }
+
+    await act(async () => {
+      resetButton.click();
+    });
+    await flushUntil(() => mocks.setAutoSaveDir.mock.calls.length === 1, "the path reset");
+    await flushUntil(() => mocks.loadAll.mock.calls.length === 2, "the default library reload");
+
+    expect(mocks.setAutoSaveDir).toHaveBeenCalledWith(null);
+    expect(mocks.saveCalendarData).not.toHaveBeenCalled();
+    expect(container.querySelector(".storage-unavailable-banner")).toBeNull();
+  });
+
+  it("restores the existing custom setting when the path reappears", async () => {
+    consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    mocks.calendarLoadState = "idle";
+    mocks.getAutoSaveDir.mockResolvedValue({
+      customDir: "Z:/Detached/HwanNote",
+      effectiveDir: null,
+      isDefault: false,
+      status: "unavailable",
+      expectedDir: "Z:/Detached/HwanNote",
+      error: "custom_auto_save_dir_unavailable",
+    });
+    mocks.loadAll.mockRejectedValue(new Error("custom path unavailable"));
+
+    await renderApp(root);
+    mocks.getAutoSaveDir.mockResolvedValue({
+      customDir: "Z:/Detached/HwanNote",
+      effectiveDir: "Z:/Detached/HwanNote",
+      isDefault: false,
+      status: "available",
+      expectedDir: "Z:/Detached/HwanNote",
+      error: null,
+    });
+    mocks.loadAll.mockResolvedValue(createLoadResult("local", "restored custom library"));
+
+    const retryButton = Array.from(
+      requiredElement<HTMLElement>(container, ".storage-unavailable-actions").querySelectorAll("button")
+    ).find((button) => button.textContent === "재연결 확인");
+    if (!retryButton) {
+      throw new Error("Expected the reconnect retry action");
+    }
+
+    await act(async () => {
+      retryButton.click();
+    });
+    await flushUntil(() => mocks.loadAll.mock.calls.length === 2, "the restored custom library reload");
+
+    expect(mocks.setAutoSaveDir).not.toHaveBeenCalled();
+    expect(useNoteStore.getState().notesById[NOTE_ID]).toMatchObject({
+      plainText: "restored custom library",
+    });
+    expect(container.querySelector(".storage-unavailable-banner")).toBeNull();
+  });
+
+  it("changes storage only after the user explicitly selects a new directory", async () => {
+    consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    mocks.calendarLoadState = "idle";
+    mocks.getAutoSaveDir.mockResolvedValue({
+      customDir: "Z:/Detached/HwanNote",
+      effectiveDir: null,
+      isDefault: false,
+      status: "unavailable",
+      expectedDir: "Z:/Detached/HwanNote",
+      error: "custom_auto_save_dir_unavailable",
+    });
+    mocks.loadAll.mockRejectedValue(new Error("custom path unavailable"));
+    mocks.browseAutoSaveDir.mockResolvedValue("E:/NewLibrary");
+    mocks.setAutoSaveDir.mockResolvedValue({
+      customDir: "E:/NewLibrary",
+      effectiveDir: "E:/NewLibrary",
+      isDefault: false,
+      status: "available",
+      expectedDir: "E:/NewLibrary",
+      error: null,
+    });
+
+    await renderApp(root);
+    expect(mocks.setAutoSaveDir).not.toHaveBeenCalled();
+    mocks.loadAll.mockResolvedValue(createLoadResult("local", "new custom library"));
+
+    const browseButton = Array.from(
+      requiredElement<HTMLElement>(container, ".storage-unavailable-actions").querySelectorAll("button")
+    ).find((button) => button.textContent === "변경");
+    if (!browseButton) {
+      throw new Error("Expected the new-directory action");
+    }
+
+    await act(async () => {
+      browseButton.click();
+    });
+    await flushUntil(() => mocks.setAutoSaveDir.mock.calls.length === 1, "the explicit directory change");
+    await flushUntil(() => mocks.loadAll.mock.calls.length === 2, "the selected library reload");
+
+    expect(mocks.browseAutoSaveDir).toHaveBeenCalledTimes(1);
+    expect(mocks.setAutoSaveDir).toHaveBeenCalledWith("E:/NewLibrary");
+    expect(container.querySelector(".storage-unavailable-banner")).toBeNull();
+  });
+
+  it("detects a missing custom local path without suspending an available cloud library", async () => {
+    mocks.loadAll.mockResolvedValue(createLoadResult("cloud", "cloud library"));
+    mocks.getAutoSaveDir.mockResolvedValue({
+      customDir: "Z:/ExternalLocal",
+      effectiveDir: "Z:/ExternalLocal",
+      isDefault: false,
+      status: "available",
+      expectedDir: "Z:/ExternalLocal",
+      error: null,
+    });
+    mocks.cloudStatus.mockResolvedValue({
+      enabled: true,
+      provider: "google_drive",
+      syncFolder: "G:/Cloud",
+      activeSource: "cloud",
+      resolvedSource: "cloud",
+      cloudUnavailable: false,
+    });
+
+    await renderApp(root);
+    mocks.getAutoSaveDir.mockResolvedValue({
+      customDir: "Z:/ExternalLocal",
+      effectiveDir: null,
+      isDefault: false,
+      status: "unavailable",
+      expectedDir: "Z:/ExternalLocal",
+      error: "custom_auto_save_dir_unavailable",
+    });
+
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await flushUntil(
+      () => container.querySelector(".storage-unavailable-banner") !== null,
+      "the missing custom path warning",
+    );
+
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="edit-note"]').click();
+      await vi.advanceTimersByTimeAsync(AUTO_SAVE_DELAY_MS);
+    });
+    await flushUntil(() => mocks.autoSave.mock.calls.length === 1, "the cloud note autosave");
+
+    expect(mocks.autoSave).toHaveBeenCalledWith(
+      NOTE_ID,
+      "Cloud title",
+      expect.stringContaining("dirty draft"),
+      "",
+      true,
+      false,
+      "cloud",
+    );
+    expect(mocks.recoverCalendarDataFromCloud).not.toHaveBeenCalled();
   });
 
   it("hydrates once and preserves a pending dirty note across a language change", async () => {

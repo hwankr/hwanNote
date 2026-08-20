@@ -44,10 +44,15 @@ export interface ImportedFile {
   filePath: string;
 }
 
+export type AutoSaveDirStatus = "unset" | "available" | "unavailable";
+
 export interface AutoSaveDirInfo {
   customDir: string | null;
-  effectiveDir: string;
+  effectiveDir: string | null;
   isDefault: boolean;
+  status: AutoSaveDirStatus;
+  expectedDir: string;
+  error: string | null;
 }
 
 interface UpdateStatusData {
@@ -78,7 +83,7 @@ export interface CloudSyncStatus {
   provider: string | null;
   syncFolder: string | null;
   activeSource: CloudSyncSource;
-  resolvedSource: NoteStorageSource;
+  resolvedSource: NoteStorageSource | null;
   cloudUnavailable: boolean;
 }
 

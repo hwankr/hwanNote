@@ -587,6 +587,56 @@ body.tab-dragging .tab:not(.dragging):hover {
   overflow: hidden;
 }
 
+.storage-unavailable-banner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+  padding: 10px 14px;
+  border-bottom: 1px solid color-mix(in srgb, var(--kind-deadline) 48%, var(--border-soft));
+  background: var(--kind-deadline-bg);
+  color: var(--text-primary);
+}
+
+.storage-unavailable-copy {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12px;
+}
+
+.storage-unavailable-copy strong {
+  color: var(--kind-deadline);
+  font-size: 13px;
+}
+
+.storage-unavailable-copy span {
+  overflow-wrap: anywhere;
+}
+
+.storage-unavailable-actions {
+  display: flex;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.storage-unavailable-actions button {
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid color-mix(in srgb, var(--kind-deadline) 45%, var(--border-soft));
+  border-radius: 7px;
+  background: var(--bg-surface);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.storage-unavailable-actions button:hover {
+  background: var(--bg-hover);
+}
+
 .workspace > * {
   min-width: 0;
 }
@@ -1646,6 +1696,26 @@ body.tab-dragging .tab:not(.dragging):hover {
 
 .settings-autosave-reset {
   color: var(--text-muted);
+}
+
+.settings-autosave-error {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 9px 10px;
+  border: 1px solid color-mix(in srgb, var(--kind-deadline) 45%, var(--border-soft));
+  border-radius: 8px;
+  background: var(--kind-deadline-bg);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.settings-autosave-error strong {
+  color: var(--kind-deadline);
+}
+
+.settings-autosave-error span {
+  overflow-wrap: anywhere;
 }
 
 .settings-shortcut-help {
