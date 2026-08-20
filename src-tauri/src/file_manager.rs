@@ -1,16 +1,23 @@
+use crate::atomic_file::{publish_temp_file, sync_parent_directory};
+
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::time::SystemTime;
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use sha1::Digest;
+use sha1::Sha1;
+use sha2::{Digest, Sha256};
 
 const INDEX_FILENAME: &str = ".hwan-note-index.json";
 pub const CALENDAR_FILENAME: &str = "calendar.json";
+const AUTOSAVE_JOURNAL_FILENAME: &str = ".hwan-note-autosave.json";
+const AUTOSAVE_JOURNAL_TEMP_FILENAME: &str = ".hwan-note-autosave.json.next";
+const AUTOSAVE_TRANSACTION_VERSION: u32 = 1;
 
 static TOGGLE_BLOCK_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^:::toggle\[(open|closed)\](?:\s+(.*))?$").unwrap());
@@ -24,6 +31,7 @@ static TRAILING_DOTS_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\.+$").
 static PLAIN_TASK_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(\s*)- \[[ xX]\]\s*").unwrap());
 static NOTE_INDEX_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+static AUTOSAVE_OPERATION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 const TOGGLE_BLOCK_END: &str = ":::";
 const MANUAL_TITLE_META_PREFIX: &str = "<!-- hwan-note:manual-title:";
@@ -37,7 +45,7 @@ fn lock_note_index() -> MutexGuard<'static, ()> {
 
 // ── Types ──
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NoteIndexEntry {
     pub relative_path: String,
@@ -48,9 +56,68 @@ pub struct NoteIndexEntry {
     pub is_pinned: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NoteIndex {
     pub entries: HashMap<String, NoteIndexEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum AutosaveTransactionPhase {
+    Prepared,
+    Staged,
+    NotePublished,
+    IndexPublished,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AutosaveTransactionJournal {
+    version: u32,
+    operation_id: String,
+    phase: AutosaveTransactionPhase,
+    note_id: String,
+    previous_relative_path: Option<String>,
+    next_relative_path: String,
+    note_temp_relative_path: String,
+    index_temp_relative_path: String,
+    expected_index_digest: Option<String>,
+    next_index: NoteIndex,
+    next_note_digest: String,
+    previous_note_digest: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum AutosaveFaultPoint {
+    JournalTempCreate,
+    JournalTempWrite,
+    JournalTempSync,
+    JournalPublish,
+    JournalPublishReported,
+    NoteTempCreate,
+    NoteTempWrite,
+    NoteTempSync,
+    NotePublish,
+    NotePublishReported,
+    IndexTempCreate,
+    IndexTempWrite,
+    IndexTempSync,
+    IndexPublish,
+    IndexPublishReported,
+    OldFileCleanup,
+    JournalCleanup,
+}
+
+trait AutosaveFaultInjector {
+    fn check(&self, point: AutosaveFaultPoint) -> Result<(), String>;
+}
+
+struct NoopAutosaveFaultInjector;
+
+impl AutosaveFaultInjector for NoopAutosaveFaultInjector {
+    fn check(&self, _point: AutosaveFaultPoint) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -166,6 +233,11 @@ fn system_time_to_millis(time: SystemTime) -> u64 {
 
 fn now_millis() -> u64 {
     system_time_to_millis(SystemTime::now())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    format!("{digest:x}")
 }
 
 // ── String helpers ──
@@ -1199,14 +1271,23 @@ where
     if let Err(failure) = verify_index_snapshot_unchanged(trusted_root, expected) {
         return Err(cleanup_index_temp_after_failure(&tmp_path, failure));
     }
-
-    if let Err(error) = fs::rename(&tmp_path, &index_path) {
-        let reason = cleanup_failed_file(&tmp_path, error);
+    if let Err(reason) =
+        validate_trusted_publish_destination(trusted_root, &index_path, "replace_index")
+    {
         return Err(IndexWriteFailure::Issue(NoteLoadIssue::new(
             NoteLoadIssueKind::Index,
             "replace_index",
             &index_path,
-            reason,
+            cleanup_file_with_reason(&tmp_path, reason),
+        )));
+    }
+
+    if let Err(reason) = publish_temp_file(&tmp_path, &index_path, "replace_index") {
+        return Err(IndexWriteFailure::Issue(NoteLoadIssue::new(
+            NoteLoadIssueKind::Index,
+            "replace_index",
+            &index_path,
+            cleanup_file_with_reason(&tmp_path, reason),
         )));
     }
 
@@ -1770,6 +1851,327 @@ fn validate_existing_trusted_file(
     Ok(())
 }
 
+fn read_trusted_file_bytes(
+    trusted_root: &TrustedLibraryRoot,
+    path: &Path,
+    operation: &str,
+) -> Result<Vec<u8>, String> {
+    validate_existing_trusted_file(trusted_root, path, operation)?;
+    fs::read(path).map_err(|error| format!("{operation} failed for {}: {error}", path.display()))
+}
+
+fn read_existing_file_digest(
+    trusted_root: &TrustedLibraryRoot,
+    path: &Path,
+    operation: &str,
+) -> Result<Option<String>, String> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(Some(sha256_hex(&read_trusted_file_bytes(
+            trusted_root,
+            path,
+            operation,
+        )?))),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!(
+            "{operation} failed for {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+fn file_digest_matches(
+    trusted_root: &TrustedLibraryRoot,
+    path: &Path,
+    expected_digest: &str,
+    operation: &str,
+) -> Result<bool, String> {
+    Ok(read_existing_file_digest(trusted_root, path, operation)?
+        .is_some_and(|digest| digest == expected_digest))
+}
+
+fn autosave_journal_path(trusted_root: &TrustedLibraryRoot) -> PathBuf {
+    trusted_root.path().join(AUTOSAVE_JOURNAL_FILENAME)
+}
+
+fn autosave_journal_next_path(trusted_root: &TrustedLibraryRoot) -> PathBuf {
+    trusted_root.path().join(AUTOSAVE_JOURNAL_TEMP_FILENAME)
+}
+
+fn next_autosave_operation_id() -> String {
+    let sequence = AUTOSAVE_OPERATION_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{}-{}-{sequence}", process_id(), now_millis())
+}
+
+fn is_valid_autosave_operation_id(operation_id: &str) -> bool {
+    let parts = operation_id.split('-').collect::<Vec<_>>();
+    parts.len() == 3
+        && parts
+            .iter()
+            .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
+}
+
+fn note_temp_path_for_operation(destination: &Path, operation_id: &str) -> Result<PathBuf, String> {
+    let parent = destination.parent().ok_or_else(|| {
+        format!(
+            "create_note_temp failed for {}: destination has no parent directory",
+            destination.display()
+        )
+    })?;
+    Ok(parent.join(format!(".hwan-note-write-{operation_id}.tmp")))
+}
+
+fn index_temp_path_for_operation(trusted_root: &TrustedLibraryRoot, operation_id: &str) -> PathBuf {
+    trusted_root
+        .path()
+        .join(format!(".hwan-note-index-{operation_id}.tmp"))
+}
+
+fn create_synced_temp_file_with_faults(
+    temp_path: &Path,
+    bytes: &[u8],
+    operation: &str,
+    create_fault: AutosaveFaultPoint,
+    write_fault: AutosaveFaultPoint,
+    sync_fault: AutosaveFaultPoint,
+    faults: &impl AutosaveFaultInjector,
+) -> Result<(), String> {
+    faults.check(create_fault)?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(temp_path)
+        .map_err(|error| format!("{operation} failed for {}: {error}", temp_path.display()))?;
+    if let Err(error) = faults.check(write_fault) {
+        drop(file);
+        return Err(cleanup_file_with_reason(temp_path, error));
+    }
+    if let Err(error) = file.write_all(bytes) {
+        drop(file);
+        return Err(cleanup_file_with_reason(
+            temp_path,
+            format!("{operation} failed for {}: {error}", temp_path.display()),
+        ));
+    }
+    if let Err(error) = faults.check(sync_fault) {
+        drop(file);
+        return Err(cleanup_file_with_reason(temp_path, error));
+    }
+    if let Err(error) = file.sync_all() {
+        drop(file);
+        return Err(cleanup_file_with_reason(
+            temp_path,
+            format!("{operation} failed for {}: {error}", temp_path.display()),
+        ));
+    }
+    sync_parent_directory(temp_path, operation)?;
+    Ok(())
+}
+
+fn persist_autosave_journal_after_temp_hook<F>(
+    trusted_root: &TrustedLibraryRoot,
+    journal: &AutosaveTransactionJournal,
+    faults: &impl AutosaveFaultInjector,
+    before_publish: F,
+) -> Result<(), String>
+where
+    F: FnOnce(),
+{
+    let journal_path = autosave_journal_path(trusted_root);
+    let next_path = autosave_journal_next_path(trusted_root);
+    let bytes = serde_json::to_vec_pretty(journal).map_err(|error| {
+        format!(
+            "serialize_autosave_journal failed for {}: {error}",
+            journal_path.display()
+        )
+    })?;
+    create_synced_temp_file_with_faults(
+        &next_path,
+        &bytes,
+        "write_autosave_journal_temp",
+        AutosaveFaultPoint::JournalTempCreate,
+        AutosaveFaultPoint::JournalTempWrite,
+        AutosaveFaultPoint::JournalTempSync,
+        faults,
+    )?;
+    before_publish();
+    validate_trusted_publish_destination(trusted_root, &journal_path, "publish_autosave_journal")?;
+    faults.check(AutosaveFaultPoint::JournalPublish)?;
+    publish_temp_file(&next_path, &journal_path, "publish_autosave_journal")?;
+    faults.check(AutosaveFaultPoint::JournalPublishReported)?;
+    Ok(())
+}
+
+fn persist_autosave_journal(
+    trusted_root: &TrustedLibraryRoot,
+    journal: &AutosaveTransactionJournal,
+    faults: &impl AutosaveFaultInjector,
+) -> Result<(), String> {
+    persist_autosave_journal_after_temp_hook(trusted_root, journal, faults, || {})
+}
+
+#[derive(Debug)]
+enum OptionalJournalState {
+    Missing,
+    Parsed(Box<AutosaveTransactionJournal>),
+    Invalid(String),
+}
+
+fn read_optional_autosave_journal(path: &Path) -> OptionalJournalState {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return OptionalJournalState::Missing
+        }
+        Err(error) => {
+            return OptionalJournalState::Invalid(format!(
+                "inspect_autosave_journal failed for {}: {error}",
+                path.display()
+            ))
+        }
+    };
+    if metadata_is_symlink_or_reparse_point(&metadata) || !metadata.is_file() {
+        return OptionalJournalState::Invalid(format!(
+            "validate_autosave_journal failed for {}: expected a trusted regular file",
+            path.display()
+        ));
+    }
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return OptionalJournalState::Invalid(format!(
+                "read_autosave_journal failed for {}: {error}",
+                path.display()
+            ))
+        }
+    };
+    match serde_json::from_slice::<AutosaveTransactionJournal>(&bytes) {
+        Ok(journal) => OptionalJournalState::Parsed(Box::new(journal)),
+        Err(error) => OptionalJournalState::Invalid(format!(
+            "parse_autosave_journal failed for {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+fn current_index_matches_digest(
+    trusted_root: &TrustedLibraryRoot,
+    expected_digest: Option<&str>,
+) -> Result<bool, String> {
+    let snapshot = require_index_snapshot(trusted_root)?;
+    Ok(match (&snapshot.original_bytes, expected_digest) {
+        (None, None) => true,
+        (Some(bytes), Some(expected)) => sha256_hex(bytes) == expected,
+        _ => false,
+    })
+}
+
+fn current_index_matches_next_index(
+    trusted_root: &TrustedLibraryRoot,
+    expected_index: &NoteIndex,
+) -> Result<bool, String> {
+    Ok(require_index_snapshot(trusted_root)?.index == *expected_index)
+}
+
+fn validate_trusted_publish_destination(
+    trusted_root: &TrustedLibraryRoot,
+    destination: &Path,
+    operation: &str,
+) -> Result<(), String> {
+    let relative_path = destination
+        .strip_prefix(trusted_root.path())
+        .map_err(|error| {
+            format!(
+                "{operation} failed for {}: destination is outside {}: {}",
+                destination.display(),
+                trusted_root.path().display(),
+                error
+            )
+        })?;
+    if relative_path.as_os_str().is_empty() {
+        return Err(format!(
+            "{operation} failed for {}: destination cannot be the library root",
+            destination.display()
+        ));
+    }
+    validate_no_symlink_beneath_root(trusted_root, relative_path)
+        .map_err(|error| error.display(operation))?;
+    ensure_path_within_canonical_root(trusted_root, destination)
+        .map_err(|error| error.display(operation))?;
+    match fs::symlink_metadata(destination) {
+        Ok(_) => validate_existing_trusted_file(trusted_root, destination, operation),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "{operation} failed for {}: {error}",
+            destination.display()
+        )),
+    }
+}
+
+fn validate_journal_previous_entry_against_current_index(
+    trusted_root: &TrustedLibraryRoot,
+    journal: &AutosaveTransactionJournal,
+) -> Result<(), String> {
+    if !current_index_matches_digest(trusted_root, journal.expected_index_digest.as_deref())? {
+        return Ok(());
+    }
+    let snapshot = require_index_snapshot(trusted_root)?;
+    let current_entry = snapshot.index.entries.get(&journal.note_id);
+    match (current_entry, journal.previous_relative_path.as_deref()) {
+        (None, None) => Ok(()),
+        (Some(entry), Some(previous_relative_path))
+            if entry.relative_path == previous_relative_path =>
+        {
+            Ok(())
+        }
+        (Some(entry), None) if entry.relative_path == journal.next_relative_path => Ok(()),
+        (None, Some(_)) => Err(format!(
+            "validate_autosave_journal failed for {}: current index no longer contains the recorded previous note entry",
+            autosave_journal_path(trusted_root).display()
+        )),
+        (Some(_), None) => Err(format!(
+            "validate_autosave_journal failed for {}: current index already contains the recorded note id",
+            autosave_journal_path(trusted_root).display()
+        )),
+        (Some(entry), Some(previous_relative_path)) => Err(format!(
+            "validate_autosave_journal failed for {}: current index path {} does not match the recorded previous note path {}",
+            autosave_journal_path(trusted_root).display(),
+            entry.relative_path,
+            previous_relative_path
+        )),
+    }
+}
+
+fn remove_regular_file_if_exists(path: &Path, operation: &str) -> Result<bool, String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata_is_symlink_or_reparse_point(&metadata) || !metadata.is_file() {
+                return Err(format!(
+                    "{operation} failed for {}: expected a trusted regular file",
+                    path.display()
+                ));
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(format!(
+                "{operation} failed for {}: {error}",
+                path.display()
+            ))
+        }
+    }
+
+    fs::remove_file(path)
+        .map_err(|error| format!("{operation} failed for {}: {error}", path.display()))?;
+    Ok(true)
+}
+
+fn remove_regular_file_if_exists_and_sync(path: &Path, operation: &str) -> Result<(), String> {
+    if remove_regular_file_if_exists(path, operation)? {
+        sync_parent_directory(path, operation)?;
+    }
+    Ok(())
+}
+
 fn ensure_directory_tree_trusted(
     trusted_root: &TrustedLibraryRoot,
     relative_path: &Path,
@@ -1810,6 +2212,456 @@ fn ensure_directory_tree_trusted(
     Ok(())
 }
 
+#[derive(Debug)]
+struct ResolvedAutosaveJournal {
+    journal: AutosaveTransactionJournal,
+    next_note_path: PathBuf,
+    note_temp_path: PathBuf,
+    index_temp_path: PathBuf,
+    previous_note_path: Option<PathBuf>,
+}
+
+fn resolve_autosave_journal(
+    trusted_root: &TrustedLibraryRoot,
+    journal: AutosaveTransactionJournal,
+) -> Result<ResolvedAutosaveJournal, String> {
+    if journal.version != AUTOSAVE_TRANSACTION_VERSION {
+        return Err(format!(
+            "validate_autosave_journal failed for {}: unsupported version {}",
+            autosave_journal_path(trusted_root).display(),
+            journal.version
+        ));
+    }
+    if journal.operation_id.trim().is_empty() {
+        return Err(format!(
+            "validate_autosave_journal failed for {}: operation_id is required",
+            autosave_journal_path(trusted_root).display()
+        ));
+    }
+    if !is_valid_autosave_operation_id(&journal.operation_id) {
+        return Err(format!(
+            "validate_autosave_journal failed for {}: operation_id has an invalid format",
+            autosave_journal_path(trusted_root).display()
+        ));
+    }
+    validate_index_paths(
+        trusted_root,
+        &get_index_path(trusted_root.path()),
+        &journal.next_index,
+    )
+    .map_err(|issue| issue.display())?;
+    let indexed_entry = journal
+        .next_index
+        .entries
+        .get(&journal.note_id)
+        .ok_or_else(|| {
+            format!(
+            "validate_autosave_journal failed for {}: next_index is missing the recorded note id",
+            autosave_journal_path(trusted_root).display()
+        )
+        })?;
+    if indexed_entry.relative_path != journal.next_relative_path {
+        return Err(format!(
+            "validate_autosave_journal failed for {}: next_index path does not match the recorded next note path",
+            autosave_journal_path(trusted_root).display()
+        ));
+    }
+    let next_note_path = validated_library_file_path(trusted_root, &journal.next_relative_path)?;
+    let note_temp_path =
+        validated_library_file_path(trusted_root, &journal.note_temp_relative_path)?;
+    let expected_note_temp_path =
+        note_temp_path_for_operation(&next_note_path, &journal.operation_id)?;
+    if note_temp_path != expected_note_temp_path {
+        return Err(format!(
+            "validate_autosave_journal failed for {}: note temp path does not match the recorded operation id",
+            autosave_journal_path(trusted_root).display()
+        ));
+    }
+    let index_temp_path =
+        validated_library_file_path(trusted_root, &journal.index_temp_relative_path)?;
+    let expected_index_temp_path =
+        index_temp_path_for_operation(trusted_root, &journal.operation_id);
+    if index_temp_path != expected_index_temp_path {
+        return Err(format!(
+            "validate_autosave_journal failed for {}: index temp path does not match the recorded operation id",
+            autosave_journal_path(trusted_root).display()
+        ));
+    }
+    if journal.previous_relative_path.is_some() != journal.previous_note_digest.is_some() {
+        return Err(format!(
+            "validate_autosave_journal failed for {}: previous note path and digest must either both be present or both be absent",
+            autosave_journal_path(trusted_root).display()
+        ));
+    }
+    let previous_note_path = journal
+        .previous_relative_path
+        .as_deref()
+        .map(|path| validated_library_file_path(trusted_root, path))
+        .transpose()?;
+    validate_journal_previous_entry_against_current_index(trusted_root, &journal)?;
+
+    Ok(ResolvedAutosaveJournal {
+        journal,
+        next_note_path,
+        note_temp_path,
+        index_temp_path,
+        previous_note_path,
+    })
+}
+
+fn cleanup_pending_autosave_journal_files(trusted_root: &TrustedLibraryRoot) -> Result<(), String> {
+    remove_regular_file_if_exists_and_sync(
+        &autosave_journal_next_path(trusted_root),
+        "cleanup_autosave_journal_candidate",
+    )?;
+    remove_regular_file_if_exists_and_sync(
+        &autosave_journal_path(trusted_root),
+        "cleanup_autosave_journal",
+    )
+}
+
+fn discover_pending_autosave_journal(
+    trusted_root: &TrustedLibraryRoot,
+) -> Result<Option<AutosaveTransactionJournal>, String> {
+    let primary_path = autosave_journal_path(trusted_root);
+    let next_path = autosave_journal_next_path(trusted_root);
+    let primary = read_optional_autosave_journal(&primary_path);
+    let next = read_optional_autosave_journal(&next_path);
+
+    match (primary, next) {
+        (OptionalJournalState::Missing, OptionalJournalState::Missing) => Ok(None),
+        (OptionalJournalState::Parsed(primary), OptionalJournalState::Missing) => {
+            Ok(Some(*primary))
+        }
+        (OptionalJournalState::Parsed(primary), OptionalJournalState::Parsed(next_journal)) => {
+            if primary.operation_id != next_journal.operation_id {
+                return Err(format!(
+                    "validate_autosave_journal failed for {} and {}: journal identities differ",
+                    primary_path.display(),
+                    next_path.display()
+                ));
+            }
+            remove_regular_file_if_exists_and_sync(
+                &next_path,
+                "cleanup_stale_autosave_journal_candidate",
+            )?;
+            Ok(Some(*primary))
+        }
+        (OptionalJournalState::Parsed(primary), OptionalJournalState::Invalid(_)) => {
+            remove_regular_file_if_exists_and_sync(
+                &next_path,
+                "cleanup_invalid_autosave_journal_candidate",
+            )?;
+            Ok(Some(*primary))
+        }
+        (OptionalJournalState::Missing, OptionalJournalState::Parsed(next_journal)) => {
+            validate_trusted_publish_destination(
+                trusted_root,
+                &primary_path,
+                "promote_autosave_journal_candidate",
+            )?;
+            publish_temp_file(
+                &next_path,
+                &primary_path,
+                "promote_autosave_journal_candidate",
+            )?;
+            Ok(Some(*next_journal))
+        }
+        (OptionalJournalState::Missing, OptionalJournalState::Invalid(reason)) => Err(reason),
+        (OptionalJournalState::Invalid(reason), OptionalJournalState::Missing) => Err(reason),
+        (OptionalJournalState::Invalid(reason), OptionalJournalState::Parsed(_)) => Err(reason),
+        (OptionalJournalState::Invalid(reason), OptionalJournalState::Invalid(_)) => Err(reason),
+    }
+}
+
+fn cleanup_prepared_autosave_transaction(
+    trusted_root: &TrustedLibraryRoot,
+    resolved: &ResolvedAutosaveJournal,
+) -> Result<(), String> {
+    remove_regular_file_if_exists_and_sync(&resolved.note_temp_path, "cleanup_prepared_note_temp")?;
+    remove_regular_file_if_exists_and_sync(
+        &resolved.index_temp_path,
+        "cleanup_prepared_index_temp",
+    )?;
+    cleanup_pending_autosave_journal_files(trusted_root)
+}
+
+fn publish_recovered_note_file(
+    trusted_root: &TrustedLibraryRoot,
+    resolved: &ResolvedAutosaveJournal,
+    faults: &impl AutosaveFaultInjector,
+) -> Result<(), String> {
+    validate_existing_trusted_file(
+        trusted_root,
+        &resolved.note_temp_path,
+        "validate_recovered_note_temp",
+    )?;
+    if sha256_hex(&read_trusted_file_bytes(
+        trusted_root,
+        &resolved.note_temp_path,
+        "verify_recovered_note_temp_digest",
+    )?) != resolved.journal.next_note_digest
+    {
+        return Err(format!(
+            "verify_recovered_note_temp_digest failed for {}: staged note bytes do not match the recorded digest",
+            resolved.note_temp_path.display()
+        ));
+    }
+    validate_autosave_note_publish_target(
+        trusted_root,
+        &resolved.next_note_path,
+        resolved.previous_note_path.as_deref(),
+        resolved.journal.previous_note_digest.as_deref(),
+        &resolved.journal.next_note_digest,
+        "publish_recovered_note",
+    )?;
+    faults.check(AutosaveFaultPoint::NotePublish)?;
+    publish_temp_file(
+        &resolved.note_temp_path,
+        &resolved.next_note_path,
+        "publish_recovered_note",
+    )?;
+    faults.check(AutosaveFaultPoint::NotePublishReported)?;
+    Ok(())
+}
+
+fn stage_autosave_index_temp_if_missing(
+    trusted_root: &TrustedLibraryRoot,
+    resolved: &ResolvedAutosaveJournal,
+) -> Result<(), String> {
+    match fs::symlink_metadata(&resolved.index_temp_path) {
+        Ok(_) => {
+            validate_existing_trusted_file(
+                trusted_root,
+                &resolved.index_temp_path,
+                "validate_recovered_index_temp",
+            )?;
+            let bytes = read_trusted_file_bytes(
+                trusted_root,
+                &resolved.index_temp_path,
+                "validate_recovered_index_temp",
+            )?;
+            let parsed = serde_json::from_slice::<NoteIndex>(&bytes).map_err(|error| {
+                format!(
+                    "parse_recovered_index_temp failed for {}: {error}",
+                    resolved.index_temp_path.display()
+                )
+            })?;
+            if parsed != resolved.journal.next_index {
+                return Err(format!(
+                    "validate_recovered_index_temp failed for {}: staged index bytes do not match the recorded next index",
+                    resolved.index_temp_path.display()
+                ));
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let bytes =
+                serde_json::to_vec_pretty(&resolved.journal.next_index).map_err(|error| {
+                    format!(
+                        "serialize_recovered_index failed for {}: {error}",
+                        get_index_path(trusted_root.path()).display()
+                    )
+                })?;
+            create_synced_temp_file_with_faults(
+                &resolved.index_temp_path,
+                &bytes,
+                "stage_recovered_index_temp",
+                AutosaveFaultPoint::IndexTempCreate,
+                AutosaveFaultPoint::IndexTempWrite,
+                AutosaveFaultPoint::IndexTempSync,
+                &NoopAutosaveFaultInjector,
+            )
+        }
+        Err(error) => Err(format!(
+            "inspect_recovered_index_temp failed for {}: {error}",
+            resolved.index_temp_path.display()
+        )),
+    }
+}
+
+fn publish_staged_autosave_index(
+    trusted_root: &TrustedLibraryRoot,
+    resolved: &ResolvedAutosaveJournal,
+    faults: &impl AutosaveFaultInjector,
+) -> Result<(), String> {
+    if !current_index_matches_digest(
+        trusted_root,
+        resolved.journal.expected_index_digest.as_deref(),
+    )? {
+        return Err(format!(
+            "verify_autosave_index_precondition failed for {}: the index changed while the autosave transaction was in progress",
+            get_index_path(trusted_root.path()).display()
+        ));
+    }
+    stage_autosave_index_temp_if_missing(trusted_root, resolved)?;
+    validate_trusted_publish_destination(
+        trusted_root,
+        &get_index_path(trusted_root.path()),
+        "publish_autosave_index",
+    )?;
+    faults.check(AutosaveFaultPoint::IndexPublish)?;
+    publish_temp_file(
+        &resolved.index_temp_path,
+        &get_index_path(trusted_root.path()),
+        "publish_autosave_index",
+    )?;
+    faults.check(AutosaveFaultPoint::IndexPublishReported)?;
+    Ok(())
+}
+
+fn cleanup_index_published_autosave_transaction(
+    trusted_root: &TrustedLibraryRoot,
+    resolved: &ResolvedAutosaveJournal,
+    faults: &impl AutosaveFaultInjector,
+) -> Result<(), String> {
+    if let (Some(previous_path), Some(previous_digest)) = (
+        resolved.previous_note_path.as_ref(),
+        resolved.journal.previous_note_digest.as_deref(),
+    ) {
+        if previous_path != &resolved.next_note_path {
+            match fs::symlink_metadata(previous_path) {
+                Ok(_) => {
+                    validate_existing_trusted_file(
+                        trusted_root,
+                        previous_path,
+                        "validate_old_note_cleanup",
+                    )?;
+                    if !file_digest_matches(
+                        trusted_root,
+                        previous_path,
+                        previous_digest,
+                        "validate_old_note_cleanup",
+                    )? {
+                        return Err(format!(
+                            "validate_old_note_cleanup failed for {}: content no longer matches the recorded previous note digest",
+                            previous_path.display()
+                        ));
+                    }
+                    faults.check(AutosaveFaultPoint::OldFileCleanup)?;
+                    fs::remove_file(previous_path).map_err(|error| {
+                        format!(
+                            "remove_old_note_cleanup failed for {}: {error}",
+                            previous_path.display()
+                        )
+                    })?;
+                    sync_parent_directory(previous_path, "remove_old_note_cleanup")?;
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(format!(
+                        "inspect_old_note_cleanup failed for {}: {error}",
+                        previous_path.display()
+                    ))
+                }
+            }
+        }
+    }
+
+    remove_regular_file_if_exists_and_sync(&resolved.note_temp_path, "cleanup_note_temp")?;
+    remove_regular_file_if_exists_and_sync(&resolved.index_temp_path, "cleanup_index_temp")?;
+    faults.check(AutosaveFaultPoint::JournalCleanup)?;
+    cleanup_pending_autosave_journal_files(trusted_root)
+}
+
+fn recover_pending_note_save_unlocked_with_faults(
+    trusted_root: &TrustedLibraryRoot,
+    faults: &impl AutosaveFaultInjector,
+) -> Result<(), String> {
+    loop {
+        let Some(journal) = discover_pending_autosave_journal(trusted_root)? else {
+            return Ok(());
+        };
+        let resolved = resolve_autosave_journal(trusted_root, journal)?;
+
+        match resolved.journal.phase {
+            AutosaveTransactionPhase::Prepared => {
+                cleanup_prepared_autosave_transaction(trusted_root, &resolved)?;
+            }
+            AutosaveTransactionPhase::Staged => {
+                if !file_digest_matches(
+                    trusted_root,
+                    &resolved.next_note_path,
+                    &resolved.journal.next_note_digest,
+                    "verify_staged_note",
+                )? {
+                    match fs::symlink_metadata(&resolved.note_temp_path) {
+                        Ok(_) => publish_recovered_note_file(trusted_root, &resolved, faults)?,
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                            if current_index_matches_digest(
+                                trusted_root,
+                                resolved.journal.expected_index_digest.as_deref(),
+                            )? {
+                                cleanup_prepared_autosave_transaction(trusted_root, &resolved)?;
+                                continue;
+                            }
+                            return Err(format!(
+                                "recover_staged_note failed for {}: neither the final note nor the staged temp file is available",
+                                resolved.next_note_path.display()
+                            ));
+                        }
+                        Err(error) => {
+                            return Err(format!(
+                                "inspect_staged_note_temp failed for {}: {error}",
+                                resolved.note_temp_path.display()
+                            ))
+                        }
+                    }
+                }
+
+                let mut next_journal = resolved.journal.clone();
+                next_journal.phase = AutosaveTransactionPhase::NotePublished;
+                persist_autosave_journal(trusted_root, &next_journal, faults)?;
+            }
+            AutosaveTransactionPhase::NotePublished => {
+                if !file_digest_matches(
+                    trusted_root,
+                    &resolved.next_note_path,
+                    &resolved.journal.next_note_digest,
+                    "verify_note_published",
+                )? {
+                    return Err(format!(
+                        "verify_note_published failed for {}: content no longer matches the recorded note digest",
+                        resolved.next_note_path.display()
+                    ));
+                }
+
+                if !current_index_matches_next_index(trusted_root, &resolved.journal.next_index)? {
+                    publish_staged_autosave_index(trusted_root, &resolved, faults)?;
+                }
+
+                let mut next_journal = resolved.journal.clone();
+                next_journal.phase = AutosaveTransactionPhase::IndexPublished;
+                persist_autosave_journal(trusted_root, &next_journal, faults)?;
+            }
+            AutosaveTransactionPhase::IndexPublished => {
+                if !file_digest_matches(
+                    trusted_root,
+                    &resolved.next_note_path,
+                    &resolved.journal.next_note_digest,
+                    "verify_index_published_note",
+                )? {
+                    return Err(format!(
+                        "verify_index_published_note failed for {}: content no longer matches the recorded note digest",
+                        resolved.next_note_path.display()
+                    ));
+                }
+                if !current_index_matches_next_index(trusted_root, &resolved.journal.next_index)? {
+                    return Err(format!(
+                        "verify_index_published failed for {}: the current index does not match the committed autosave transaction",
+                        get_index_path(trusted_root.path()).display()
+                    ));
+                }
+                cleanup_index_published_autosave_transaction(trusted_root, &resolved, faults)?;
+            }
+        }
+    }
+}
+
+fn recover_pending_note_save_unlocked(trusted_root: &TrustedLibraryRoot) -> Result<(), String> {
+    recover_pending_note_save_unlocked_with_faults(trusted_root, &NoopAutosaveFaultInjector)
+}
+
 fn write_note_file_atomically_after_temp_hook<F>(
     trusted_root: &TrustedLibraryRoot,
     destination: &Path,
@@ -1842,17 +2694,7 @@ where
     if let Err(error) = validate_note_destination_before_replace(trusted_root, destination) {
         return Err(cleanup_file_with_reason(&tmp_path, error));
     }
-    if let Err(error) = fs::rename(&tmp_path, destination) {
-        return Err(cleanup_file_with_reason(
-            &tmp_path,
-            format!(
-                "replace_note failed for {} using {}: {}",
-                destination.display(),
-                tmp_path.display(),
-                error
-            ),
-        ));
-    }
+    publish_temp_file(&tmp_path, destination, "replace_note")?;
 
     Ok(())
 }
@@ -2045,7 +2887,7 @@ fn remove_trusted_directory_tree(
 }
 
 pub fn generate_note_id(relative_file_path: &str) -> String {
-    let mut hasher = sha1::Sha1::new();
+    let mut hasher = Sha1::new();
     hasher.update(relative_file_path.as_bytes());
     let hash = format!("{:x}", hasher.finalize());
     format!("note-{}", &hash[..12])
@@ -2240,6 +3082,7 @@ pub fn rename_folder(auto_save_dir: &Path, from: &str, to: &str) -> Result<Vec<S
         .map_err(|error| error.display("validate_target_folder"))?;
 
     let _index_guard = lock_note_index();
+    recover_pending_note_save_unlocked(&trusted_root)?;
     let index_snapshot = require_index_snapshot(&trusted_root)?;
     let mut index = index_snapshot.index.clone();
 
@@ -2306,6 +3149,7 @@ pub fn delete_folder(
     }
 
     let _index_guard = lock_note_index();
+    recover_pending_note_save_unlocked(&trusted_root)?;
     let index_snapshot = require_index_snapshot(&trusted_root)?;
     let folder_relative = normalize_library_relative_path(trusted_root.path(), &normalized)
         .map_err(|error| error.display("validate_folder_path"))?;
@@ -2376,11 +3220,54 @@ pub fn delete_folder(
     })
 }
 
-pub fn auto_save_markdown_note(
-    auto_save_dir: &Path,
+fn validate_autosave_note_publish_target(
+    trusted_root: &TrustedLibraryRoot,
+    target_path: &Path,
+    previous_path: Option<&Path>,
+    previous_digest: Option<&str>,
+    next_digest: &str,
+    operation: &str,
+) -> Result<(), String> {
+    validate_note_destination_before_replace(trusted_root, target_path)?;
+    match fs::symlink_metadata(target_path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Ok(_) => {
+            validate_existing_trusted_file(trusted_root, target_path, operation)?;
+            if Some(target_path) == previous_path {
+                let expected_previous = previous_digest.ok_or_else(|| {
+                    format!(
+                        "{operation} failed for {}: previous note digest is required for an in-place autosave update",
+                        target_path.display()
+                    )
+                })?;
+                if !file_digest_matches(trusted_root, target_path, expected_previous, operation)? {
+                    return Err(format!(
+                        "{operation} failed for {}: the current file no longer matches the recorded previous note digest",
+                        target_path.display()
+                    ));
+                }
+                return Ok(());
+            }
+            if file_digest_matches(trusted_root, target_path, next_digest, operation)? {
+                return Ok(());
+            }
+            Err(format!(
+                "{operation} failed for {}: the destination already exists with unexpected content",
+                target_path.display()
+            ))
+        }
+        Err(error) => Err(format!(
+            "{operation} failed for {}: {error}",
+            target_path.display()
+        )),
+    }
+}
+
+fn auto_save_markdown_note_with_faults(
+    trusted_root: &TrustedLibraryRoot,
     payload: &AutoSavePayload,
+    faults: &impl AutosaveFaultInjector,
 ) -> Result<AutoSaveResult, String> {
-    let trusted_root = TrustedLibraryRoot::open(auto_save_dir)?;
     let safe_id = {
         let sanitized = sanitize_note_id(&payload.note_id);
         if sanitized.is_empty() {
@@ -2398,14 +3285,15 @@ pub fn auto_save_markdown_note(
     };
 
     let _index_guard = lock_note_index();
-    let index_snapshot = require_index_snapshot(&trusted_root)?;
-    let mut index = index_snapshot.index.clone();
+    recover_pending_note_save_unlocked(trusted_root)?;
+    let index_snapshot = require_index_snapshot(trusted_root)?;
+    let mut next_index = index_snapshot.index.clone();
 
-    let target_dir = ensure_library_subdirectory(&trusted_root, &safe_folder_path)?;
-    let existing_entry = index.entries.get(&safe_id).cloned();
+    let target_dir = ensure_library_subdirectory(trusted_root, &safe_folder_path)?;
+    let existing_entry = next_index.entries.get(&safe_id).cloned();
     let existing_path = existing_entry
         .as_ref()
-        .map(|entry| validated_library_file_path(&trusted_root, &entry.relative_path))
+        .map(|entry| validated_library_file_path(trusted_root, &entry.relative_path))
         .transpose()?;
 
     let title_for_slug = if payload.title.is_empty() {
@@ -2422,39 +3310,119 @@ pub fn auto_save_markdown_note(
         None
     };
     let stored_markdown = embed_manual_title_metadata(&payload.content, manual_title.as_deref());
+    let note_bytes = to_platform_line_endings(&stored_markdown).into_bytes();
+    let created_at = existing_entry
+        .as_ref()
+        .map(|entry| entry.created_at)
+        .unwrap_or_else(now_millis);
+    let previous_note_digest = existing_path
+        .as_ref()
+        .map(|path| read_existing_file_digest(trusted_root, path, "read_previous_note_digest"))
+        .transpose()?
+        .flatten();
+    let previous_relative_path = existing_path
+        .as_ref()
+        .zip(previous_note_digest.as_ref())
+        .map(|(path, _)| relative_path(trusted_root.path(), path));
+    let operation_id = next_autosave_operation_id();
+    let note_temp_path = note_temp_path_for_operation(&next_file_path, &operation_id)?;
+    let index_temp_path = index_temp_path_for_operation(trusted_root, &operation_id);
 
-    validate_no_symlink_beneath_root(&trusted_root, &safe_folder_path)
-        .map_err(|error| error.display("validate_note_folder"))?;
-    write_note_file_atomically(
-        &trusted_root,
-        &next_file_path,
-        &to_platform_line_endings(&stored_markdown),
+    let relative_path_string = relative_path(trusted_root.path(), &next_file_path);
+    next_index.entries.insert(
+        safe_id.clone(),
+        NoteIndexEntry {
+            relative_path: relative_path_string.clone(),
+            created_at,
+            manual_title: manual_title.clone(),
+            is_pinned: payload.is_pinned,
+        },
+    );
+
+    let journal_base = AutosaveTransactionJournal {
+        version: AUTOSAVE_TRANSACTION_VERSION,
+        operation_id: operation_id.clone(),
+        phase: AutosaveTransactionPhase::Prepared,
+        note_id: safe_id.clone(),
+        previous_relative_path,
+        next_relative_path: relative_path_string,
+        note_temp_relative_path: relative_path(trusted_root.path(), &note_temp_path),
+        index_temp_relative_path: relative_path(trusted_root.path(), &index_temp_path),
+        expected_index_digest: index_snapshot.original_bytes.as_deref().map(sha256_hex),
+        next_index: next_index.clone(),
+        next_note_digest: sha256_hex(&note_bytes),
+        previous_note_digest,
+    };
+    let journal_index_bytes = serde_json::to_vec_pretty(&next_index).map_err(|error| {
+        format!(
+            "serialize_autosave_index failed for {}: {error}",
+            get_index_path(trusted_root.path()).display()
+        )
+    })?;
+
+    persist_autosave_journal(trusted_root, &journal_base, faults)?;
+    create_synced_temp_file_with_faults(
+        &note_temp_path,
+        &note_bytes,
+        "write_note_temp",
+        AutosaveFaultPoint::NoteTempCreate,
+        AutosaveFaultPoint::NoteTempWrite,
+        AutosaveFaultPoint::NoteTempSync,
+        faults,
+    )?;
+    create_synced_temp_file_with_faults(
+        &index_temp_path,
+        &journal_index_bytes,
+        "write_index_temp",
+        AutosaveFaultPoint::IndexTempCreate,
+        AutosaveFaultPoint::IndexTempWrite,
+        AutosaveFaultPoint::IndexTempSync,
+        faults,
     )?;
 
-    // Remove old file if path changed
-    if let Some(ref old_path) = existing_path {
-        if to_posix(&old_path.to_string_lossy()) != to_posix(&next_file_path.to_string_lossy()) {
-            let old_relative = old_path
-                .strip_prefix(trusted_root.path())
-                .map_err(|error| {
-                    format!(
-                        "validate_old_note failed for {}: {}",
-                        old_path.display(),
-                        error
-                    )
-                })?;
-            validate_no_symlink_beneath_root(&trusted_root, old_relative)
-                .map_err(|error| error.display("validate_old_note"))?;
-            validate_existing_trusted_file(&trusted_root, old_path, "validate_old_note")?;
-            fs::remove_file(old_path).map_err(|error| {
-                format!(
-                    "remove_old_note failed for {}: {}",
-                    old_path.display(),
-                    error
-                )
-            })?;
-        }
+    let mut staged_journal = journal_base.clone();
+    staged_journal.phase = AutosaveTransactionPhase::Staged;
+    persist_autosave_journal(trusted_root, &staged_journal, faults)?;
+
+    validate_no_symlink_beneath_root(trusted_root, &safe_folder_path)
+        .map_err(|error| error.display("validate_note_folder"))?;
+    validate_autosave_note_publish_target(
+        trusted_root,
+        &next_file_path,
+        existing_path.as_deref(),
+        staged_journal.previous_note_digest.as_deref(),
+        &staged_journal.next_note_digest,
+        "publish_note",
+    )?;
+    if sha256_hex(&read_trusted_file_bytes(
+        trusted_root,
+        &note_temp_path,
+        "verify_note_temp_digest",
+    )?) != staged_journal.next_note_digest
+    {
+        return Err(format!(
+            "verify_note_temp_digest failed for {}: staged note bytes do not match the recorded digest",
+            note_temp_path.display()
+        ));
     }
+    faults.check(AutosaveFaultPoint::NotePublish)?;
+    publish_temp_file(&note_temp_path, &next_file_path, "publish_note")?;
+    faults.check(AutosaveFaultPoint::NotePublishReported)?;
+
+    let mut note_published_journal = staged_journal.clone();
+    note_published_journal.phase = AutosaveTransactionPhase::NotePublished;
+    persist_autosave_journal(trusted_root, &note_published_journal, faults)?;
+
+    let resolved_note_published =
+        resolve_autosave_journal(trusted_root, note_published_journal.clone())?;
+    publish_staged_autosave_index(trusted_root, &resolved_note_published, faults)?;
+
+    let mut index_published_journal = note_published_journal.clone();
+    index_published_journal.phase = AutosaveTransactionPhase::IndexPublished;
+    persist_autosave_journal(trusted_root, &index_published_journal, faults)?;
+
+    let resolved_index_published = resolve_autosave_journal(trusted_root, index_published_journal)?;
+    cleanup_index_published_autosave_transaction(trusted_root, &resolved_index_published, faults)?;
 
     let metadata = fs::symlink_metadata(&next_file_path).map_err(|error| {
         format!(
@@ -2469,9 +3437,6 @@ pub fn auto_save_markdown_note(
             next_file_path.display()
         ));
     }
-    let created_at = existing_entry
-        .map(|e| e.created_at)
-        .unwrap_or_else(now_millis);
     let updated_at = system_time_to_millis(metadata.modified().map_err(|error| {
         format!(
             "read_saved_note_modified_time failed for {}: {}",
@@ -2480,27 +3445,20 @@ pub fn auto_save_markdown_note(
         )
     })?);
 
-    let rel = relative_path(trusted_root.path(), &next_file_path);
-
-    index.entries.insert(
-        safe_id.clone(),
-        NoteIndexEntry {
-            relative_path: rel,
-            created_at,
-            manual_title,
-            is_pinned: payload.is_pinned,
-        },
-    );
-
-    write_index_from_snapshot(&trusted_root, &index_snapshot, &index)
-        .map_err(index_write_failure_to_string)?;
-
     Ok(AutoSaveResult {
         file_path: next_file_path.to_string_lossy().to_string(),
         note_id: safe_id,
         created_at,
         updated_at,
     })
+}
+
+pub fn auto_save_markdown_note(
+    auto_save_dir: &Path,
+    payload: &AutoSavePayload,
+) -> Result<AutoSaveResult, String> {
+    let trusted_root = TrustedLibraryRoot::open(auto_save_dir)?;
+    auto_save_markdown_note_with_faults(&trusted_root, payload, &NoopAutosaveFaultInjector)
 }
 
 fn materialize_notes(index: &NoteIndex, scan: &LibraryScan) -> Vec<LoadedNote> {
@@ -2595,6 +3553,21 @@ fn load_markdown_library_with_fs<F: LibraryFileSystem>(
     let index_source_path = get_index_path(trusted_root.path());
 
     let _index_guard = lock_note_index();
+    if let Err(reason) = recover_pending_note_save_unlocked(&trusted_root) {
+        return MarkdownLibraryLoadResult {
+            notes: Vec::new(),
+            folders: Vec::new(),
+            load_state: NoteLoadState::Incomplete,
+            issues: vec![NoteLoadIssue::new(
+                NoteLoadIssueKind::Index,
+                "recover_pending_note_save",
+                &autosave_journal_path(&trusted_root),
+                reason,
+            )],
+            index_source_path: Some(index_source_path.to_string_lossy().to_string()),
+            index_backup_path: None,
+        };
+    }
     let index_snapshot = match read_index_state(&trusted_root) {
         IndexReadState::Ready(snapshot) => snapshot,
         IndexReadState::Corrupt(state) => {
@@ -2686,6 +3659,7 @@ pub fn resolve_note_file_path(
 ) -> Result<Option<PathBuf>, String> {
     let trusted_root = TrustedLibraryRoot::open(auto_save_dir)?;
     let _index_guard = lock_note_index();
+    recover_pending_note_save_unlocked(&trusted_root)?;
     resolve_note_file_path_unlocked(&trusted_root, note_id)
 }
 
@@ -2739,9 +3713,10 @@ pub fn remove_note_from_index_if_path(
 
     let trusted_root = resolve_trusted_library_root(auto_save_dir)
         .map_err(|error| error.display("validate_library_root"))?;
+    let _index_guard = lock_note_index();
+    recover_pending_note_save_unlocked(&trusted_root)?;
     let expected_file_path =
         canonicalize_expected_library_path(&trusted_root, auto_save_dir, expected_file_path)?;
-    let _index_guard = lock_note_index();
     remove_note_from_index_if_path_unlocked(&trusted_root, note_id, &expected_file_path)
 }
 
@@ -2793,6 +3768,7 @@ where
     let trusted_root = resolve_trusted_library_root(auto_save_dir)
         .map_err(|error| error.display("validate_library_root"))?;
     let _index_guard = lock_note_index();
+    recover_pending_note_save_unlocked(&trusted_root)?;
     let file_path = match resolve_note_file_path_unlocked(&trusted_root, note_id)? {
         Some(p) => p,
         None => return Ok(false),
@@ -2937,6 +3913,10 @@ pub fn migrate_notes(src_dir: &Path, dst_dir: &Path) -> Result<MigrationResult, 
         .then_some(dst_root.path());
 
     let _index_guard = lock_note_index();
+    recover_pending_note_save_unlocked(&src_root)?;
+    if src_root.path() != dst_root.path() {
+        recover_pending_note_save_unlocked(&dst_root)?;
+    }
     let src_snapshot = require_index_snapshot(&src_root)?;
     let dst_snapshot = require_index_snapshot(&dst_root)?;
     let src_scan = scan_library_tree(&ProductionFileSystem, &src_root, skip_src_subtree, true);
@@ -3275,6 +4255,133 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct FailOnceAutosaveFaultInjector {
+        fail_on_nth_hit: Mutex<HashMap<AutosaveFaultPoint, usize>>,
+        seen_hits: Mutex<HashMap<AutosaveFaultPoint, usize>>,
+    }
+
+    impl FailOnceAutosaveFaultInjector {
+        fn fail_on(point: AutosaveFaultPoint, nth_hit: usize) -> Self {
+            Self {
+                fail_on_nth_hit: Mutex::new(HashMap::from([(point, nth_hit)])),
+                seen_hits: Mutex::new(HashMap::new()),
+            }
+        }
+    }
+
+    impl AutosaveFaultInjector for FailOnceAutosaveFaultInjector {
+        fn check(&self, point: AutosaveFaultPoint) -> Result<(), String> {
+            let mut seen_hits = self.seen_hits.lock().unwrap();
+            let hit = seen_hits.entry(point).or_insert(0);
+            *hit += 1;
+            let mut fail_on_nth_hit = self.fail_on_nth_hit.lock().unwrap();
+            if fail_on_nth_hit
+                .get(&point)
+                .copied()
+                .is_some_and(|expected_hit| expected_hit == *hit)
+            {
+                fail_on_nth_hit.remove(&point);
+                return Err(format!("injected autosave fault at {point:?}"));
+            }
+            Ok(())
+        }
+    }
+
+    fn autosave_payload(
+        note_id: &str,
+        title: &str,
+        content: &str,
+        folder_path: Option<&str>,
+    ) -> AutoSavePayload {
+        AutoSavePayload {
+            note_id: note_id.to_string(),
+            title: title.to_string(),
+            content: content.to_string(),
+            folder_path: folder_path.map(str::to_string),
+            is_title_manual: Some(true),
+            is_pinned: Some(true),
+        }
+    }
+
+    fn count_markdown_files_recursively(root: &Path) -> Result<usize, String> {
+        fn visit(dir: &Path, count: &mut usize) -> Result<(), String> {
+            for entry in fs::read_dir(dir).map_err(|e| e.to_string())? {
+                let entry = entry.map_err(|e| e.to_string())?;
+                let path = entry.path();
+                let metadata = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+                if metadata.is_dir() {
+                    visit(&path, count)?;
+                } else if metadata.is_file() && is_markdown_path(&path) {
+                    *count += 1;
+                }
+            }
+            Ok(())
+        }
+
+        let mut count = 0;
+        visit(root, &mut count)?;
+        Ok(count)
+    }
+
+    fn count_autosave_artifacts_recursively(root: &Path) -> Result<usize, String> {
+        fn visit(dir: &Path, count: &mut usize) -> Result<(), String> {
+            for entry in fs::read_dir(dir).map_err(|e| e.to_string())? {
+                let entry = entry.map_err(|e| e.to_string())?;
+                let path = entry.path();
+                let metadata = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+                if metadata.is_dir() {
+                    visit(&path, count)?;
+                    continue;
+                }
+                let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                    continue;
+                };
+                if name == AUTOSAVE_JOURNAL_FILENAME
+                    || name == AUTOSAVE_JOURNAL_TEMP_FILENAME
+                    || name.starts_with(".hwan-note-write-")
+                    || name.starts_with(".hwan-note-index-")
+                {
+                    *count += 1;
+                }
+            }
+            Ok(())
+        }
+
+        let mut count = 0;
+        visit(root, &mut count)?;
+        Ok(count)
+    }
+
+    fn load_ready_note_by_id(root: &Path, note_id: &str) -> Result<LoadedNote, String> {
+        let load = load_markdown_library(root);
+        assert_eq!(load.load_state, NoteLoadState::Ready);
+        load.notes
+            .into_iter()
+            .find(|note| note.note_id == note_id)
+            .ok_or_else(|| format!("expected note {note_id}"))
+    }
+
+    fn assert_recovery_load_incomplete_with_reason(root: &Path, fragment: &str) {
+        let load = load_markdown_library(root);
+        assert_eq!(load.load_state, NoteLoadState::Incomplete);
+        assert!(load
+            .issues
+            .iter()
+            .any(|issue| issue.reason.contains(fragment) || issue.operation.contains(fragment)));
+    }
+
+    fn run_faulted_autosave(
+        root: &Path,
+        payload: &AutoSavePayload,
+        point: AutosaveFaultPoint,
+        nth_hit: usize,
+    ) -> Result<AutoSaveResult, String> {
+        let trusted_root = TrustedLibraryRoot::open(root)?;
+        let injector = FailOnceAutosaveFaultInjector::fail_on(point, nth_hit);
+        auto_save_markdown_note_with_faults(&trusted_root, payload, &injector)
+    }
+
     #[cfg(unix)]
     fn create_directory_link(link: &Path, target: &Path) -> Result<bool, String> {
         match std::os::unix::fs::symlink(target, link) {
@@ -3426,6 +4533,797 @@ mod tests {
                 && test_paths_equal(Path::new(&issue.path), path)
                 && issue.reason.contains(reason_fragment)
         }));
+    }
+
+    #[test]
+    fn autosave_note_temp_write_failure_reconciles_cleanly_on_restart() {
+        let dir = make_temp_dir("autosave-note-temp-write-failure");
+        let result = (|| -> Result<(), String> {
+            let trusted_root = TrustedLibraryRoot::open(&dir)?;
+            let injector =
+                FailOnceAutosaveFaultInjector::fail_on(AutosaveFaultPoint::NoteTempWrite, 1);
+
+            let error = auto_save_markdown_note_with_faults(
+                &trusted_root,
+                &autosave_payload("temp-fail", "Temp fail", "# Temp fail", None),
+                &injector,
+            )
+            .unwrap_err();
+            assert!(error.contains("NoteTempWrite") || error.contains("write_note_temp"));
+
+            let load = load_markdown_library(&dir);
+            assert_eq!(load.load_state, NoteLoadState::Ready);
+            assert!(load.notes.is_empty());
+            assert_eq!(list_markdown_files(&dir, &dir)?.len(), 0);
+            assert!(!autosave_journal_path(&trusted_root).exists());
+            assert!(!autosave_journal_next_path(&trusted_root).exists());
+
+            auto_save_markdown_note(
+                &dir,
+                &autosave_payload("temp-fail", "Recovered", "# Recovered", None),
+            )?;
+            assert_eq!(count_markdown_files_recursively(&dir)?, 1);
+            Ok(())
+        })();
+        cleanup_temp_dir(&dir);
+        result.unwrap();
+    }
+
+    #[test]
+    fn autosave_note_publish_failure_recovers_folder_move_without_duplicates() {
+        let dir = make_temp_dir("autosave-note-publish-recovery");
+        let result = (|| -> Result<(), String> {
+            auto_save_markdown_note(
+                &dir,
+                &autosave_payload("stable-note", "Alpha", "# Alpha", Some("alpha")),
+            )?;
+            let before = load_markdown_notes(&dir)?
+                .into_iter()
+                .find(|note| note.note_id == "stable-note")
+                .ok_or_else(|| "baseline note missing".to_string())?;
+            let trusted_root = TrustedLibraryRoot::open(&dir)?;
+            let injector =
+                FailOnceAutosaveFaultInjector::fail_on(AutosaveFaultPoint::NotePublish, 1);
+
+            let error = auto_save_markdown_note_with_faults(
+                &trusted_root,
+                &autosave_payload("stable-note", "Beta", "# Beta", Some("beta")),
+                &injector,
+            )
+            .unwrap_err();
+            assert!(error.contains("NotePublish") || error.contains("publish_note"));
+            assert!(
+                autosave_journal_path(&trusted_root).exists()
+                    || autosave_journal_next_path(&trusted_root).exists()
+            );
+
+            let load = load_markdown_library(&dir);
+            assert_eq!(load.load_state, NoteLoadState::Ready);
+            let note = load
+                .notes
+                .iter()
+                .find(|note| note.note_id == "stable-note")
+                .ok_or_else(|| "recovered note missing".to_string())?;
+            assert_eq!(note.folder_path, "beta");
+            assert_eq!(note.markdown, "# Beta");
+            assert_eq!(note.created_at, before.created_at);
+            assert_eq!(count_markdown_files_recursively(&dir)?, 1);
+            assert_eq!(count_autosave_artifacts_recursively(&dir)?, 0);
+            assert!(!autosave_journal_path(&trusted_root).exists());
+            assert!(!autosave_journal_next_path(&trusted_root).exists());
+            Ok(())
+        })();
+        cleanup_temp_dir(&dir);
+        result.unwrap();
+    }
+
+    #[test]
+    fn autosave_old_file_cleanup_failure_rolls_forward_on_restart() {
+        let dir = make_temp_dir("autosave-old-cleanup-recovery");
+        let result = (|| -> Result<(), String> {
+            auto_save_markdown_note(
+                &dir,
+                &autosave_payload("cleanup-note", "Alpha", "# Alpha", Some("alpha")),
+            )?;
+            let trusted_root = TrustedLibraryRoot::open(&dir)?;
+            let injector =
+                FailOnceAutosaveFaultInjector::fail_on(AutosaveFaultPoint::OldFileCleanup, 1);
+
+            let error = auto_save_markdown_note_with_faults(
+                &trusted_root,
+                &autosave_payload("cleanup-note", "Beta", "# Beta", Some("beta")),
+                &injector,
+            )
+            .unwrap_err();
+            assert!(error.contains("OldFileCleanup") || error.contains("remove_old_note_cleanup"));
+            assert_eq!(count_markdown_files_recursively(&dir)?, 2);
+
+            let load = load_markdown_library(&dir);
+            assert_eq!(load.load_state, NoteLoadState::Ready);
+            let note = load
+                .notes
+                .iter()
+                .find(|note| note.note_id == "cleanup-note")
+                .ok_or_else(|| "recovered note missing".to_string())?;
+            assert_eq!(note.folder_path, "beta");
+            assert_eq!(note.markdown, "# Beta");
+            assert_eq!(count_markdown_files_recursively(&dir)?, 1);
+            assert!(!autosave_journal_path(&trusted_root).exists());
+            assert!(!autosave_journal_next_path(&trusted_root).exists());
+            Ok(())
+        })();
+        cleanup_temp_dir(&dir);
+        result.unwrap();
+    }
+
+    #[test]
+    fn autosave_index_publish_failure_recovers_before_scan_reconcile() {
+        let dir = make_temp_dir("autosave-index-publish-recovery");
+        let result = (|| -> Result<(), String> {
+            auto_save_markdown_note(
+                &dir,
+                &autosave_payload("index-note", "Alpha", "# Alpha", Some("alpha")),
+            )?;
+            let trusted_root = TrustedLibraryRoot::open(&dir)?;
+            let injector =
+                FailOnceAutosaveFaultInjector::fail_on(AutosaveFaultPoint::IndexPublish, 1);
+
+            let error = auto_save_markdown_note_with_faults(
+                &trusted_root,
+                &autosave_payload("index-note", "Beta", "# Beta", Some("beta")),
+                &injector,
+            )
+            .unwrap_err();
+            assert!(error.contains("IndexPublish") || error.contains("publish_autosave_index"));
+
+            let load = load_markdown_library(&dir);
+            assert_eq!(load.load_state, NoteLoadState::Ready);
+            let note = load
+                .notes
+                .iter()
+                .find(|note| note.note_id == "index-note")
+                .ok_or_else(|| "recovered note missing".to_string())?;
+            assert_eq!(note.folder_path, "beta");
+            assert_eq!(note.markdown, "# Beta");
+            assert_eq!(count_markdown_files_recursively(&dir)?, 1);
+            assert_eq!(count_autosave_artifacts_recursively(&dir)?, 0);
+            Ok(())
+        })();
+        cleanup_temp_dir(&dir);
+        result.unwrap();
+    }
+
+    #[test]
+    fn autosave_note_temp_stage_failures_reconcile_cleanly_on_restart() {
+        for (point, label) in [
+            (AutosaveFaultPoint::NoteTempCreate, "create"),
+            (AutosaveFaultPoint::NoteTempWrite, "write"),
+            (AutosaveFaultPoint::NoteTempSync, "sync"),
+        ] {
+            let dir = make_temp_dir(&format!("autosave-note-temp-{label}"));
+            let result = (|| -> Result<(), String> {
+                let error = run_faulted_autosave(
+                    &dir,
+                    &autosave_payload("stage-note", "Stage", "# Stage", Some("alpha")),
+                    point,
+                    1,
+                )
+                .unwrap_err();
+                assert!(
+                    error.contains("injected autosave fault") || error.contains("write_note_temp")
+                );
+
+                let load = load_markdown_library(&dir);
+                assert_eq!(load.load_state, NoteLoadState::Ready);
+                assert!(load.notes.is_empty());
+                assert_eq!(count_markdown_files_recursively(&dir)?, 0);
+                assert_eq!(count_autosave_artifacts_recursively(&dir)?, 0);
+
+                let saved = auto_save_markdown_note(
+                    &dir,
+                    &autosave_payload("stage-note", "Stage", "# Stage", Some("alpha")),
+                )?;
+                assert_eq!(saved.note_id, "stage-note");
+                assert_eq!(count_markdown_files_recursively(&dir)?, 1);
+                Ok(())
+            })();
+            cleanup_temp_dir(&dir);
+            result.unwrap();
+        }
+    }
+
+    #[test]
+    fn autosave_initial_journal_temp_failures_leave_no_committed_state_and_retry_cleanly() {
+        for (point, label) in [
+            (AutosaveFaultPoint::JournalTempCreate, "create"),
+            (AutosaveFaultPoint::JournalTempWrite, "write"),
+            (AutosaveFaultPoint::JournalTempSync, "sync"),
+        ] {
+            let dir = make_temp_dir(&format!("autosave-initial-journal-temp-{label}"));
+            let result = (|| -> Result<(), String> {
+                let error = run_faulted_autosave(
+                    &dir,
+                    &autosave_payload("journal-stage", "Journal", "# Journal", Some("alpha")),
+                    point,
+                    1,
+                )
+                .unwrap_err();
+                assert!(
+                    error.contains("injected autosave fault")
+                        || error.contains("write_autosave_journal_temp")
+                );
+
+                let load = load_markdown_library(&dir);
+                assert_eq!(load.load_state, NoteLoadState::Ready);
+                assert!(load.notes.is_empty());
+                assert_eq!(count_markdown_files_recursively(&dir)?, 0);
+                assert_eq!(count_autosave_artifacts_recursively(&dir)?, 0);
+
+                let saved = auto_save_markdown_note(
+                    &dir,
+                    &autosave_payload("journal-stage", "Journal", "# Journal", Some("alpha")),
+                )?;
+                assert_eq!(saved.note_id, "journal-stage");
+                assert_eq!(count_markdown_files_recursively(&dir)?, 1);
+                assert_eq!(count_autosave_artifacts_recursively(&dir)?, 0);
+                let note = load_ready_note_by_id(&dir, "journal-stage")?;
+                assert_eq!(note.markdown, "# Journal");
+                Ok(())
+            })();
+            cleanup_temp_dir(&dir);
+            result.unwrap();
+        }
+    }
+
+    #[test]
+    fn index_write_rejects_destination_file_link_swap_without_touching_external_target() {
+        let dir = make_temp_dir("index-link-swap");
+        let outside = make_temp_dir("index-link-swap-outside");
+        let result = (|| -> Result<(), String> {
+            let outside_file = outside.join("victim-index.json");
+            fs::write(&outside_file, "outside-index-original").map_err(|e| e.to_string())?;
+
+            let trusted_root = TrustedLibraryRoot::open(&dir)?;
+            let snapshot = require_index_snapshot(&trusted_root)?;
+            let index_path = get_index_path(&dir);
+            let planned_index = NoteIndex {
+                entries: HashMap::from([(
+                    "planned".to_string(),
+                    NoteIndexEntry {
+                        relative_path: "planned.md".to_string(),
+                        created_at: 1,
+                        manual_title: Some("Planned".to_string()),
+                        is_pinned: Some(false),
+                    },
+                )]),
+            };
+            let mut link_guard = None;
+
+            let write_result = write_index_from_snapshot_after_temp_hook(
+                &trusted_root,
+                &snapshot,
+                &planned_index,
+                || {
+                    if create_file_link(&index_path, &outside_file).unwrap_or(false) {
+                        link_guard = Some(TestLinkGuard::file(&index_path));
+                    }
+                },
+            );
+            if link_guard.is_none() {
+                return Ok(());
+            }
+
+            match write_result {
+                Err(IndexWriteFailure::Issue(issue)) => {
+                    assert_eq!(issue.operation, "replace_index");
+                    assert!(issue.reason.contains("symbolic links and reparse points"));
+                }
+                other => panic!("expected trusted-destination failure, got {other:?}"),
+            }
+            assert_eq!(
+                fs::read_to_string(&outside_file).map_err(|e| e.to_string())?,
+                "outside-index-original"
+            );
+            link_guard.unwrap().unlink()?;
+            Ok(())
+        })();
+        cleanup_temp_dir(&dir);
+        cleanup_temp_dir(&outside);
+        result.unwrap();
+    }
+
+    #[test]
+    fn journal_persist_rejects_primary_file_link_swap_without_touching_external_target() {
+        let dir = make_temp_dir("journal-link-swap");
+        let outside = make_temp_dir("journal-link-swap-outside");
+        let result = (|| -> Result<(), String> {
+            let trusted_root = TrustedLibraryRoot::open(&dir)?;
+            let outside_file = outside.join("victim-journal.json");
+            fs::write(&outside_file, "outside-journal-original").map_err(|e| e.to_string())?;
+            let journal_path = autosave_journal_path(&trusted_root);
+            let probe_link = dir.join("journal-link-probe");
+            if !create_file_link(&probe_link, &outside_file)? {
+                return Ok(());
+            }
+            TestLinkGuard::file(&probe_link).unlink()?;
+            let mut link_guard = None;
+
+            let next_note_path = trusted_root.path().join("alpha").join("Journal.md");
+            let operation_id = "1-2-3".to_string();
+            let journal = AutosaveTransactionJournal {
+                version: AUTOSAVE_TRANSACTION_VERSION,
+                operation_id: operation_id.clone(),
+                phase: AutosaveTransactionPhase::Prepared,
+                note_id: "journal-note".to_string(),
+                previous_relative_path: None,
+                next_relative_path: "alpha/Journal.md".to_string(),
+                note_temp_relative_path: relative_path(
+                    trusted_root.path(),
+                    &note_temp_path_for_operation(&next_note_path, &operation_id)?,
+                ),
+                index_temp_relative_path: relative_path(
+                    trusted_root.path(),
+                    &index_temp_path_for_operation(&trusted_root, &operation_id),
+                ),
+                expected_index_digest: None,
+                next_index: NoteIndex {
+                    entries: HashMap::from([(
+                        "journal-note".to_string(),
+                        NoteIndexEntry {
+                            relative_path: "alpha/Journal.md".to_string(),
+                            created_at: 1,
+                            manual_title: Some("Journal".to_string()),
+                            is_pinned: Some(false),
+                        },
+                    )]),
+                },
+                next_note_digest: sha256_hex(b"# Journal"),
+                previous_note_digest: None,
+            };
+
+            let error = persist_autosave_journal_after_temp_hook(
+                &trusted_root,
+                &journal,
+                &NoopAutosaveFaultInjector,
+                || {
+                    if create_file_link(&journal_path, &outside_file).unwrap_or(false) {
+                        link_guard = Some(TestLinkGuard::file(&journal_path));
+                    }
+                },
+            )
+            .unwrap_err();
+            if link_guard.is_none() {
+                return Ok(());
+            }
+            assert!(error.contains("symbolic links and reparse points"));
+            assert_eq!(
+                fs::read_to_string(&outside_file).map_err(|e| e.to_string())?,
+                "outside-journal-original"
+            );
+            link_guard.unwrap().unlink()?;
+            Ok(())
+        })();
+        cleanup_temp_dir(&dir);
+        cleanup_temp_dir(&outside);
+        result.unwrap();
+    }
+
+    #[test]
+    fn autosave_post_publish_reported_failures_recover_with_one_note_and_no_artifacts() {
+        for (point, nth_hit, label) in [
+            (AutosaveFaultPoint::NotePublishReported, 1usize, "note"),
+            (AutosaveFaultPoint::IndexPublishReported, 1usize, "index"),
+            (
+                AutosaveFaultPoint::JournalPublishReported,
+                2usize,
+                "journal",
+            ),
+        ] {
+            let dir = make_temp_dir(&format!("autosave-post-publish-{label}"));
+            let result = (|| -> Result<(), String> {
+                auto_save_markdown_note(
+                    &dir,
+                    &autosave_payload("post-publish", "Alpha", "# Alpha", Some("alpha")),
+                )?;
+
+                let error = run_faulted_autosave(
+                    &dir,
+                    &autosave_payload("post-publish", "Beta", "# Beta", Some("beta")),
+                    point,
+                    nth_hit,
+                )
+                .unwrap_err();
+                assert!(error.contains("injected autosave fault"));
+
+                let note = load_ready_note_by_id(&dir, "post-publish")?;
+                assert_eq!(note.folder_path, "beta");
+                assert_eq!(note.markdown, "# Beta");
+                assert_eq!(count_markdown_files_recursively(&dir)?, 1);
+                assert_eq!(count_autosave_artifacts_recursively(&dir)?, 0);
+                Ok(())
+            })();
+            cleanup_temp_dir(&dir);
+            result.unwrap();
+        }
+    }
+
+    #[test]
+    fn autosave_index_temp_stage_failures_reconcile_cleanly_on_restart() {
+        for (point, label) in [
+            (AutosaveFaultPoint::IndexTempCreate, "create"),
+            (AutosaveFaultPoint::IndexTempWrite, "write"),
+            (AutosaveFaultPoint::IndexTempSync, "sync"),
+        ] {
+            let dir = make_temp_dir(&format!("autosave-index-temp-{label}"));
+            let result = (|| -> Result<(), String> {
+                let error = run_faulted_autosave(
+                    &dir,
+                    &autosave_payload("stage-index", "Index", "# Index", Some("alpha")),
+                    point,
+                    1,
+                )
+                .unwrap_err();
+                assert!(
+                    error.contains("injected autosave fault") || error.contains("write_index_temp")
+                );
+
+                let load = load_markdown_library(&dir);
+                assert_eq!(load.load_state, NoteLoadState::Ready);
+                assert!(load.notes.is_empty());
+                assert_eq!(count_markdown_files_recursively(&dir)?, 0);
+                assert_eq!(count_autosave_artifacts_recursively(&dir)?, 0);
+
+                let saved = auto_save_markdown_note(
+                    &dir,
+                    &autosave_payload("stage-index", "Index", "# Index", Some("alpha")),
+                )?;
+                assert_eq!(saved.note_id, "stage-index");
+                assert_eq!(count_markdown_files_recursively(&dir)?, 1);
+                Ok(())
+            })();
+            cleanup_temp_dir(&dir);
+            result.unwrap();
+        }
+    }
+
+    #[test]
+    fn autosave_journal_publish_failures_across_phase_transitions_recover_deterministically() {
+        for (nth_hit, expected_markdown_count, expected_content) in [
+            (2usize, 0usize, None),
+            (3usize, 1usize, Some("# Journal")),
+            (4usize, 1usize, Some("# Journal")),
+        ] {
+            let dir = make_temp_dir(&format!("autosave-journal-publish-{nth_hit}"));
+            let result = (|| -> Result<(), String> {
+                let error = run_faulted_autosave(
+                    &dir,
+                    &autosave_payload("journal-note", "Journal", "# Journal", Some("alpha")),
+                    AutosaveFaultPoint::JournalPublish,
+                    nth_hit,
+                )
+                .unwrap_err();
+                assert!(
+                    error.contains("injected autosave fault")
+                        || error.contains("publish_autosave_journal")
+                );
+
+                let load = load_markdown_library(&dir);
+                assert_eq!(load.load_state, NoteLoadState::Ready);
+                assert_eq!(
+                    count_markdown_files_recursively(&dir)?,
+                    expected_markdown_count
+                );
+                assert_eq!(count_autosave_artifacts_recursively(&dir)?, 0);
+                if let Some(expected_content) = expected_content {
+                    let note = load
+                        .notes
+                        .iter()
+                        .find(|note| note.note_id == "journal-note")
+                        .ok_or_else(|| "journal note missing".to_string())?;
+                    assert_eq!(note.markdown, expected_content);
+                } else {
+                    assert!(load.notes.is_empty());
+                }
+                Ok(())
+            })();
+            cleanup_temp_dir(&dir);
+            result.unwrap();
+        }
+    }
+
+    #[test]
+    fn autosave_title_change_retry_preserves_note_id_without_duplicate_files() {
+        let dir = make_temp_dir("autosave-title-change-retry");
+        let result = (|| -> Result<(), String> {
+            auto_save_markdown_note(
+                &dir,
+                &autosave_payload("title-note", "Alpha", "# Alpha", None),
+            )?;
+            let before = load_ready_note_by_id(&dir, "title-note")?;
+
+            let error = run_faulted_autosave(
+                &dir,
+                &autosave_payload("title-note", "Beta", "# Beta", None),
+                AutosaveFaultPoint::NotePublish,
+                1,
+            )
+            .unwrap_err();
+            assert!(error.contains("NotePublish") || error.contains("publish_note"));
+
+            let after = load_ready_note_by_id(&dir, "title-note")?;
+            assert_eq!(after.note_id, "title-note");
+            assert_eq!(after.created_at, before.created_at);
+            assert_eq!(after.markdown, "# Beta");
+            assert_eq!(count_markdown_files_recursively(&dir)?, 1);
+            assert_eq!(count_autosave_artifacts_recursively(&dir)?, 0);
+            Ok(())
+        })();
+        cleanup_temp_dir(&dir);
+        result.unwrap();
+    }
+
+    #[test]
+    fn autosave_journal_cleanup_failure_recovers_and_repeated_loads_are_noops() {
+        let dir = make_temp_dir("autosave-journal-cleanup");
+        let result = (|| -> Result<(), String> {
+            auto_save_markdown_note(
+                &dir,
+                &autosave_payload("cleanup-journal", "Alpha", "# Alpha", Some("alpha")),
+            )?;
+            let trusted_root = TrustedLibraryRoot::open(&dir)?;
+            let injector =
+                FailOnceAutosaveFaultInjector::fail_on(AutosaveFaultPoint::JournalCleanup, 1);
+
+            let error = auto_save_markdown_note_with_faults(
+                &trusted_root,
+                &autosave_payload("cleanup-journal", "Beta", "# Beta", Some("beta")),
+                &injector,
+            )
+            .unwrap_err();
+            assert!(error.contains("JournalCleanup") || error.contains("cleanup_autosave_journal"));
+
+            let first = load_ready_note_by_id(&dir, "cleanup-journal")?;
+            assert_eq!(first.markdown, "# Beta");
+            assert_eq!(count_markdown_files_recursively(&dir)?, 1);
+            assert_eq!(count_autosave_artifacts_recursively(&dir)?, 0);
+
+            let second = load_ready_note_by_id(&dir, "cleanup-journal")?;
+            assert_eq!(second.markdown, "# Beta");
+            assert_eq!(count_markdown_files_recursively(&dir)?, 1);
+            assert_eq!(count_autosave_artifacts_recursively(&dir)?, 0);
+            Ok(())
+        })();
+        cleanup_temp_dir(&dir);
+        result.unwrap();
+    }
+
+    #[test]
+    fn autosave_valid_next_only_journal_is_promoted_and_replayed() {
+        let dir = make_temp_dir("autosave-next-only");
+        let result = (|| -> Result<(), String> {
+            let error = run_faulted_autosave(
+                &dir,
+                &autosave_payload("next-only", "Alpha", "# Alpha", None),
+                AutosaveFaultPoint::JournalPublish,
+                1,
+            )
+            .unwrap_err();
+            assert!(error.contains("JournalPublish") || error.contains("publish_autosave_journal"));
+
+            let trusted_root = TrustedLibraryRoot::open(&dir)?;
+            assert!(!autosave_journal_path(&trusted_root).exists());
+            assert!(autosave_journal_next_path(&trusted_root).exists());
+
+            let load = load_markdown_library(&dir);
+            assert_eq!(load.load_state, NoteLoadState::Ready);
+            assert!(load.notes.is_empty());
+            assert_eq!(count_markdown_files_recursively(&dir)?, 0);
+            assert_eq!(count_autosave_artifacts_recursively(&dir)?, 0);
+            Ok(())
+        })();
+        cleanup_temp_dir(&dir);
+        result.unwrap();
+    }
+
+    #[test]
+    fn autosave_invalid_next_only_journal_fails_closed() {
+        let dir = make_temp_dir("autosave-invalid-next-only");
+        let result = (|| -> Result<(), String> {
+            let trusted_root = TrustedLibraryRoot::open(&dir)?;
+            fs::write(autosave_journal_next_path(&trusted_root), "{not-json")
+                .map_err(|e| e.to_string())?;
+
+            assert_recovery_load_incomplete_with_reason(&dir, "parse_autosave_journal");
+            Ok(())
+        })();
+        cleanup_temp_dir(&dir);
+        result.unwrap();
+    }
+
+    #[test]
+    fn autosave_primary_and_next_with_different_operation_ids_fail_closed() {
+        let dir = make_temp_dir("autosave-journal-op-mismatch");
+        let result = (|| -> Result<(), String> {
+            let error = run_faulted_autosave(
+                &dir,
+                &autosave_payload("mismatch", "Alpha", "# Alpha", None),
+                AutosaveFaultPoint::JournalPublish,
+                2,
+            )
+            .unwrap_err();
+            assert!(error.contains("JournalPublish") || error.contains("publish_autosave_journal"));
+
+            let trusted_root = TrustedLibraryRoot::open(&dir)?;
+            let mut next_journal: AutosaveTransactionJournal = serde_json::from_slice(
+                &fs::read(autosave_journal_next_path(&trusted_root)).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+            next_journal.operation_id = "9-9-9".to_string();
+            fs::write(
+                autosave_journal_next_path(&trusted_root),
+                serde_json::to_vec_pretty(&next_journal).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+
+            assert_recovery_load_incomplete_with_reason(&dir, "journal identities differ");
+            Ok(())
+        })();
+        cleanup_temp_dir(&dir);
+        result.unwrap();
+    }
+
+    #[test]
+    fn autosave_stale_next_cleanup_failure_fails_closed() {
+        let dir = make_temp_dir("autosave-stale-next-cleanup");
+        let result = (|| -> Result<(), String> {
+            let error = run_faulted_autosave(
+                &dir,
+                &autosave_payload("stale-next", "Alpha", "# Alpha", None),
+                AutosaveFaultPoint::JournalPublish,
+                2,
+            )
+            .unwrap_err();
+            assert!(error.contains("JournalPublish") || error.contains("publish_autosave_journal"));
+
+            let trusted_root = TrustedLibraryRoot::open(&dir)?;
+            fs::remove_file(autosave_journal_next_path(&trusted_root))
+                .map_err(|e| e.to_string())?;
+            fs::create_dir(autosave_journal_next_path(&trusted_root)).map_err(|e| e.to_string())?;
+
+            assert_recovery_load_incomplete_with_reason(
+                &dir,
+                "cleanup_invalid_autosave_journal_candidate",
+            );
+            Ok(())
+        })();
+        cleanup_temp_dir(&dir);
+        result.unwrap();
+    }
+
+    #[test]
+    fn autosave_conflicting_index_and_note_cleanup_states_fail_closed() {
+        let dir = make_temp_dir("autosave-conflicts");
+        let result = (|| -> Result<(), String> {
+            auto_save_markdown_note(
+                &dir,
+                &autosave_payload("conflict-note", "Alpha", "# Alpha", Some("alpha")),
+            )?;
+
+            let trusted_root = TrustedLibraryRoot::open(&dir)?;
+            let index_error = auto_save_markdown_note_with_faults(
+                &trusted_root,
+                &autosave_payload("conflict-note", "Beta", "# Beta", Some("beta")),
+                &FailOnceAutosaveFaultInjector::fail_on(AutosaveFaultPoint::IndexPublish, 1),
+            )
+            .unwrap_err();
+            assert!(
+                index_error.contains("IndexPublish")
+                    || index_error.contains("publish_autosave_index")
+            );
+            let unrelated_index = NoteIndex {
+                entries: HashMap::from([(
+                    "other".to_string(),
+                    NoteIndexEntry {
+                        relative_path: "other.md".to_string(),
+                        created_at: 1,
+                        manual_title: Some("Other".to_string()),
+                        is_pinned: Some(false),
+                    },
+                )]),
+            };
+            write_index(&dir, &unrelated_index)?;
+            assert_recovery_load_incomplete_with_reason(&dir, "verify_autosave_index_precondition");
+
+            cleanup_pending_autosave_journal_files(&trusted_root)?;
+            fs::remove_dir_all(dir.join("alpha")).ok();
+            fs::remove_dir_all(dir.join("beta")).ok();
+            write_index(&dir, &empty_index())?;
+
+            auto_save_markdown_note(
+                &dir,
+                &autosave_payload("conflict-note", "Alpha", "# Alpha", Some("alpha")),
+            )?;
+            let old_cleanup_error = auto_save_markdown_note_with_faults(
+                &trusted_root,
+                &autosave_payload("conflict-note", "Beta", "# Beta", Some("beta")),
+                &FailOnceAutosaveFaultInjector::fail_on(AutosaveFaultPoint::OldFileCleanup, 1),
+            )
+            .unwrap_err();
+            assert!(
+                old_cleanup_error.contains("OldFileCleanup")
+                    || old_cleanup_error.contains("remove_old_note_cleanup")
+            );
+            fs::write(dir.join("alpha").join("Alpha.md"), "# tampered")
+                .map_err(|e| e.to_string())?;
+            assert_recovery_load_incomplete_with_reason(&dir, "validate_old_note_cleanup");
+
+            cleanup_pending_autosave_journal_files(&trusted_root)?;
+            fs::remove_dir_all(dir.join("alpha")).ok();
+            fs::remove_dir_all(dir.join("beta")).ok();
+            write_index(&dir, &empty_index())?;
+
+            auto_save_markdown_note(
+                &dir,
+                &autosave_payload("conflict-note", "Alpha", "# Alpha", Some("alpha")),
+            )?;
+            let note_error = auto_save_markdown_note_with_faults(
+                &trusted_root,
+                &autosave_payload("conflict-note", "Beta", "# Beta", Some("beta")),
+                &FailOnceAutosaveFaultInjector::fail_on(AutosaveFaultPoint::IndexPublish, 1),
+            )
+            .unwrap_err();
+            assert!(
+                note_error.contains("IndexPublish")
+                    || note_error.contains("publish_autosave_index")
+            );
+            fs::write(dir.join("beta").join("Beta.md"), "# tampered").map_err(|e| e.to_string())?;
+            assert_recovery_load_incomplete_with_reason(&dir, "verify_note_published");
+            Ok(())
+        })();
+        cleanup_temp_dir(&dir);
+        result.unwrap();
+    }
+
+    #[test]
+    fn autosave_unsafe_journal_paths_fail_closed() {
+        let dir = make_temp_dir("autosave-unsafe-journal");
+        let result = (|| -> Result<(), String> {
+            let trusted_root = TrustedLibraryRoot::open(&dir)?;
+            let journal = AutosaveTransactionJournal {
+                version: AUTOSAVE_TRANSACTION_VERSION,
+                operation_id: "1-2-3".to_string(),
+                phase: AutosaveTransactionPhase::Prepared,
+                note_id: "unsafe".to_string(),
+                previous_relative_path: None,
+                next_relative_path: "../escape.md".to_string(),
+                note_temp_relative_path: "../escape.tmp".to_string(),
+                index_temp_relative_path: ".hwan-note-index-1-2-3.tmp".to_string(),
+                expected_index_digest: None,
+                next_index: NoteIndex {
+                    entries: HashMap::from([(
+                        "unsafe".to_string(),
+                        NoteIndexEntry {
+                            relative_path: "../escape.md".to_string(),
+                            created_at: 1,
+                            manual_title: Some("Unsafe".to_string()),
+                            is_pinned: Some(false),
+                        },
+                    )]),
+                },
+                next_note_digest: "abc".to_string(),
+                previous_note_digest: None,
+            };
+            fs::write(
+                autosave_journal_path(&trusted_root),
+                serde_json::to_vec_pretty(&journal).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+
+            assert_recovery_load_incomplete_with_reason(&dir, "validate_index_path");
+            Ok(())
+        })();
+        cleanup_temp_dir(&dir);
+        result.unwrap();
     }
 
     #[test]

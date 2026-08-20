@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
 
+use crate::atomic_file;
 use crate::config_manager;
 use crate::config_manager::{LibrarySource, LocalAutoSaveDirState};
 use crate::file_manager::{
@@ -964,10 +965,10 @@ fn write_calendar_data_with_root(
             return Err(error);
         }
     };
-    fs::rename(&tmp_path, &path).map_err(|error| {
+    atomic_file::publish_temp_file(&tmp_path, &path, "write_calendar_data").map_err(|error| {
         tracing::error!("Failed to rename calendar temp file: {}", error);
         let _ = fs::remove_file(&tmp_path);
-        error.to_string()
+        error
     })?;
 
     Ok(())

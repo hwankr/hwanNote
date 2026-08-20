@@ -1521,6 +1521,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
@@ -1530,6 +1531,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "trash",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

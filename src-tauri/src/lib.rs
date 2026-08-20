@@ -1,3 +1,4 @@
+mod atomic_file;
 mod commands;
 mod config_manager;
 mod file_manager;
