@@ -5,6 +5,36 @@ All notable user-facing changes to HwanNote are documented here.
 This project follows [Semantic Versioning](https://semver.org/) and commit messages use the
 [Conventional Commits](https://www.conventionalcommits.org/) style.
 
+## [0.9.14] - 2026-08-20
+
+Makes automatic note saving recoverable across note-file, path, cleanup, and
+index failures.
+
+### Fixed
+
+- **Autosave is now a durable transaction.** Note and index payloads are staged
+  in unique same-directory files, fully written and synchronized, then advanced
+  through a four-phase journal before superseded data is removed.
+- **Startup deterministically repairs interrupted saves.** Journal replay runs
+  before ordinary library scanning, preserving the original note ID, creation
+  time, title metadata, pin state, and final path instead of importing a
+  partial destination as a second note.
+- **Retries converge without debris.** Temp creation, write, sync, publication,
+  index replacement, old-file cleanup, and journal cleanup failures roll back
+  or forward from one bounded transaction rather than creating `-2`/`-3`
+  duplicates, orphan Markdown files, or stale index entries.
+- **Cleanup failures are never hidden.** A failed old-path deletion remains an
+  explicit `index_published` recovery step; changed external content fails
+  closed through trusted-path and SHA-256 identity checks.
+- **Atomic replacement is platform-aware.** Unix uses same-directory rename and
+  directory synchronization, while Windows explicitly uses write-through
+  `ReplaceFileW`; link/reparse swaps and blocked replacements are covered by
+  regression tests.
+- **Recovery guarantees are documented.** The commit point, journal-name
+  authority rules, restart procedure, and process-crash versus sudden-power or
+  cloud-filesystem limits are described in
+  `docs/note-autosave-transactions.md`.
+
 ## [0.9.13] - 2026-08-20
 
 Hardens the note-library boundary against symbolic-link and Windows junction
