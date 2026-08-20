@@ -169,7 +169,13 @@ vi.mock("./components/SettingsPanel", async () => {
 
 vi.mock("./components/Sidebar", async () => {
   const { createElement } = await import("react");
-  return { default: () => createElement("div") };
+  return {
+    default: ({ folders }: { folders: string[] }) =>
+      createElement("div", {
+        "data-testid": "sidebar",
+        "data-folders": JSON.stringify(folders),
+      }),
+  };
 });
 
 vi.mock("./components/StatusBar", async () => {
@@ -214,25 +220,68 @@ import { useNoteStore } from "./stores/noteStore";
 const NOTE_ID = "library-note";
 const AUTO_SAVE_DELAY_MS = 1_750;
 
-function createLoadResult(loadedFrom: "local" | "cloud" | "local_fallback", markdown = "disk copy") {
+function createLoadResult(
+  loadedFrom: "local" | "cloud" | "local_fallback",
+  markdown = "disk copy",
+  noteOverrides: Partial<{
+    noteId: string;
+    title: string;
+    createdAt: number;
+    updatedAt: number;
+    isPinned: boolean;
+  }> = {},
+  folders: string[] = [],
+) {
   return {
     notes: [
       {
-        noteId: NOTE_ID,
-        title: loadedFrom === "cloud" ? "Cloud title" : "Disk title",
+        noteId: noteOverrides.noteId ?? NOTE_ID,
+        title: noteOverrides.title ?? (loadedFrom === "cloud" ? "Cloud title" : "Disk title"),
         isTitleManual: true,
         plainText: markdown,
         markdown,
         folderPath: "",
-        createdAt: 1_000,
-        updatedAt: loadedFrom === "cloud" ? 3_000 : 1_000,
-        filePath: `C:/notes/${NOTE_ID}.md`,
-        isPinned: false,
+        createdAt: noteOverrides.createdAt ?? 1_000,
+        updatedAt: noteOverrides.updatedAt ?? (loadedFrom === "cloud" ? 3_000 : 1_000),
+        filePath: `C:/notes/${noteOverrides.noteId ?? NOTE_ID}.md`,
+        isPinned: noteOverrides.isPinned ?? false,
       },
     ],
-    folders: [],
+    folders,
     loadedFrom,
     cloudUnavailable: false,
+    loadState: "ready" as const,
+    issues: [],
+    indexSourcePath: "C:/notes/.hwan-note-index.json",
+    indexBackupPath: null,
+  };
+}
+
+function createRecoveryLoadResult({
+  loadState,
+  loadedFrom = "local",
+  operation,
+  path,
+  reason,
+  kind = loadState === "index_corrupt" ? "index" : "scan",
+  indexBackupPath = null,
+}: {
+  loadState: "incomplete" | "index_corrupt";
+  loadedFrom?: "local" | "cloud" | "local_fallback";
+  operation: string;
+  path: string;
+  reason: string;
+  kind?: "scan" | "file_read" | "file_metadata" | "index";
+  indexBackupPath?: string | null;
+}) {
+  return {
+    ...createLoadResult(loadedFrom, "partial scan"),
+    notes: [],
+    folders: ["partial-folder"],
+    loadState,
+    issues: [{ kind, operation, path, reason }],
+    indexSourcePath: "C:/notes/.hwan-note-index.json",
+    indexBackupPath,
   };
 }
 
@@ -431,6 +480,254 @@ describe("App locale changes", () => {
 
     expect(banner.textContent).toContain("The custom storage path is unavailable");
     expect(banner.textContent).toContain("will not use the default Documents folder automatically");
+  });
+
+  it("keeps an initial corrupt-index result non-authoritative until a ready retry", async () => {
+    mocks.loadAll
+      .mockReset()
+      .mockResolvedValueOnce(createRecoveryLoadResult({
+        loadState: "index_corrupt",
+        operation: "parse_index",
+        path: "C:/notes/.hwan-note-index.json",
+        reason: "expected value at line 1 column 2",
+        indexBackupPath: "C:/notes/.hwan-note-index.corrupt-1234.json",
+      }))
+      .mockResolvedValueOnce(createRecoveryLoadResult({
+        loadState: "incomplete",
+        kind: "file_read",
+        operation: "read_markdown",
+        path: "C:/notes/private/blocked.md",
+        reason: "access denied",
+      }))
+      .mockResolvedValueOnce(createLoadResult("local", "recovered library"));
+
+    await renderApp(root);
+
+    const panel = requiredElement<HTMLElement>(container, ".note-recovery-panel");
+    expect(panel.textContent).toContain("노트 인덱스를 복구해야 합니다");
+    expect(panel.textContent).toContain("C:/notes/.hwan-note-index.json");
+    expect(panel.textContent).toContain("C:/notes/.hwan-note-index.corrupt-1234.json");
+    expect(panel.textContent).toContain("expected value at line 1 column 2");
+    expect(useNoteStore.getState().noteIds).toEqual([]);
+    expect(mocks.cleanOrphanNoteLinks).not.toHaveBeenCalled();
+
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(panel, "button").click();
+    });
+    await flushUntil(() => mocks.loadAll.mock.calls.length === 2, "the still-incomplete rescan");
+    await flushReactWork();
+
+    const stillBlockedPanel = requiredElement<HTMLElement>(container, ".note-recovery-panel");
+    expect(stillBlockedPanel.textContent).toContain("C:/notes/private/blocked.md");
+    expect(stillBlockedPanel.textContent).toContain("access denied");
+    expect(useNoteStore.getState().noteIds).toEqual([]);
+    expect(mocks.cleanOrphanNoteLinks).not.toHaveBeenCalled();
+
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(stillBlockedPanel, "button").click();
+    });
+    await flushUntil(() => mocks.loadAll.mock.calls.length === 3, "the authoritative rescan");
+    await flushReactWork();
+
+    expect(container.querySelector(".note-recovery-panel")).toBeNull();
+    expect(useNoteStore.getState().notesById[NOTE_ID]).toMatchObject({
+      id: NOTE_ID,
+      plainText: "recovered library",
+    });
+    expect(mocks.cleanOrphanNoteLinks).toHaveBeenCalledTimes(1);
+    expect(mocks.cleanOrphanNoteLinks).toHaveBeenCalledWith(true);
+
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="edit-note"]').click();
+      await vi.advanceTimersByTimeAsync(AUTO_SAVE_DELAY_MS);
+    });
+    await flushUntil(() => mocks.autoSave.mock.calls.length === 1, "autosave after recovery");
+    expect(mocks.autoSave).toHaveBeenCalledWith(
+      NOTE_ID,
+      "Disk title",
+      expect.stringContaining("dirty draft"),
+      "",
+      true,
+      false,
+      "local",
+    );
+  });
+
+  it("preserves note identity, metadata, folders, and calendar links on an incomplete storage reload", async () => {
+    mocks.loadAll
+      .mockReset()
+      .mockResolvedValueOnce(createLoadResult(
+        "local",
+        "original library",
+        { createdAt: 321, isPinned: true },
+        ["kept-folder"],
+      ))
+      .mockResolvedValueOnce(createRecoveryLoadResult({
+        loadState: "incomplete",
+        loadedFrom: "cloud",
+        kind: "file_metadata",
+        operation: "read_metadata",
+        path: "G:/HwanNote/nested/note.md",
+        reason: "device not ready",
+      }));
+
+    await renderApp(root);
+    expect(mocks.cleanOrphanNoteLinks).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="switch-cloud-source"]').click();
+    });
+    await flushUntil(() => mocks.loadAll.mock.calls.length === 2, "the incomplete storage reload");
+    await flushReactWork();
+
+    expect(useNoteStore.getState().notesById[NOTE_ID]).toMatchObject({
+      id: NOTE_ID,
+      plainText: "original library",
+      createdAt: 321,
+      isPinned: true,
+    });
+    const renderedFolders = JSON.parse(
+      requiredElement<HTMLElement>(container, '[data-testid="sidebar"]').dataset.folders ?? "[]",
+    ) as string[];
+    expect(renderedFolders).toContain("kept-folder");
+    expect(renderedFolders).not.toContain("partial-folder");
+    expect(mocks.cleanOrphanNoteLinks).toHaveBeenCalledTimes(1);
+    expect(requiredElement<HTMLElement>(container, ".note-recovery-panel").textContent)
+      .toContain("G:/HwanNote/nested/note.md");
+  });
+
+  it("aborts an incomplete cloud recovery before calendar recovery and cleans only after a ready retry", async () => {
+    mocks.loadAll.mockReset().mockResolvedValueOnce(
+      createLoadResult("local_fallback", "local fallback", { createdAt: 555, isPinned: true }),
+    );
+    mocks.cloudStatus.mockReset().mockResolvedValue({
+      enabled: true,
+      provider: "google-drive",
+      syncFolder: "G:/HwanNote",
+      activeSource: "cloud",
+      resolvedSource: "local_fallback",
+      cloudUnavailable: true,
+    });
+
+    await renderApp(root);
+    expect(mocks.cleanOrphanNoteLinks).toHaveBeenCalledTimes(1);
+
+    mocks.loadAll.mockResolvedValue(createRecoveryLoadResult({
+      loadState: "incomplete",
+      loadedFrom: "cloud",
+      operation: "read_dir",
+      path: "G:/HwanNote/notes/nested",
+      reason: "the cloud folder is offline",
+    }));
+    mocks.cloudStatus.mockResolvedValue({
+      enabled: true,
+      provider: "google-drive",
+      syncFolder: "G:/HwanNote",
+      activeSource: "cloud",
+      resolvedSource: "cloud",
+      cloudUnavailable: false,
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_500);
+    });
+    await flushUntil(() => mocks.loadAll.mock.calls.length >= 2, "the incomplete cloud rescan");
+    await flushReactWork();
+
+    expect(mocks.recoverCalendarDataFromCloud).not.toHaveBeenCalled();
+    expect(mocks.cleanOrphanNoteLinks).toHaveBeenCalledTimes(1);
+    expect(useNoteStore.getState().notesById[NOTE_ID]).toMatchObject({
+      plainText: "local fallback",
+      createdAt: 555,
+      isPinned: true,
+    });
+    expect(requiredElement<HTMLElement>(container, ".note-recovery-panel").textContent)
+      .toContain("G:/HwanNote/notes/nested");
+
+    mocks.loadAll.mockResolvedValue(createLoadResult("cloud", "authoritative cloud"));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_500);
+    });
+    await flushUntil(
+      () => mocks.recoverCalendarDataFromCloud.mock.calls.length === 1,
+      "calendar recovery after an authoritative cloud scan",
+    );
+    await flushReactWork();
+
+    expect(container.querySelector(".note-recovery-panel")).toBeNull();
+    expect(useNoteStore.getState().notesById[NOTE_ID]).toMatchObject({
+      plainText: "authoritative cloud",
+    });
+    expect(mocks.cleanOrphanNoteLinks).toHaveBeenCalledTimes(2);
+    expect(mocks.cleanOrphanNoteLinks).toHaveBeenNthCalledWith(2, true);
+  });
+
+  it("uses an incomplete initial fallback source to arm a later authoritative cloud recovery", async () => {
+    mocks.loadAll.mockReset().mockResolvedValueOnce(createRecoveryLoadResult({
+      loadState: "incomplete",
+      loadedFrom: "local_fallback",
+      operation: "read_dir",
+      path: "C:/Users/test/Documents/HwanNote/notes",
+      reason: "fallback scan interrupted",
+    }));
+    mocks.cloudStatus.mockReset().mockResolvedValue({
+      enabled: true,
+      provider: "google-drive",
+      syncFolder: "G:/HwanNote",
+      activeSource: "cloud",
+      resolvedSource: "local_fallback",
+      cloudUnavailable: true,
+    });
+
+    await renderApp(root);
+
+    expect(mocks.loadAll).toHaveBeenCalledTimes(1);
+    expect(mocks.recoverCalendarDataFromCloud).not.toHaveBeenCalled();
+    expect(mocks.cleanOrphanNoteLinks).not.toHaveBeenCalled();
+    expect(requiredElement<HTMLElement>(container, ".note-recovery-panel").textContent)
+      .toContain("fallback scan interrupted");
+
+    mocks.loadAll.mockResolvedValue(createLoadResult("cloud", "cloud after fallback scan"));
+    mocks.cloudStatus.mockResolvedValue({
+      enabled: true,
+      provider: "google-drive",
+      syncFolder: "G:/HwanNote",
+      activeSource: "cloud",
+      resolvedSource: "cloud",
+      cloudUnavailable: false,
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_500);
+    });
+    await flushUntil(
+      () => mocks.recoverCalendarDataFromCloud.mock.calls.length === 1,
+      "cloud recovery armed by the reported fallback source",
+    );
+    await flushReactWork();
+
+    expect(mocks.loadAll.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(container.querySelector(".note-recovery-panel")).toBeNull();
+    expect(useNoteStore.getState().notesById[NOTE_ID]).toMatchObject({
+      plainText: "cloud after fallback scan",
+    });
+    expect(mocks.cleanOrphanNoteLinks).toHaveBeenCalledTimes(1);
+    expect(mocks.cleanOrphanNoteLinks).toHaveBeenCalledWith(true);
+
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="edit-note"]').click();
+      await vi.advanceTimersByTimeAsync(AUTO_SAVE_DELAY_MS);
+    });
+    await flushUntil(() => mocks.autoSave.mock.calls.length === 1, "cloud autosave after recovery");
+    expect(mocks.autoSave).toHaveBeenCalledWith(
+      NOTE_ID,
+      "Cloud title",
+      expect.stringContaining("dirty draft"),
+      "",
+      true,
+      false,
+      "cloud",
+    );
   });
 
   it("allows an explicit reset after an unavailable path blocked initial loading", async () => {

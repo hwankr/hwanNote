@@ -93,6 +93,20 @@ interface ResolveDirtyTabsOptions {
   closeResolvedTabs?: boolean;
 }
 
+type NoteLoadRecoveryState = Pick<
+  NoteLoadResult,
+  "loadState" | "issues" | "indexSourcePath" | "indexBackupPath"
+>;
+
+function toNoteLoadRecoveryState(result: NoteLoadResult): NoteLoadRecoveryState {
+  return {
+    loadState: result.loadState,
+    issues: result.issues,
+    indexSourcePath: result.indexSourcePath,
+    indexBackupPath: result.indexBackupPath,
+  };
+}
+
 function getDraftKey(tabId: string) {
   return `hwan-note:draft:${tabId}`;
 }
@@ -292,6 +306,8 @@ export default function App() {
   const [activeView, setActiveView] = useState<AppView>("notes");
   const [noteStorageSource, setNoteStorageSource] = useState<NoteStorageSource>("local");
   const [noteRecoveryPending, setNoteRecoveryPending] = useState(false);
+  const [noteLoadRecovery, setNoteLoadRecovery] = useState<NoteLoadRecoveryState | null>(null);
+  const [noteLoadRetrying, setNoteLoadRetrying] = useState(false);
 
   const [isSplit, setIsSplit] = useState(false);
   const [splitRatio, setSplitRatio] = useState(() => {
@@ -335,12 +351,20 @@ export default function App() {
   const saveQueueRef = useRef(new KeyedSerialTaskQueue<string>());
   const saveTabRef = useRef<((tabId: string) => Promise<boolean>) | null>(null);
   const noteStorageSourceRef = useRef<NoteStorageSource>("local");
+  const hydratedNoteStorageSourceRef = useRef<NoteStorageSource>("local");
   const noteWritesSuspendedRef = useRef(false);
+  const noteLoadRecoveryRef = useRef<NoteLoadRecoveryState | null>(null);
   const recoveryInFlightRef = useRef(false);
   const recoveryFailureNotifiedRef = useRef(false);
   const noteRecoveryPendingRef = useRef(false);
   const tRef = useRef(t);
   tRef.current = t;
+
+  const updateNoteLoadRecovery = useCallback((result: NoteLoadResult | null) => {
+    const recoveryState = result ? toNoteLoadRecoveryState(result) : null;
+    noteLoadRecoveryRef.current = recoveryState;
+    setNoteLoadRecovery(recoveryState);
+  }, []);
 
   const isNoteLibraryMutationAllowed = useCallback((loadedFrom: NoteStorageSource) => {
     return canRunNoteLibraryMutation({
@@ -817,7 +841,8 @@ export default function App() {
             openTabIds: state.openTabIds,
             activeTabId: state.activeTabId
           },
-          sameStorageSource: loadedFrom === noteStorageSourceRef.current,
+          sameStorageSource: loadedFrom === hydratedNoteStorageSourceRef.current,
+          authoritativeSnapshot: true,
           createRecoveryId: (sourceTab) =>
             `note-recovered-${Date.now()}-${sourceTab.id.replace(/[^a-zA-Z0-9_-]/g, "-")}-${Math.random()
               .toString(36)
@@ -861,7 +886,7 @@ export default function App() {
       return null;
     }
 
-    if (hydrationCompleteRef.current) {
+    if (hydrationCompleteRef.current && !noteLoadRecoveryRef.current) {
       const savedDirtyTabs = await saveDirtyLibraryTabsBeforeReload();
       if (!savedDirtyTabs) {
         throw new Error("Refusing to reload the note library while dirty tabs remain unsaved.");
@@ -872,17 +897,27 @@ export default function App() {
     noteWritesSuspendedRef.current = true;
     clearAutoSaveTimer();
     let loadedSuccessfully = false;
+    let keepWritesSuspended = false;
 
     try {
       await saveQueueRef.current.waitForIdle();
       const result = await noteApi.loadAll();
-      const merged = await hydrateLoadedNotes(result.notes, result.loadedFrom);
       noteStorageSourceRef.current = result.loadedFrom;
       setNoteStorageSource(result.loadedFrom);
+
+      if (result.loadState !== "ready") {
+        keepWritesSuspended = true;
+        updateNoteLoadRecovery(result);
+        return result;
+      }
+
+      const merged = await hydrateLoadedNotes(result.notes, result.loadedFrom);
+      hydratedNoteStorageSourceRef.current = result.loadedFrom;
 
       setPersistedFolders(normalizePersistedFolders(result.folders));
 
       loadedSuccessfully = true;
+      updateNoteLoadRecovery(null);
       noteRecoveryPendingRef.current = false;
       setNoteRecoveryPending(false);
       recoveryFailureNotifiedRef.current = false;
@@ -899,14 +934,14 @@ export default function App() {
 
       return result;
     } finally {
-      if (shouldResumeWrites || loadedSuccessfully) {
+      if (loadedSuccessfully || (shouldResumeWrites && !keepWritesSuspended)) {
         noteWritesSuspendedRef.current = false;
         Object.values(useNoteStore.getState().notesById)
           .filter((tab) => tab.persistence === "library" && tab.isDirty)
           .forEach((tab) => armAutoSaveForTab(tab.id));
       }
     }
-  }, [armAutoSaveForTab, clearAutoSaveTimer, hydrateLoadedNotes, saveDirtyLibraryTabsBeforeReload]);
+  }, [armAutoSaveForTab, clearAutoSaveTimer, hydrateLoadedNotes, saveDirtyLibraryTabsBeforeReload, updateNoteLoadRecovery]);
 
   const recoverCloudLibrary = useCallback(async () => {
     const recoverySource = noteStorageSourceRef.current;
@@ -927,6 +962,15 @@ export default function App() {
     try {
       await saveQueueRef.current.waitForIdle();
       const result = await hwanNote.note.loadAll();
+      noteStorageSourceRef.current = result.loadedFrom;
+      setNoteStorageSource(result.loadedFrom);
+
+      if (result.loadState !== "ready") {
+        updateNoteLoadRecovery(result);
+        return false;
+      }
+
+      updateNoteLoadRecovery(null);
 
       if (result.loadedFrom !== "cloud") {
         if (recoverySource === "local_fallback") {
@@ -970,10 +1014,9 @@ export default function App() {
 
       setPersistedFolders(normalizePersistedFolders(result.folders));
       hydrateTabs(recovery.tabs, recovery.session);
-      noteStorageSourceRef.current = result.loadedFrom;
-      setNoteStorageSource(result.loadedFrom);
+      hydratedNoteStorageSourceRef.current = result.loadedFrom;
 
-      useCalendarStore.getState().cleanOrphanNoteLinks();
+      useCalendarStore.getState().cleanOrphanNoteLinks(true);
 
       noteRecoveryPendingRef.current = false;
       setNoteRecoveryPending(false);
@@ -1012,7 +1055,7 @@ export default function App() {
     } finally {
       recoveryInFlightRef.current = false;
     }
-  }, [clearAutoSaveTimer, hydrateTabs, mapLoadedNoteToTab]);
+  }, [clearAutoSaveTimer, hydrateTabs, mapLoadedNoteToTab, updateNoteLoadRecovery]);
 
   const refreshLocalAutoSaveDir = useCallback(async () => {
     const settingsApi = hwanNote.settings;
@@ -1345,11 +1388,14 @@ export default function App() {
           return;
         }
 
-        // Load calendar data and clean orphan noteLinks after notes are available
+        // Calendar data is safe to read after an incomplete note scan, but orphan
+        // cleanup requires an authoritative note snapshot.
         await useCalendarStore.getState().loadCalendarData();
-        useCalendarStore.getState().cleanOrphanNoteLinks();
+        if (loaded.loadState === "ready") {
+          useCalendarStore.getState().cleanOrphanNoteLinks(true);
+        }
 
-        if (disposed) {
+        if (disposed || loaded.loadState !== "ready") {
           return;
         }
 
@@ -1982,11 +2028,32 @@ export default function App() {
   }, [flushCalendarBeforeStorageChange, resolveOpenTabsBeforeReload]);
 
   const reloadCurrentStorage = useCallback(async () => {
-    await loadLibraryState();
+    const loaded = await loadLibraryState();
+    if (!loaded) {
+      return;
+    }
+
     await useCalendarStore.getState().loadCalendarData();
-    useCalendarStore.getState().cleanOrphanNoteLinks();
-    await finalizeInitialHydration();
+    if (loaded.loadState === "ready") {
+      useCalendarStore.getState().cleanOrphanNoteLinks(true);
+      await finalizeInitialHydration();
+    }
   }, [finalizeInitialHydration, loadLibraryState]);
+
+  const handleRetryNoteLibrary = useCallback(async () => {
+    if (noteLoadRetrying) {
+      return;
+    }
+
+    setNoteLoadRetrying(true);
+    try {
+      await reloadCurrentStorage();
+    } catch (error) {
+      console.error("Failed to retry note library recovery:", error);
+    } finally {
+      setNoteLoadRetrying(false);
+    }
+  }, [noteLoadRetrying, reloadCurrentStorage]);
 
   const handleBrowseAutoSaveDir = useCallback(async () => {
     const settingsApi = hwanNote.settings;
@@ -2232,7 +2299,10 @@ export default function App() {
         if (status.resolvedSource === "local_fallback") {
           if (noteStorageSourceRef.current === "cloud") {
             suspendCloudWritesForRecovery();
-          } else if (noteStorageSourceRef.current === "local_fallback") {
+          } else if (
+            noteStorageSourceRef.current === "local_fallback" &&
+            !noteLoadRecoveryRef.current
+          ) {
             noteRecoveryPendingRef.current = false;
             setNoteRecoveryPending(false);
             noteWritesSuspendedRef.current = false;
@@ -2637,6 +2707,55 @@ export default function App() {
             </button>
             <button type="button" onClick={() => void handleResetAutoSaveDir()}>
               {t("settings.autoSaveReset")}
+            </button>
+          </div>
+        </section>
+      ) : null}
+
+      {noteLoadRecovery ? (
+        <section className="note-recovery-panel no-drag" role="alert" aria-live="polite">
+          <div className="note-recovery-copy">
+            <strong>
+              {noteLoadRecovery.loadState === "index_corrupt"
+                ? t("notes.recoveryCorruptTitle")
+                : t("notes.recoveryIncompleteTitle")}
+            </strong>
+            <span>{t("notes.recoveryDescription")}</span>
+            <dl className="note-recovery-details">
+              {noteLoadRecovery.indexSourcePath ? (
+                <div>
+                  <dt>{t("notes.recoveryIndexSource")}</dt>
+                  <dd>{noteLoadRecovery.indexSourcePath}</dd>
+                </div>
+              ) : null}
+              {noteLoadRecovery.indexBackupPath ? (
+                <div>
+                  <dt>{t("notes.recoveryIndexBackup")}</dt>
+                  <dd>{noteLoadRecovery.indexBackupPath}</dd>
+                </div>
+              ) : null}
+            </dl>
+            {noteLoadRecovery.issues.length > 0 ? (
+              <ul className="note-recovery-issues">
+                {noteLoadRecovery.issues.map((issue, index) => (
+                  <li key={`${issue.kind}:${issue.operation}:${issue.path}:${index}`}>
+                    <span className="note-recovery-operation">{issue.operation}</span>
+                    <span className="note-recovery-path">{issue.path}</span>
+                    <span className="note-recovery-reason">{issue.reason}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <span>{t("notes.recoveryUnknownCause")}</span>
+            )}
+          </div>
+          <div className="note-recovery-actions">
+            <button
+              type="button"
+              disabled={noteLoadRetrying}
+              onClick={() => void handleRetryNoteLibrary()}
+            >
+              {noteLoadRetrying ? t("notes.recoveryRetrying") : t("notes.recoveryRetry")}
             </button>
           </div>
         </section>

@@ -637,6 +637,117 @@ body.tab-dragging .tab:not(.dragging):hover {
   background: var(--bg-hover);
 }
 
+.note-recovery-panel {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 12px 14px;
+  border-bottom: 1px solid color-mix(in srgb, var(--kind-deadline) 52%, var(--border-soft));
+  background: var(--kind-deadline-bg);
+  color: var(--text-primary);
+}
+
+.note-recovery-copy {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.note-recovery-copy > strong {
+  color: var(--kind-deadline);
+  font-size: 13px;
+}
+
+.note-recovery-details {
+  display: grid;
+  gap: 4px;
+  margin: 2px 0 0;
+}
+
+.note-recovery-details > div {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 8px;
+}
+
+.note-recovery-details dt {
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.note-recovery-details dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-family: "Cascadia Code", "JetBrains Mono", monospace;
+}
+
+.note-recovery-issues {
+  display: grid;
+  gap: 5px;
+  margin: 2px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.note-recovery-issues li {
+  display: grid;
+  grid-template-columns: max-content minmax(120px, 0.75fr) minmax(160px, 1fr);
+  gap: 8px;
+  align-items: baseline;
+}
+
+.note-recovery-operation {
+  color: var(--kind-deadline);
+  font-family: "Cascadia Code", "JetBrains Mono", monospace;
+  font-weight: 600;
+}
+
+.note-recovery-path,
+.note-recovery-reason {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.note-recovery-path {
+  font-family: "Cascadia Code", "JetBrains Mono", monospace;
+}
+
+.note-recovery-actions {
+  flex-shrink: 0;
+}
+
+.note-recovery-actions button {
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid color-mix(in srgb, var(--kind-deadline) 45%, var(--border-soft));
+  border-radius: 7px;
+  background: var(--bg-surface);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.note-recovery-actions button:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.note-recovery-actions button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+@media (max-width: 760px) {
+  .note-recovery-issues li {
+    grid-template-columns: 1fr;
+  }
+
+  .note-recovery-panel {
+    flex-direction: column;
+  }
+}
+
 .workspace > * {
   min-width: 0;
 }
