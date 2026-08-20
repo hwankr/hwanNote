@@ -2056,13 +2056,9 @@ export default function App() {
   }, [autoSaveDirInfo?.status, autoSaveDirRecoveryPending, prepareLocalStorageTransition, refreshCloudSyncState, refreshLocalAutoSaveDir, reloadCurrentStorage]);
 
   const handleCloudSyncChange = useCallback(async (provider: string | null, options?: { copyLocalNotes: boolean }) => {
-    const didResolve = await resolveOpenTabsBeforeReload();
-    if (!didResolve) {
-      return;
-    }
-
-    const didSaveCalendar = await flushCalendarBeforeStorageChange();
-    if (!didSaveCalendar) {
+    const latestInfo = await refreshLocalAutoSaveDir().catch(() => autoSaveDirInfo);
+    const prepared = await prepareLocalStorageTransition(latestInfo?.status ?? null);
+    if (!prepared) {
       return;
     }
 
@@ -2073,36 +2069,28 @@ export default function App() {
         await hwanNote.cloud.disable();
       }
       await refreshLocalAutoSaveDir();
-      await loadLibraryState();
-      await useCalendarStore.getState().loadCalendarData();
-      useCalendarStore.getState().cleanOrphanNoteLinks();
+      await reloadCurrentStorage();
       await refreshCloudSyncState();
     } catch (error) {
       console.error("Failed to change cloud sync:", error);
     }
-  }, [flushCalendarBeforeStorageChange, loadLibraryState, refreshCloudSyncState, refreshLocalAutoSaveDir, resolveOpenTabsBeforeReload]);
+  }, [autoSaveDirInfo, prepareLocalStorageTransition, refreshCloudSyncState, refreshLocalAutoSaveDir, reloadCurrentStorage]);
 
   const handleCloudSyncSourceChange = useCallback(async (source: CloudSyncSource) => {
-    const didResolve = await resolveOpenTabsBeforeReload();
-    if (!didResolve) {
-      return;
-    }
-
-    const didSaveCalendar = await flushCalendarBeforeStorageChange();
-    if (!didSaveCalendar) {
+    const latestInfo = await refreshLocalAutoSaveDir().catch(() => autoSaveDirInfo);
+    const prepared = await prepareLocalStorageTransition(latestInfo?.status ?? null);
+    if (!prepared) {
       return;
     }
 
     try {
       await hwanNote.cloud.setActiveSource(source);
-      await loadLibraryState();
-      await useCalendarStore.getState().loadCalendarData();
-      useCalendarStore.getState().cleanOrphanNoteLinks();
+      await reloadCurrentStorage();
       await refreshCloudSyncState();
     } catch (error) {
       console.error("Failed to switch library source:", error);
     }
-  }, [flushCalendarBeforeStorageChange, loadLibraryState, refreshCloudSyncState, resolveOpenTabsBeforeReload]);
+  }, [autoSaveDirInfo, prepareLocalStorageTransition, refreshCloudSyncState, refreshLocalAutoSaveDir, reloadCurrentStorage]);
 
   const handleInstallUpdate = useCallback(async () => {
     const isReadyToInstall = await runGuardedFlow(async () => {
@@ -2620,7 +2608,8 @@ export default function App() {
         />
       )}
 
-      {autoSaveDirInfo?.status === "unavailable" || autoSaveDirRecoveryPending ? (
+      {autoSaveDirInfo &&
+      (autoSaveDirInfo.status === "unavailable" || autoSaveDirRecoveryPending) ? (
         <section className="storage-unavailable-banner no-drag" role="alert">
           <div className="storage-unavailable-copy">
             <strong>

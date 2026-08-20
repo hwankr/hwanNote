@@ -1711,7 +1711,7 @@ mod tests {
         select_loaded_storage_dir, select_note_library_mutation_dir,
         validate_calendar_data_for_confirmation, validate_empty_calendar_reset,
         verify_calendar_snapshot, write_calendar_data, write_unique_calendar_backup,
-        CalendarWriteGuard, ResolvedStorageSource, MAX_CALENDAR_RECOVERY_COPY_BYTES,
+        CalendarWriteGuard, CloudSyncStatus, ResolvedStorageSource, MAX_CALENDAR_RECOVERY_COPY_BYTES,
         MAX_CALENDAR_RECOVERY_COPY_COUNT,
     };
     use crate::config_manager::{LibrarySource, LocalAutoSaveDirState};
@@ -2376,5 +2376,24 @@ mod tests {
         assert!(!error.contains("local_fallback"));
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cloud_status_can_report_an_unresolved_storage_source_without_hiding_cloud_state() {
+        let status = CloudSyncStatus {
+            enabled: true,
+            provider: Some("google_drive".to_string()),
+            sync_folder: None,
+            active_source: "cloud".to_string(),
+            resolved_source: None,
+            cloud_unavailable: true,
+        };
+
+        let serialized = serde_json::to_value(status).unwrap();
+
+        assert_eq!(serialized["provider"], "google_drive");
+        assert_eq!(serialized["activeSource"], "cloud");
+        assert_eq!(serialized["resolvedSource"], serde_json::Value::Null);
+        assert_eq!(serialized["cloudUnavailable"], true);
     }
 }
