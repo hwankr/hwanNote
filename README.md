@@ -2,7 +2,7 @@
 
 # HwanNote
 
-![Version](https://img.shields.io/badge/version-0.9.10-2f7d32) ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-blue) ![Tauri](https://img.shields.io/badge/Tauri-v2-24C8D8) ![React](https://img.shields.io/badge/React-18-61DAFB) ![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white) ![License](https://img.shields.io/badge/License-MIT-green)
+![Version](https://img.shields.io/badge/version-0.9.11-2f7d32) ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-blue) ![Tauri](https://img.shields.io/badge/Tauri-v2-24C8D8) ![React](https://img.shields.io/badge/React-18-61DAFB) ![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white) ![License](https://img.shields.io/badge/License-MIT-green)
 
 > Windows 11 메모장 감성을 바탕으로 만든 데스크톱 마크다운 메모 앱
 

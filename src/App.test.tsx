@@ -20,7 +20,9 @@ const mocks = vi.hoisted(() => ({
   loadCalendarData: vi.fn(),
   loadSession: vi.fn(),
   onFolderMissing: vi.fn(),
+  openIntentHandler: null as ((filePath: string) => void) | null,
   onOpenIntent: vi.fn(),
+  readExternalTxt: vi.fn(),
   recoverCalendarDataFromCloud: vi.fn(),
   saveCalendarData: vi.fn(),
   saveSession: vi.fn(),
@@ -43,7 +45,7 @@ vi.mock("./lib/tauriApi", () => ({
       autoSave: mocks.autoSave,
       loadAll: mocks.loadAll,
       importTxt: vi.fn().mockResolvedValue(null),
-      readExternalTxt: vi.fn(),
+      readExternalTxt: mocks.readExternalTxt,
       drainOpenIntents: vi.fn().mockResolvedValue([]),
       onOpenIntent: mocks.onOpenIntent,
       pickSavePath: vi.fn().mockResolvedValue(null),
@@ -368,7 +370,16 @@ describe("App locale changes", () => {
     });
     mocks.detectCloudProviders.mockReset().mockResolvedValue([]);
     mocks.onFolderMissing.mockReset().mockReturnValue(() => undefined);
-    mocks.onOpenIntent.mockReset().mockReturnValue(() => undefined);
+    mocks.openIntentHandler = null;
+    mocks.onOpenIntent.mockReset().mockImplementation((handler: (filePath: string) => void) => {
+      mocks.openIntentHandler = handler;
+      return () => undefined;
+    });
+    mocks.readExternalTxt.mockReset().mockResolvedValue({
+      title: "External note",
+      content: "external content",
+      filePath: "C:/external.txt",
+    });
     mocks.loadCalendarData.mockReset().mockResolvedValue(undefined);
     mocks.recoverCalendarDataFromCloud.mockReset().mockResolvedValue({
       status: "recovered",
@@ -454,6 +465,15 @@ describe("App locale changes", () => {
     expect(mocks.setAutoSaveDir).toHaveBeenCalledWith(null);
     expect(mocks.saveCalendarData).not.toHaveBeenCalled();
     expect(container.querySelector(".storage-unavailable-banner")).toBeNull();
+
+    await act(async () => {
+      mocks.openIntentHandler?.("C:/external.txt");
+    });
+    await flushUntil(
+      () => mocks.readExternalTxt.mock.calls.length === 1,
+      "external open handling after recovered hydration",
+    );
+    expect(mocks.readExternalTxt).toHaveBeenCalledWith("C:/external.txt");
   });
 
   it("restores the existing custom setting when the path reappears", async () => {
@@ -480,15 +500,25 @@ describe("App locale changes", () => {
     });
     mocks.loadAll.mockResolvedValue(createLoadResult("local", "restored custom library"));
 
-    const retryButton = Array.from(
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await flushUntil(
+      () => container.textContent?.includes("사용자 지정 저장 경로가 다시 연결되었습니다") === true,
+      "the recovered-path status",
+    );
+    expect(mocks.loadAll).toHaveBeenCalledTimes(1);
+    expect(mocks.setAutoSaveDir).not.toHaveBeenCalled();
+
+    const reloadButton = Array.from(
       requiredElement<HTMLElement>(container, ".storage-unavailable-actions").querySelectorAll("button")
-    ).find((button) => button.textContent === "재연결 확인");
-    if (!retryButton) {
-      throw new Error("Expected the reconnect retry action");
+    ).find((button) => button.textContent === "라이브러리 다시 불러오기");
+    if (!reloadButton) {
+      throw new Error("Expected the recovered-library reload action");
     }
 
     await act(async () => {
-      retryButton.click();
+      reloadButton.click();
     });
     await flushUntil(() => mocks.loadAll.mock.calls.length === 2, "the restored custom library reload");
 
@@ -596,6 +626,43 @@ describe("App locale changes", () => {
       "cloud",
     );
     expect(mocks.recoverCalendarDataFromCloud).not.toHaveBeenCalled();
+  });
+
+  it("can switch to an available cloud library when the custom local path blocked startup", async () => {
+    consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    mocks.calendarLoadState = "idle";
+    mocks.getAutoSaveDir.mockResolvedValue({
+      customDir: "Z:/ExternalLocal",
+      effectiveDir: null,
+      isDefault: false,
+      status: "unavailable",
+      expectedDir: "Z:/ExternalLocal",
+      error: "custom_auto_save_dir_unavailable",
+    });
+    mocks.cloudStatus.mockResolvedValue({
+      enabled: true,
+      provider: "google_drive",
+      syncFolder: "G:/Cloud",
+      activeSource: "local",
+      resolvedSource: null,
+      cloudUnavailable: false,
+    });
+    mocks.loadAll.mockRejectedValue(new Error("custom path unavailable"));
+
+    await renderApp(root);
+    mocks.loadAll.mockResolvedValue(createLoadResult("cloud", "available cloud library"));
+
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="switch-cloud-source"]').click();
+    });
+    await flushUntil(() => mocks.setActiveSource.mock.calls.length === 1, "the cloud source switch");
+    await flushUntil(() => mocks.loadAll.mock.calls.length === 2, "the cloud library load");
+
+    expect(mocks.setActiveSource).toHaveBeenCalledWith("cloud");
+    expect(mocks.saveCalendarData).not.toHaveBeenCalled();
+    expect(useNoteStore.getState().notesById[NOTE_ID]).toMatchObject({
+      plainText: "available cloud library",
+    });
   });
 
   it("hydrates once and preserves a pending dirty note across a language change", async () => {

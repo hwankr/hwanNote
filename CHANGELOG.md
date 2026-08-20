@@ -5,6 +5,22 @@ All notable user-facing changes to HwanNote are documented here.
 This project follows [Semantic Versioning](https://semver.org/) and commit messages use the
 [Conventional Commits](https://www.conventionalcommits.org/) style.
 
+## [0.9.11] - 2026-08-20
+
+Completes the unavailable custom-storage recovery flow introduced in 0.9.10.
+
+### Fixed
+
+- **Recovered startup fully resumes the app.** Retrying, resetting, selecting a
+  new folder, or switching to an available cloud library after a blocked launch
+  now finalizes hydration and processes pending external file-open requests.
+- **Cloud status remains independent.** Provider and active-source status stay
+  available when a custom local directory is disconnected; an unresolved local
+  target is represented separately instead of failing the cloud status command.
+- **Reconnect detection is visible.** Polling and window-focus checks now show
+  when the configured directory has returned and wait for an explicit library
+  reload without changing the saved path.
+
 ## [0.9.10] - 2026-08-20
 
 Fixes a library-splitting risk where a temporarily disconnected custom local
