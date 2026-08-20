@@ -1711,8 +1711,8 @@ mod tests {
         select_loaded_storage_dir, select_note_library_mutation_dir,
         validate_calendar_data_for_confirmation, validate_empty_calendar_reset,
         verify_calendar_snapshot, write_calendar_data, write_unique_calendar_backup,
-        CalendarWriteGuard, CloudSyncStatus, ResolvedStorageSource, MAX_CALENDAR_RECOVERY_COPY_BYTES,
-        MAX_CALENDAR_RECOVERY_COPY_COUNT,
+        CalendarWriteGuard, CloudSyncStatus, ResolvedStorageSource,
+        MAX_CALENDAR_RECOVERY_COPY_BYTES, MAX_CALENDAR_RECOVERY_COPY_COUNT,
     };
     use crate::config_manager::{LibrarySource, LocalAutoSaveDirState};
     use crate::file_manager::{self, AutoSavePayload};
