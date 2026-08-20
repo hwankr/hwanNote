@@ -487,9 +487,33 @@ fn calendar_backup_candidate(calendar_path: &Path, sequence: u64) -> PathBuf {
     calendar_path.with_file_name(backup_name)
 }
 
-fn write_unique_calendar_backup(calendar_path: &Path, data: &[u8]) -> Result<PathBuf, String> {
+fn normalize_user_visible_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let raw = path.to_string_lossy();
+        if let Some(stripped) = raw.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{stripped}"));
+        }
+        if let Some(stripped) = raw.strip_prefix(r"\\?\") {
+            return PathBuf::from(stripped);
+        }
+    }
+
+    path.to_path_buf()
+}
+
+fn write_unique_calendar_backup_with_root(
+    trusted_root: &file_manager::TrustedLibraryRoot,
+    data: &[u8],
+) -> Result<PathBuf, String> {
+    let calendar_path = trusted_root.file_path(file_manager::CALENDAR_FILENAME, false)?;
     for sequence in 0_u64.. {
-        let backup_path = calendar_backup_candidate(calendar_path, sequence);
+        let candidate = calendar_backup_candidate(&calendar_path, sequence);
+        let backup_name = candidate
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| "Calendar backup filename is not valid UTF-8.".to_string())?;
+        let backup_path = trusted_root.file_path(backup_name, false)?;
         match OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -509,7 +533,7 @@ fn write_unique_calendar_backup(calendar_path: &Path, data: &[u8]) -> Result<Pat
                     ));
                 }
 
-                return Ok(backup_path);
+                return Ok(normalize_user_visible_path(&backup_path));
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => {
@@ -525,8 +549,20 @@ fn write_unique_calendar_backup(calendar_path: &Path, data: &[u8]) -> Result<Pat
     unreachable!("the calendar backup sequence is unbounded")
 }
 
-fn backup_calendar_file(calendar_path: &Path) -> Result<PathBuf, String> {
-    let data = fs::read(calendar_path).map_err(|error| {
+#[cfg(test)]
+fn write_unique_calendar_backup(calendar_path: &Path, data: &[u8]) -> Result<PathBuf, String> {
+    let root_dir = calendar_path
+        .parent()
+        .ok_or_else(|| "Calendar path has no parent directory.".to_string())?;
+    let trusted_root = file_manager::TrustedLibraryRoot::open(root_dir)?;
+    write_unique_calendar_backup_with_root(&trusted_root, data)
+}
+
+fn backup_calendar_file_with_root(
+    trusted_root: &file_manager::TrustedLibraryRoot,
+) -> Result<PathBuf, String> {
+    let calendar_path = trusted_root.file_path(file_manager::CALENDAR_FILENAME, true)?;
+    let data = fs::read(&calendar_path).map_err(|error| {
         format!(
             "Failed to read calendar data for backup {}: {}",
             calendar_path.display(),
@@ -534,7 +570,16 @@ fn backup_calendar_file(calendar_path: &Path) -> Result<PathBuf, String> {
         )
     })?;
 
-    write_unique_calendar_backup(calendar_path, &data)
+    write_unique_calendar_backup_with_root(trusted_root, &data)
+}
+
+#[cfg(test)]
+fn backup_calendar_file(calendar_path: &Path) -> Result<PathBuf, String> {
+    let root_dir = calendar_path
+        .parent()
+        .ok_or_else(|| "Calendar path has no parent directory.".to_string())?;
+    let trusted_root = file_manager::TrustedLibraryRoot::open(root_dir)?;
+    backup_calendar_file_with_root(&trusted_root)
 }
 
 fn calendar_recovery_copy_candidate(local_dir: &Path, sequence: u64) -> PathBuf {
@@ -553,9 +598,8 @@ const MAX_CALENDAR_RECOVERY_COPY_COUNT: u64 = 16;
 const MAX_CALENDAR_RECOVERY_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_CALENDAR_RECOVERY_CREATE_ATTEMPTS: u8 = 3;
 
-fn preserve_calendar_recovery_copy(local_dir: &Path, data: &str) -> Result<PathBuf, String> {
-    let payload = data.as_bytes();
-    let payload_len = u64::try_from(payload.len())
+fn validate_calendar_recovery_copy_payload(data: &str) -> Result<(), String> {
+    let payload_len = u64::try_from(data.len())
         .map_err(|_| "Calendar recovery copy rejected: payload size overflowed.".to_string())?;
     if payload_len > MAX_CALENDAR_RECOVERY_COPY_BYTES {
         return Err(format!(
@@ -563,21 +607,29 @@ fn preserve_calendar_recovery_copy(local_dir: &Path, data: &str) -> Result<PathB
             payload_len, MAX_CALENDAR_RECOVERY_COPY_BYTES
         ));
     }
-    validate_calendar_data_for_confirmation(data)?;
-    fs::create_dir_all(local_dir).map_err(|error| {
-        format!(
-            "Failed to create local calendar recovery directory {}: {}",
-            local_dir.display(),
-            error
-        )
-    })?;
+    validate_calendar_data_for_confirmation(data)
+}
+
+fn preserve_calendar_recovery_copy_with_root(
+    trusted_root: &file_manager::TrustedLibraryRoot,
+    data: &str,
+) -> Result<PathBuf, String> {
+    let payload = data.as_bytes();
+    let payload_len = u64::try_from(payload.len())
+        .map_err(|_| "Calendar recovery copy rejected: payload size overflowed.".to_string())?;
+    validate_calendar_recovery_copy_payload(data)?;
 
     for attempt in 0..MAX_CALENDAR_RECOVERY_CREATE_ATTEMPTS {
         let mut first_available_path = None;
         let mut total_bytes = 0_u64;
 
         for sequence in 0..MAX_CALENDAR_RECOVERY_COPY_COUNT {
-            let recovery_path = calendar_recovery_copy_candidate(local_dir, sequence);
+            let candidate = calendar_recovery_copy_candidate(trusted_root.path(), sequence);
+            let recovery_name = candidate
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| "Calendar recovery filename is not valid UTF-8.".to_string())?;
+            let recovery_path = trusted_root.file_path(recovery_name, false)?;
             let metadata = match fs::symlink_metadata(&recovery_path) {
                 Ok(metadata) => metadata,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -615,7 +667,7 @@ fn preserve_calendar_recovery_copy(local_dir: &Path, data: &str) -> Result<PathB
                     )
                 })?;
                 if existing == payload {
-                    return Ok(recovery_path);
+                    return Ok(normalize_user_visible_path(&recovery_path));
                 }
             }
         }
@@ -655,7 +707,7 @@ fn preserve_calendar_recovery_copy(local_dir: &Path, data: &str) -> Result<PathB
                     ));
                 }
 
-                return Ok(recovery_path);
+                return Ok(normalize_user_visible_path(&recovery_path));
             }
             Err(error)
                 if error.kind() == std::io::ErrorKind::AlreadyExists
@@ -676,13 +728,31 @@ fn preserve_calendar_recovery_copy(local_dir: &Path, data: &str) -> Result<PathB
     Err("Calendar recovery copy rejected after repeated concurrent creation attempts.".to_string())
 }
 
-fn verify_calendar_snapshot(
-    calendar_path: &Path,
+#[cfg(test)]
+fn preserve_calendar_recovery_copy(local_dir: &Path, data: &str) -> Result<PathBuf, String> {
+    validate_calendar_recovery_copy_payload(data)?;
+    if !local_dir.exists() {
+        fs::create_dir_all(local_dir).map_err(|error| {
+            format!(
+                "Failed to create the local calendar directory {}: {}",
+                local_dir.display(),
+                error
+            )
+        })?;
+    }
+    let trusted_root = file_manager::TrustedLibraryRoot::open(local_dir)?;
+    preserve_calendar_recovery_copy_with_root(&trusted_root, data)
+}
+
+fn verify_calendar_snapshot_with_root(
+    trusted_root: &file_manager::TrustedLibraryRoot,
     expected_data: Option<&str>,
 ) -> Result<(), String> {
+    let calendar_path =
+        trusted_root.file_path(file_manager::CALENDAR_FILENAME, expected_data.is_some())?;
     match expected_data {
         Some(expected_data) => {
-            let current_data = fs::read_to_string(calendar_path).map_err(|error| {
+            let current_data = fs::read_to_string(&calendar_path).map_err(|error| {
                 format!(
                     "Calendar confirmation rejected because {} could not be read: {}",
                     calendar_path.display(),
@@ -697,7 +767,7 @@ fn verify_calendar_snapshot(
             }
             Ok(())
         }
-        None => match fs::metadata(calendar_path) {
+        None => match fs::symlink_metadata(&calendar_path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Ok(_) => Err(format!(
                 "Calendar confirmation rejected because {} appeared after the missing-file result.",
@@ -710,6 +780,18 @@ fn verify_calendar_snapshot(
             )),
         },
     }
+}
+
+#[cfg(test)]
+fn verify_calendar_snapshot(
+    calendar_path: &Path,
+    expected_data: Option<&str>,
+) -> Result<(), String> {
+    let root_dir = calendar_path
+        .parent()
+        .ok_or_else(|| "Calendar path has no parent directory.".to_string())?;
+    let trusted_root = file_manager::TrustedLibraryRoot::open(root_dir)?;
+    verify_calendar_snapshot_with_root(&trusted_root, expected_data)
 }
 
 fn validate_calendar_data_for_confirmation(data: &str) -> Result<(), String> {
@@ -823,14 +905,16 @@ fn validate_empty_calendar_reset(data: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn create_unique_calendar_temp(dir: &Path) -> Result<(fs::File, PathBuf), String> {
+fn create_unique_calendar_temp_with_root(
+    trusted_root: &file_manager::TrustedLibraryRoot,
+) -> Result<(fs::File, PathBuf), String> {
     for sequence in 0_u64.. {
         let file_name = if sequence == 0 {
             ".calendar.json.tmp".to_string()
         } else {
             format!(".calendar.json.tmp.{}", sequence)
         };
-        let temp_path = dir.join(file_name);
+        let temp_path = trusted_root.file_path(&file_name, false)?;
         match OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -851,13 +935,17 @@ fn create_unique_calendar_temp(dir: &Path) -> Result<(fs::File, PathBuf), String
     unreachable!("the calendar temp-file sequence is unbounded")
 }
 
-fn write_calendar_data(dir: &Path, data: &str) -> Result<(), String> {
-    if !dir.exists() {
-        fs::create_dir_all(dir).map_err(|error| error.to_string())?;
-    }
+#[cfg(test)]
+fn create_unique_calendar_temp(dir: &Path) -> Result<(fs::File, PathBuf), String> {
+    let trusted_root = file_manager::TrustedLibraryRoot::open(dir)?;
+    create_unique_calendar_temp_with_root(&trusted_root)
+}
 
-    let path = dir.join(file_manager::CALENDAR_FILENAME);
-    let (mut tmp_file, tmp_path) = create_unique_calendar_temp(dir)?;
+fn write_calendar_data_with_root(
+    trusted_root: &file_manager::TrustedLibraryRoot,
+    data: &str,
+) -> Result<(), String> {
+    let (mut tmp_file, tmp_path) = create_unique_calendar_temp_with_root(trusted_root)?;
     if let Err(error) = tmp_file
         .write_all(data.as_bytes())
         .and_then(|_| tmp_file.sync_all())
@@ -869,6 +957,13 @@ fn write_calendar_data(dir: &Path, data: &str) -> Result<(), String> {
     }
     drop(tmp_file);
 
+    let path = match trusted_root.file_path(file_manager::CALENDAR_FILENAME, false) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(error);
+        }
+    };
     fs::rename(&tmp_path, &path).map_err(|error| {
         tracing::error!("Failed to rename calendar temp file: {}", error);
         let _ = fs::remove_file(&tmp_path);
@@ -876,6 +971,12 @@ fn write_calendar_data(dir: &Path, data: &str) -> Result<(), String> {
     })?;
 
     Ok(())
+}
+
+#[cfg(test)]
+fn write_calendar_data(dir: &Path, data: &str) -> Result<(), String> {
+    let trusted_root = file_manager::TrustedLibraryRoot::open(dir)?;
+    write_calendar_data_with_root(&trusted_root, data)
 }
 
 // ── Window commands ──
@@ -909,19 +1010,22 @@ pub fn cmd_app_exit(app: AppHandle) {
 // ── Note commands ──
 
 #[tauri::command]
-pub fn cmd_note_save(file_path: String, content: String) -> Result<bool, String> {
-    file_manager::save_markdown_file(std::path::Path::new(&file_path), &content)?;
+pub fn cmd_note_save(app: AppHandle, file_path: String, content: String) -> Result<bool, String> {
+    let library_root = resolve_effective_dir(&app)?;
+    file_manager::save_markdown_file(&library_root, std::path::Path::new(&file_path), &content)?;
     Ok(true)
 }
 
 #[tauri::command]
-pub fn cmd_note_read(file_path: String) -> Result<String, String> {
-    file_manager::read_markdown_file(std::path::Path::new(&file_path))
+pub fn cmd_note_read(app: AppHandle, file_path: String) -> Result<String, String> {
+    let library_root = resolve_effective_dir(&app)?;
+    file_manager::read_markdown_file(&library_root, std::path::Path::new(&file_path))
 }
 
 #[tauri::command]
-pub fn cmd_note_list(dir_path: String) -> Result<Vec<String>, String> {
-    file_manager::list_markdown_files(std::path::Path::new(&dir_path))
+pub fn cmd_note_list(app: AppHandle, dir_path: String) -> Result<Vec<String>, String> {
+    let library_root = resolve_effective_dir(&app)?;
+    file_manager::list_markdown_files(&library_root, std::path::Path::new(&dir_path))
 }
 
 #[tauri::command]
@@ -1028,7 +1132,8 @@ pub async fn cmd_note_delete(
 #[tauri::command]
 pub fn cmd_calendar_load(app: AppHandle) -> Result<CalendarLoadResult, String> {
     let (dir, loaded_from) = resolve_calendar_dir(&app)?;
-    let path = dir.join(file_manager::CALENDAR_FILENAME);
+    let trusted_root = file_manager::TrustedLibraryRoot::open(&dir)?;
+    let path = trusted_root.file_path(file_manager::CALENDAR_FILENAME, false)?;
     let source_path = path.to_string_lossy().to_string();
     let cloud_unavailable = loaded_from == ResolvedStorageSource::LocalFallback;
     let loaded_from = resolved_storage_source_to_str(loaded_from).to_string();
@@ -1061,7 +1166,7 @@ pub fn cmd_calendar_load(app: AppHandle) -> Result<CalendarLoadResult, String> {
             let read_error = format!("Failed to read calendar.json: {}", read_error);
             tracing::error!("{}", read_error);
             app.state::<CalendarWriteGuard>().block(&path);
-            let (backup_path, error) = match backup_calendar_file(&path) {
+            let (backup_path, error) = match backup_calendar_file_with_root(&trusted_root) {
                 Ok(backup_path) => (Some(backup_path.to_string_lossy().to_string()), read_error),
                 Err(backup_error) => {
                     tracing::error!(
@@ -1095,14 +1200,12 @@ pub fn cmd_calendar_backup(
 ) -> Result<String, String> {
     let loaded_from = parse_resolved_storage_source(&payload.loaded_from)?;
     let dir = resolve_loaded_storage_dir(&app, loaded_from)?;
-    let calendar_path = dir.join(file_manager::CALENDAR_FILENAME);
+    let trusted_root = file_manager::TrustedLibraryRoot::open(&dir)?;
+    let calendar_path = trusted_root.file_path(file_manager::CALENDAR_FILENAME, false)?;
     app.state::<CalendarWriteGuard>().block(&calendar_path);
 
-    if !dir.exists() {
-        fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
-    }
-
-    let backup_path = write_unique_calendar_backup(&calendar_path, payload.data.as_bytes())?;
+    let backup_path =
+        write_unique_calendar_backup_with_root(&trusted_root, payload.data.as_bytes())?;
     Ok(backup_path.to_string_lossy().to_string())
 }
 
@@ -1110,7 +1213,26 @@ pub fn cmd_calendar_backup(
 pub fn cmd_calendar_preserve_recovery_copy(app: AppHandle, data: String) -> Result<String, String> {
     let documents = dirs::document_dir().unwrap_or_else(|| PathBuf::from("."));
     let local_dir = get_calendar_local_dir(&app, &documents)?;
-    let recovery_path = preserve_calendar_recovery_copy(&local_dir, &data)?;
+    let payload_len = u64::try_from(data.len())
+        .map_err(|_| "Calendar recovery copy rejected: payload size overflowed.".to_string())?;
+    if payload_len > MAX_CALENDAR_RECOVERY_COPY_BYTES {
+        return Err(format!(
+            "Calendar recovery copy rejected: payload is {} bytes, exceeding the {} byte limit.",
+            payload_len, MAX_CALENDAR_RECOVERY_COPY_BYTES
+        ));
+    }
+    validate_calendar_data_for_confirmation(&data)?;
+    if !local_dir.exists() {
+        fs::create_dir_all(&local_dir).map_err(|error| {
+            format!(
+                "Failed to create the local calendar directory {}: {}",
+                local_dir.display(),
+                error
+            )
+        })?;
+    }
+    let trusted_root = file_manager::TrustedLibraryRoot::open(&local_dir)?;
+    let recovery_path = preserve_calendar_recovery_copy_with_root(&trusted_root, &data)?;
     Ok(recovery_path.to_string_lossy().to_string())
 }
 
@@ -1121,13 +1243,14 @@ pub fn cmd_calendar_confirm_loaded(
 ) -> Result<(), String> {
     let loaded_from = parse_resolved_storage_source(&payload.loaded_from)?;
     let dir = resolve_loaded_storage_dir(&app, loaded_from)?;
-    let calendar_path = dir.join(file_manager::CALENDAR_FILENAME);
+    let trusted_root = file_manager::TrustedLibraryRoot::open(&dir)?;
+    let calendar_path = trusted_root.file_path(file_manager::CALENDAR_FILENAME, false)?;
     let write_guard = app.state::<CalendarWriteGuard>();
     write_guard.block(&calendar_path);
     if let Some(data) = payload.data.as_deref() {
         validate_calendar_data_for_confirmation(data)?;
     }
-    verify_calendar_snapshot(&calendar_path, payload.data.as_deref())?;
+    verify_calendar_snapshot_with_root(&trusted_root, payload.data.as_deref())?;
     write_guard.confirm_loaded(&calendar_path);
     Ok(())
 }
@@ -1146,9 +1269,12 @@ pub fn cmd_calendar_save(app: AppHandle, payload: CalendarSavePayload) -> Result
     }
 
     let dir = resolve_loaded_storage_dir(&app, loaded_from)?;
-    let calendar_path = dir.join(file_manager::CALENDAR_FILENAME);
+    let trusted_root = file_manager::TrustedLibraryRoot::open(&dir)?;
+    let calendar_path = trusted_root.file_path(file_manager::CALENDAR_FILENAME, false)?;
     app.state::<CalendarWriteGuard>()
-        .write_if_allowed(&calendar_path, || write_calendar_data(&dir, &payload.data))
+        .write_if_allowed(&calendar_path, || {
+            write_calendar_data_with_root(&trusted_root, &payload.data)
+        })
 }
 
 #[tauri::command]
@@ -1166,9 +1292,11 @@ pub fn cmd_calendar_reset(app: AppHandle, payload: CalendarSavePayload) -> Resul
     }
 
     let dir = resolve_loaded_storage_dir(&app, loaded_from)?;
-    let calendar_path = dir.join(file_manager::CALENDAR_FILENAME);
-    app.state::<CalendarWriteGuard>()
-        .reset(&calendar_path, || write_calendar_data(&dir, &payload.data))
+    let trusted_root = file_manager::TrustedLibraryRoot::open(&dir)?;
+    let calendar_path = trusted_root.file_path(file_manager::CALENDAR_FILENAME, false)?;
+    app.state::<CalendarWriteGuard>().reset(&calendar_path, || {
+        write_calendar_data_with_root(&trusted_root, &payload.data)
+    })
 }
 
 // ── Session commands ──
@@ -1742,6 +1870,22 @@ mod tests {
         dir
     }
 
+    fn normalized_test_path(path: &std::path::Path) -> PathBuf {
+        let Some(parent) = path.parent() else {
+            return path.to_path_buf();
+        };
+        let Some(file_name) = path.file_name() else {
+            return fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        };
+        fs::canonicalize(parent)
+            .map(|canonical_parent| canonical_parent.join(file_name))
+            .unwrap_or_else(|_| path.to_path_buf())
+    }
+
+    fn test_paths_equal(left: &std::path::Path, right: &std::path::Path) -> bool {
+        normalized_test_path(left) == normalized_test_path(right)
+    }
+
     fn note_payload(content: &str) -> AutoSavePayload {
         AutoSavePayload {
             note_id: "shared-note".to_string(),
@@ -1795,8 +1939,8 @@ mod tests {
             write_unique_calendar_backup(&calendar_path, b"second payload").unwrap();
 
         assert_ne!(first_backup, second_backup);
-        assert_eq!(first_backup.parent(), Some(root.as_path()));
-        assert_eq!(second_backup.parent(), Some(root.as_path()));
+        assert!(test_paths_equal(first_backup.parent().unwrap(), &root));
+        assert!(test_paths_equal(second_backup.parent().unwrap(), &root));
         assert_eq!(fs::read(first_backup).unwrap(), b"first payload");
         assert_eq!(fs::read(second_backup).unwrap(), b"second payload");
 
@@ -1831,8 +1975,14 @@ mod tests {
         let first_copy = preserve_calendar_recovery_copy(&root, first_data).unwrap();
         let second_copy = preserve_calendar_recovery_copy(&root, second_data).unwrap();
 
-        assert_eq!(first_copy, root.join("calendar.json.local-recovery.bak.1"));
-        assert_eq!(second_copy, root.join("calendar.json.local-recovery.bak.2"));
+        assert!(test_paths_equal(
+            &first_copy,
+            &root.join("calendar.json.local-recovery.bak.1")
+        ));
+        assert!(test_paths_equal(
+            &second_copy,
+            &root.join("calendar.json.local-recovery.bak.2")
+        ));
         assert_eq!(
             fs::read(&calendar_path).unwrap(),
             b"canonical calendar sentinel"
@@ -1855,10 +2005,10 @@ mod tests {
 
         let recovery_path = preserve_calendar_recovery_copy(&local_dir, data).unwrap();
 
-        assert_eq!(
-            recovery_path,
-            local_dir.join("calendar.json.local-recovery.bak")
-        );
+        assert!(test_paths_equal(
+            &recovery_path,
+            &local_dir.join("calendar.json.local-recovery.bak")
+        ));
         assert_eq!(fs::read(recovery_path).unwrap(), data.as_bytes());
 
         let invalid_dir = root.join("invalid");

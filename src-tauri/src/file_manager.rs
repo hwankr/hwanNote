@@ -377,6 +377,64 @@ impl LibraryPathError {
     }
 }
 
+/// Canonical note-library boundary.
+///
+/// Policy: the configured root itself must be a real directory, every path used
+/// by library I/O is anchored beneath its canonical identity, and every
+/// symlink or Windows reparse point below it is rejected rather than followed.
+#[derive(Debug, Clone)]
+pub(crate) struct TrustedLibraryRoot {
+    canonical: PathBuf,
+}
+
+impl TrustedLibraryRoot {
+    pub(crate) fn open(root_dir: &Path) -> Result<Self, String> {
+        resolve_trusted_library_root(root_dir)
+            .map_err(|error| error.display("validate_library_root"))
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.canonical
+    }
+
+    pub(crate) fn file_path(
+        &self,
+        relative_path: &str,
+        must_exist: bool,
+    ) -> Result<PathBuf, String> {
+        let relative = validate_library_relative_path(self, relative_path)
+            .map_err(|error| error.display("validate_library_file"))?;
+        let path = self.path().join(relative);
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => Some(metadata),
+            Err(error) if error.kind() == io::ErrorKind::NotFound && !must_exist => None,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(format!(
+                    "validate_library_file failed for {}: file not found",
+                    path.display()
+                ));
+            }
+            Err(error) => return Err(error.to_string()),
+        };
+        if let Some(metadata) = metadata {
+            if metadata_is_symlink_or_reparse_point(&metadata) || !metadata.is_file() {
+                return Err(format!(
+                    "validate_library_file failed for {}: not a regular file or is a symbolic link/reparse point",
+                    path.display()
+                ));
+            }
+            let canonical = fs::canonicalize(&path).map_err(|error| error.to_string())?;
+            ensure_path_within_canonical_root(self, &canonical)
+                .map_err(|error| error.display("validate_library_file"))?;
+            return Ok(canonical);
+        }
+
+        ensure_path_within_canonical_root(self, &path)
+            .map_err(|error| error.display("validate_library_file"))?;
+        Ok(path)
+    }
+}
+
 fn metadata_is_symlink_or_reparse_point(metadata: &fs::Metadata) -> bool {
     let is_symlink = metadata.file_type().is_symlink();
 
@@ -394,7 +452,7 @@ fn metadata_is_symlink_or_reparse_point(metadata: &fs::Metadata) -> bool {
     }
 }
 
-fn ensure_trusted_library_root(root_dir: &Path) -> Result<(), LibraryPathError> {
+fn resolve_trusted_library_root(root_dir: &Path) -> Result<TrustedLibraryRoot, LibraryPathError> {
     let metadata = match fs::symlink_metadata(root_dir) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -429,6 +487,92 @@ fn ensure_trusted_library_root(root_dir: &Path) -> Result<(), LibraryPathError> 
         return Err(LibraryPathError::new(
             root_dir,
             "the note library root must be a directory",
+        ));
+    }
+
+    let canonical = fs::canonicalize(root_dir).map_err(|error| {
+        LibraryPathError::new(
+            root_dir,
+            format!("failed to canonicalize the note library root: {error}"),
+        )
+    })?;
+
+    let canonical_metadata = fs::symlink_metadata(&canonical).map_err(|error| {
+        LibraryPathError::new(
+            &canonical,
+            format!("failed to inspect the canonical note library root: {error}"),
+        )
+    })?;
+    if metadata_is_symlink_or_reparse_point(&canonical_metadata) || !canonical_metadata.is_dir() {
+        return Err(LibraryPathError::new(
+            &canonical,
+            "the canonical note library root must be a trusted directory",
+        ));
+    }
+
+    Ok(TrustedLibraryRoot { canonical })
+}
+
+fn ensure_path_within_canonical_root(
+    trusted_root: &TrustedLibraryRoot,
+    path: &Path,
+) -> Result<(), LibraryPathError> {
+    if !path.starts_with(trusted_root.path()) {
+        return Err(LibraryPathError::new(
+            path,
+            format!(
+                "the path is outside the canonical note library root {}",
+                trusted_root.path().display()
+            ),
+        ));
+    }
+
+    let mut candidate = path;
+    let existing = loop {
+        match fs::symlink_metadata(candidate) {
+            Ok(metadata) => {
+                if metadata_is_symlink_or_reparse_point(&metadata) {
+                    return Err(LibraryPathError::new(
+                        candidate,
+                        "symbolic links and reparse points beneath the note library are not allowed",
+                    ));
+                }
+                break candidate;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                candidate = candidate.parent().ok_or_else(|| {
+                    LibraryPathError::new(
+                        path,
+                        format!(
+                            "failed to confirm that the path stays beneath the canonical note library root {}",
+                            trusted_root.path().display()
+                        ),
+                    )
+                })?;
+            }
+            Err(error) => {
+                return Err(LibraryPathError::new(
+                    candidate,
+                    format!("failed to inspect the path for boundary verification: {error}"),
+                ));
+            }
+        }
+    };
+
+    let canonical_existing = fs::canonicalize(existing).map_err(|error| {
+        LibraryPathError::new(
+            existing,
+            format!("failed to canonicalize the path for boundary verification: {error}"),
+        )
+    })?;
+
+    if !canonical_existing.starts_with(trusted_root.path()) {
+        return Err(LibraryPathError::new(
+            path,
+            format!(
+                "the resolved path escapes the canonical note library root {}",
+                trusted_root.path().display()
+            ),
         ));
     }
 
@@ -474,11 +618,11 @@ fn normalize_library_relative_path(
 }
 
 fn validate_no_symlink_beneath_root(
-    root_dir: &Path,
+    trusted_root: &TrustedLibraryRoot,
     relative_path: &Path,
 ) -> Result<(), LibraryPathError> {
     let components = relative_path.components().collect::<Vec<_>>();
-    let mut current = root_dir.to_path_buf();
+    let mut current = trusted_root.path().to_path_buf();
 
     for (index, component) in components.iter().enumerate() {
         current.push(component.as_os_str());
@@ -505,31 +649,66 @@ fn validate_no_symlink_beneath_root(
                 "a non-directory path component cannot contain a note",
             ));
         }
+
+        ensure_path_within_canonical_root(trusted_root, &current)?;
     }
 
     Ok(())
 }
 
 fn validate_library_relative_path(
-    root_dir: &Path,
+    trusted_root: &TrustedLibraryRoot,
     raw_path: &str,
 ) -> Result<PathBuf, LibraryPathError> {
-    let relative_path = normalize_library_relative_path(root_dir, raw_path)?;
-    validate_no_symlink_beneath_root(root_dir, &relative_path)?;
+    let relative_path = normalize_library_relative_path(trusted_root.path(), raw_path)?;
+    validate_no_symlink_beneath_root(trusted_root, &relative_path)?;
     Ok(relative_path)
 }
 
-fn validated_library_file_path(root_dir: &Path, raw_path: &str) -> Result<PathBuf, String> {
-    validate_library_relative_path(root_dir, raw_path)
-        .map(|relative_path| root_dir.join(relative_path))
-        .map_err(|error| error.display("validate_library_path"))
+fn validated_library_file_path(
+    trusted_root: &TrustedLibraryRoot,
+    raw_path: &str,
+) -> Result<PathBuf, String> {
+    let relative_path = validate_library_relative_path(trusted_root, raw_path)
+        .map_err(|error| error.display("validate_library_path"))?;
+    let path = trusted_root.path().join(relative_path);
+    ensure_path_within_canonical_root(trusted_root, &path)
+        .map_err(|error| error.display("validate_library_path"))?;
+    Ok(path)
 }
 
-fn ensure_library_subdirectory(root_dir: &Path, relative_path: &Path) -> Result<PathBuf, String> {
-    ensure_trusted_library_root(root_dir)
-        .map_err(|error| error.display("validate_library_root"))?;
+fn canonicalize_expected_library_path(
+    trusted_root: &TrustedLibraryRoot,
+    requested_root: &Path,
+    path: &Path,
+) -> Result<PathBuf, String> {
+    let candidate = if path.starts_with(trusted_root.path()) {
+        path.to_path_buf()
+    } else if let Ok(relative) = path.strip_prefix(requested_root) {
+        trusted_root.path().join(relative)
+    } else {
+        match fs::canonicalize(path) {
+            Ok(canonical) => canonical,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(format!(
+                    "validate_library_path failed for {}: path is not rooted beneath {}",
+                    path.display(),
+                    requested_root.display()
+                ));
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    };
+    ensure_path_within_canonical_root(trusted_root, &candidate)
+        .map_err(|error| error.display("validate_library_path"))?;
+    Ok(candidate)
+}
 
-    let mut current = root_dir.to_path_buf();
+fn ensure_library_subdirectory(
+    trusted_root: &TrustedLibraryRoot,
+    relative_path: &Path,
+) -> Result<PathBuf, String> {
+    let mut current = trusted_root.path().to_path_buf();
     for component in relative_path.components() {
         current.push(component.as_os_str());
         match fs::symlink_metadata(&current) {
@@ -582,9 +761,12 @@ fn ensure_library_subdirectory(root_dir: &Path, relative_path: &Path) -> Result<
                 ));
             }
         }
+
+        ensure_path_within_canonical_root(trusted_root, &current)
+            .map_err(|error| error.display("validate_library_directory"))?;
     }
 
-    validate_no_symlink_beneath_root(root_dir, relative_path)
+    validate_no_symlink_beneath_root(trusted_root, relative_path)
         .map_err(|error| error.display("validate_library_directory"))?;
     Ok(current)
 }
@@ -701,7 +883,7 @@ fn empty_index() -> NoteIndex {
 }
 
 fn validate_index_paths(
-    auto_save_dir: &Path,
+    trusted_root: &TrustedLibraryRoot,
     index_path: &Path,
     index: &NoteIndex,
 ) -> Result<(), NoteLoadIssue> {
@@ -709,7 +891,7 @@ fn validate_index_paths(
     entries.sort_by(|(left_id, _), (right_id, _)| left_id.cmp(right_id));
 
     for (note_id, entry) in entries {
-        if let Err(error) = validate_library_relative_path(auto_save_dir, &entry.relative_path) {
+        if let Err(error) = validate_library_relative_path(trusted_root, &entry.relative_path) {
             return Err(NoteLoadIssue::new(
                 NoteLoadIssueKind::Index,
                 "validate_index_path",
@@ -792,19 +974,8 @@ fn backup_corrupt_index(index_path: &Path, bytes: &[u8]) -> Result<PathBuf, Note
     unreachable!("corrupt index backup counter is unbounded")
 }
 
-fn read_index_state(auto_save_dir: &Path) -> IndexReadState {
-    let index_path = get_index_path(auto_save_dir);
-    if let Err(error) = ensure_trusted_library_root(auto_save_dir) {
-        return IndexReadState::Corrupt(CorruptIndexState {
-            issues: vec![NoteLoadIssue::new(
-                NoteLoadIssueKind::Index,
-                "validate_library_root",
-                &error.path,
-                error.reason,
-            )],
-            backup_path: None,
-        });
-    }
+fn read_index_state(trusted_root: &TrustedLibraryRoot) -> IndexReadState {
+    let index_path = get_index_path(trusted_root.path());
     match fs::symlink_metadata(&index_path) {
         Ok(metadata) if metadata_is_symlink_or_reparse_point(&metadata) => {
             return IndexReadState::Corrupt(CorruptIndexState {
@@ -862,7 +1033,7 @@ fn read_index_state(auto_save_dir: &Path) -> IndexReadState {
         )
     });
     let validated_index = parsed_index.and_then(|index| {
-        validate_index_paths(auto_save_dir, &index_path, &index)?;
+        validate_index_paths(trusted_root, &index_path, &index)?;
         Ok(index)
     });
 
@@ -901,17 +1072,17 @@ fn corrupt_index_error(state: &CorruptIndexState) -> String {
     message
 }
 
-fn require_index_snapshot(auto_save_dir: &Path) -> Result<IndexSnapshot, String> {
-    ensure_trusted_library_root(auto_save_dir)
-        .map_err(|error| error.display("validate_library_root"))?;
-    match read_index_state(auto_save_dir) {
+fn require_index_snapshot(trusted_root: &TrustedLibraryRoot) -> Result<IndexSnapshot, String> {
+    match read_index_state(trusted_root) {
         IndexReadState::Ready(snapshot) => Ok(snapshot),
         IndexReadState::Corrupt(state) => Err(corrupt_index_error(&state)),
     }
 }
 
+#[cfg(test)]
 pub fn read_index(auto_save_dir: &Path) -> Result<NoteIndex, String> {
-    require_index_snapshot(auto_save_dir).map(|snapshot| snapshot.index)
+    let trusted_root = TrustedLibraryRoot::open(auto_save_dir)?;
+    require_index_snapshot(&trusted_root).map(|snapshot| snapshot.index)
 }
 
 fn unique_index_tmp_path(index_path: &Path) -> Result<(PathBuf, fs::File), NoteLoadIssue> {
@@ -942,19 +1113,11 @@ fn unique_index_tmp_path(index_path: &Path) -> Result<(PathBuf, fs::File), NoteL
 }
 
 fn verify_index_snapshot_unchanged(
-    auto_save_dir: &Path,
+    trusted_root: &TrustedLibraryRoot,
     expected: &IndexSnapshot,
 ) -> Result<(), IndexWriteFailure> {
-    let index_path = get_index_path(auto_save_dir);
-    ensure_trusted_library_root(auto_save_dir).map_err(|error| {
-        IndexWriteFailure::Issue(NoteLoadIssue::new(
-            NoteLoadIssueKind::Index,
-            "validate_library_root",
-            &error.path,
-            error.reason,
-        ))
-    })?;
-    match read_index_state(auto_save_dir) {
+    let index_path = get_index_path(trusted_root.path());
+    match read_index_state(trusted_root) {
         IndexReadState::Corrupt(state) => Err(IndexWriteFailure::Corrupt(state)),
         IndexReadState::Ready(current) if current.original_bytes == expected.original_bytes => {
             Ok(())
@@ -998,7 +1161,7 @@ fn cleanup_index_temp_after_failure(
 }
 
 fn write_index_from_snapshot_after_temp_hook<F>(
-    auto_save_dir: &Path,
+    trusted_root: &TrustedLibraryRoot,
     expected: &IndexSnapshot,
     index: &NoteIndex,
     before_final_verify: F,
@@ -1006,9 +1169,9 @@ fn write_index_from_snapshot_after_temp_hook<F>(
 where
     F: FnOnce(),
 {
-    let index_path = get_index_path(auto_save_dir);
-    verify_index_snapshot_unchanged(auto_save_dir, expected)?;
-    validate_index_paths(auto_save_dir, &index_path, index).map_err(IndexWriteFailure::Issue)?;
+    let index_path = get_index_path(trusted_root.path());
+    verify_index_snapshot_unchanged(trusted_root, expected)?;
+    validate_index_paths(trusted_root, &index_path, index).map_err(IndexWriteFailure::Issue)?;
 
     let json = serde_json::to_vec_pretty(index).map_err(|error| {
         IndexWriteFailure::Issue(NoteLoadIssue::new(
@@ -1033,7 +1196,7 @@ where
     drop(tmp_file);
 
     before_final_verify();
-    if let Err(failure) = verify_index_snapshot_unchanged(auto_save_dir, expected) {
+    if let Err(failure) = verify_index_snapshot_unchanged(trusted_root, expected) {
         return Err(cleanup_index_temp_after_failure(&tmp_path, failure));
     }
 
@@ -1051,11 +1214,11 @@ where
 }
 
 fn write_index_from_snapshot(
-    auto_save_dir: &Path,
+    trusted_root: &TrustedLibraryRoot,
     expected: &IndexSnapshot,
     index: &NoteIndex,
 ) -> Result<(), IndexWriteFailure> {
-    write_index_from_snapshot_after_temp_hook(auto_save_dir, expected, index, || {})
+    write_index_from_snapshot_after_temp_hook(trusted_root, expected, index, || {})
 }
 
 fn index_write_failure_to_string(failure: IndexWriteFailure) -> String {
@@ -1067,8 +1230,9 @@ fn index_write_failure_to_string(failure: IndexWriteFailure) -> String {
 
 #[cfg(test)]
 pub fn write_index(auto_save_dir: &Path, index: &NoteIndex) -> Result<(), String> {
-    let expected = require_index_snapshot(auto_save_dir)?;
-    write_index_from_snapshot(auto_save_dir, &expected, index)
+    let trusted_root = TrustedLibraryRoot::open(auto_save_dir)?;
+    let expected = require_index_snapshot(&trusted_root)?;
+    write_index_from_snapshot(&trusted_root, &expected, index)
         .map_err(index_write_failure_to_string)
 }
 
@@ -1115,6 +1279,7 @@ enum LibraryEntryType {
 trait LibraryFileSystem {
     fn read_dir(&self, path: &Path) -> Result<Vec<PathBuf>, FileSystemOperationError>;
     fn entry_type(&self, path: &Path) -> Result<LibraryEntryType, FileSystemOperationError>;
+    fn canonicalize_path(&self, path: &Path) -> Result<PathBuf, FileSystemOperationError>;
     fn read_markdown(&self, path: &Path) -> Result<String, FileSystemOperationError>;
     fn markdown_metadata(&self, path: &Path) -> Result<fs::Metadata, FileSystemOperationError>;
 }
@@ -1149,6 +1314,11 @@ impl LibraryFileSystem for ProductionFileSystem {
         } else {
             LibraryEntryType::Other
         })
+    }
+
+    fn canonicalize_path(&self, path: &Path) -> Result<PathBuf, FileSystemOperationError> {
+        fs::canonicalize(path)
+            .map_err(|error| FileSystemOperationError::from_io("canonicalize_path", path, error))
     }
 
     fn read_markdown(&self, path: &Path) -> Result<String, FileSystemOperationError> {
@@ -1192,6 +1362,7 @@ struct LibraryScan {
     files: HashMap<String, ScannedMarkdown>,
     folders: Vec<String>,
     issues: Vec<NoteLoadIssue>,
+    visited_directories: HashSet<PathBuf>,
 }
 
 impl LibraryScan {
@@ -1224,12 +1395,43 @@ fn scan_issue(error: FileSystemOperationError) -> NoteLoadIssue {
 
 fn scan_library_directory<F: LibraryFileSystem>(
     file_system: &F,
-    root_dir: &Path,
+    trusted_root: &TrustedLibraryRoot,
     current_dir: &Path,
     skip_subtree: Option<&Path>,
     include_markdown: bool,
     scan: &mut LibraryScan,
 ) {
+    let canonical_current = match file_system.canonicalize_path(current_dir) {
+        Ok(path) => path,
+        Err(error) => {
+            scan.issues.push(scan_issue(error));
+            return;
+        }
+    };
+
+    if !canonical_current.starts_with(trusted_root.path()) {
+        scan.issues.push(NoteLoadIssue::new(
+            NoteLoadIssueKind::Scan,
+            "validate_canonical_scan_root",
+            current_dir,
+            format!(
+                "resolved outside the canonical note library root {}",
+                trusted_root.path().display()
+            ),
+        ));
+        return;
+    }
+
+    if !scan.visited_directories.insert(canonical_current) {
+        scan.issues.push(NoteLoadIssue::new(
+            NoteLoadIssueKind::Scan,
+            "detect_cycle",
+            current_dir,
+            "refusing to scan the same canonical directory twice",
+        ));
+        return;
+    }
+
     let entries = match file_system.read_dir(current_dir) {
         Ok(entries) => entries,
         Err(error) => {
@@ -1239,6 +1441,18 @@ fn scan_library_directory<F: LibraryFileSystem>(
     };
 
     for path in entries {
+        if !path.starts_with(trusted_root.path()) {
+            scan.issues.push(NoteLoadIssue::new(
+                NoteLoadIssueKind::Scan,
+                "validate_scan_entry",
+                &path,
+                format!(
+                    "entry is outside the canonical note library root {}",
+                    trusted_root.path().display()
+                ),
+            ));
+            continue;
+        }
         if should_skip_subtree(&path, skip_subtree) {
             continue;
         }
@@ -1253,13 +1467,13 @@ fn scan_library_directory<F: LibraryFileSystem>(
 
         match entry_type {
             LibraryEntryType::Directory => {
-                let relative = strip_inbox_root_alias(&relative_path(root_dir, &path));
+                let relative = strip_inbox_root_alias(&relative_path(trusted_root.path(), &path));
                 if !relative.is_empty() {
                     scan.folders.push(relative);
                 }
                 scan_library_directory(
                     file_system,
-                    root_dir,
+                    trusted_root,
                     &path,
                     skip_subtree,
                     include_markdown,
@@ -1267,8 +1481,30 @@ fn scan_library_directory<F: LibraryFileSystem>(
                 );
             }
             LibraryEntryType::File if include_markdown && is_markdown_path(&path) => {
-                let markdown = file_system.read_markdown(&path);
-                let metadata = file_system.markdown_metadata(&path);
+                let canonical_path = match file_system.canonicalize_path(&path) {
+                    Ok(canonical_path) if canonical_path.starts_with(trusted_root.path()) => {
+                        canonical_path
+                    }
+                    Ok(canonical_path) => {
+                        scan.issues.push(NoteLoadIssue::new(
+                            NoteLoadIssueKind::Scan,
+                            "validate_canonical_file_path",
+                            &path,
+                            format!(
+                                "resolved to {} outside the canonical note library root {}",
+                                canonical_path.display(),
+                                trusted_root.path().display()
+                            ),
+                        ));
+                        continue;
+                    }
+                    Err(error) => {
+                        scan.issues.push(scan_issue(error));
+                        continue;
+                    }
+                };
+                let markdown = file_system.read_markdown(&canonical_path);
+                let metadata = file_system.markdown_metadata(&canonical_path);
 
                 let markdown = match markdown {
                     Ok(markdown) => Some(markdown),
@@ -1291,7 +1527,7 @@ fn scan_library_directory<F: LibraryFileSystem>(
                             scan.issues.push(NoteLoadIssue::new(
                                 NoteLoadIssueKind::FileMetadata,
                                 "read_modified_time",
-                                &path,
+                                &canonical_path,
                                 error.to_string(),
                             ));
                             None
@@ -1305,9 +1541,9 @@ fn scan_library_directory<F: LibraryFileSystem>(
 
                 if let (Some(markdown), Some((created_at, updated_at))) = (markdown, timestamps) {
                     scan.files.insert(
-                        relative_path(root_dir, &path),
+                        relative_path(trusted_root.path(), &canonical_path),
                         ScannedMarkdown {
-                            full_path: path,
+                            full_path: canonical_path,
                             markdown,
                             created_at,
                             updated_at,
@@ -1330,25 +1566,35 @@ fn scan_library_directory<F: LibraryFileSystem>(
 
 fn scan_library_tree<F: LibraryFileSystem>(
     file_system: &F,
-    root_dir: &Path,
+    trusted_root: &TrustedLibraryRoot,
     skip_subtree: Option<&Path>,
     include_markdown: bool,
 ) -> LibraryScan {
     let mut scan = LibraryScan::default();
-    if let Err(error) = ensure_trusted_library_root(root_dir) {
-        scan.issues.push(NoteLoadIssue::new(
-            NoteLoadIssueKind::Scan,
-            "validate_library_root",
-            &error.path,
-            error.reason,
-        ));
-        return scan;
-    }
     scan_library_directory(
         file_system,
-        root_dir,
-        root_dir,
+        trusted_root,
+        trusted_root.path(),
         skip_subtree,
+        include_markdown,
+        &mut scan,
+    );
+    scan.finish();
+    scan
+}
+
+fn scan_library_subtree<F: LibraryFileSystem>(
+    file_system: &F,
+    trusted_root: &TrustedLibraryRoot,
+    start_dir: &Path,
+    include_markdown: bool,
+) -> LibraryScan {
+    let mut scan = LibraryScan::default();
+    scan_library_directory(
+        file_system,
+        trusted_root,
+        start_dir,
+        None,
         include_markdown,
         &mut scan,
     );
@@ -1462,31 +1708,110 @@ fn process_id() -> u32 {
 }
 
 fn validate_note_destination_before_replace(
-    root_dir: &Path,
+    trusted_root: &TrustedLibraryRoot,
     destination: &Path,
 ) -> Result<(), String> {
-    ensure_trusted_library_root(root_dir)
-        .map_err(|error| error.display("validate_library_root"))?;
-    let relative_path = destination.strip_prefix(root_dir).map_err(|error| {
-        format!(
-            "validate_note_destination failed for {}: destination is outside {}: {}",
-            destination.display(),
-            root_dir.display(),
-            error
-        )
-    })?;
+    let relative_path = destination
+        .strip_prefix(trusted_root.path())
+        .map_err(|error| {
+            format!(
+                "validate_note_destination failed for {}: destination is outside {}: {}",
+                destination.display(),
+                trusted_root.path().display(),
+                error
+            )
+        })?;
     if relative_path.as_os_str().is_empty() {
         return Err(format!(
             "validate_note_destination failed for {}: destination cannot be the library root",
             destination.display()
         ));
     }
-    validate_no_symlink_beneath_root(root_dir, relative_path)
+    validate_no_symlink_beneath_root(trusted_root, relative_path)
+        .map_err(|error| error.display("validate_note_destination"))?;
+    ensure_path_within_canonical_root(trusted_root, destination)
         .map_err(|error| error.display("validate_note_destination"))
 }
 
+fn validate_existing_trusted_file(
+    trusted_root: &TrustedLibraryRoot,
+    path: &Path,
+    operation: &str,
+) -> Result<(), String> {
+    let relative = path.strip_prefix(trusted_root.path()).map_err(|error| {
+        format!(
+            "{operation} failed for {}: path is outside {}: {}",
+            path.display(),
+            trusted_root.path().display(),
+            error
+        )
+    })?;
+    validate_no_symlink_beneath_root(trusted_root, relative)
+        .map_err(|error| error.display(operation))?;
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("{operation} failed for {}: {error}", path.display()))?;
+    if metadata_is_symlink_or_reparse_point(&metadata) || !metadata.is_file() {
+        return Err(format!(
+            "{operation} failed for {}: expected a trusted regular file",
+            path.display()
+        ));
+    }
+    let canonical = fs::canonicalize(path)
+        .map_err(|error| format!("{operation} failed for {}: {error}", path.display()))?;
+    ensure_path_within_canonical_root(trusted_root, &canonical)
+        .map_err(|error| error.display(operation))?;
+    if canonical != path {
+        return Err(format!(
+            "{operation} failed for {}: canonical identity changed to {}",
+            path.display(),
+            canonical.display()
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_directory_tree_trusted(
+    trusted_root: &TrustedLibraryRoot,
+    relative_path: &Path,
+) -> Result<(), String> {
+    validate_no_symlink_beneath_root(trusted_root, relative_path)
+        .map_err(|error| error.display("validate_directory_tree"))?;
+    let directory = trusted_root.path().join(relative_path);
+    let metadata = match fs::symlink_metadata(&directory) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "validate_directory_tree failed for {}: {}",
+                directory.display(),
+                error
+            ));
+        }
+    };
+    if metadata_is_symlink_or_reparse_point(&metadata) || !metadata.is_dir() {
+        return Err(format!(
+            "validate_directory_tree failed for {}: expected a trusted directory",
+            directory.display()
+        ));
+    }
+    ensure_path_within_canonical_root(trusted_root, &directory)
+        .map_err(|error| error.display("validate_directory_tree"))?;
+
+    let scan = scan_library_subtree(&ProductionFileSystem, trusted_root, &directory, false);
+    if !scan.is_complete() {
+        return Err(scan
+            .issues
+            .iter()
+            .map(NoteLoadIssue::display)
+            .collect::<Vec<_>>()
+            .join("; "));
+    }
+
+    Ok(())
+}
+
 fn write_note_file_atomically_after_temp_hook<F>(
-    root_dir: &Path,
+    trusted_root: &TrustedLibraryRoot,
     destination: &Path,
     content: &str,
     before_destination_validation: F,
@@ -1494,7 +1819,7 @@ fn write_note_file_atomically_after_temp_hook<F>(
 where
     F: FnOnce(),
 {
-    validate_note_destination_before_replace(root_dir, destination)?;
+    validate_note_destination_before_replace(trusted_root, destination)?;
     let (tmp_path, mut tmp_file) = unique_note_temp_file(destination)?;
     let write_result = tmp_file
         .write_all(content.as_bytes())
@@ -1514,7 +1839,7 @@ where
     drop(tmp_file);
 
     before_destination_validation();
-    if let Err(error) = validate_note_destination_before_replace(root_dir, destination) {
+    if let Err(error) = validate_note_destination_before_replace(trusted_root, destination) {
         return Err(cleanup_file_with_reason(&tmp_path, error));
     }
     if let Err(error) = fs::rename(&tmp_path, destination) {
@@ -1533,11 +1858,11 @@ where
 }
 
 fn write_note_file_atomically(
-    root_dir: &Path,
+    trusted_root: &TrustedLibraryRoot,
     destination: &Path,
     content: &str,
 ) -> Result<(), String> {
-    write_note_file_atomically_after_temp_hook(root_dir, destination, content, || {})
+    write_note_file_atomically_after_temp_hook(trusted_root, destination, content, || {})
 }
 
 fn relative_path(from: &Path, to: &Path) -> String {
@@ -1630,6 +1955,95 @@ fn ensure_unique_note_id(existing_ids: &HashSet<String>, seed: &str) -> String {
     }
 }
 
+fn remove_trusted_directory_tree(
+    trusted_root: &TrustedLibraryRoot,
+    directory: &Path,
+) -> Result<(), String> {
+    ensure_path_within_canonical_root(trusted_root, directory)
+        .map_err(|error| error.display("validate_folder_delete"))?;
+    let metadata = fs::symlink_metadata(directory).map_err(|error| {
+        format!(
+            "inspect_folder_delete failed for {}: {}",
+            directory.display(),
+            error
+        )
+    })?;
+    if metadata_is_symlink_or_reparse_point(&metadata) || !metadata.is_dir() {
+        return Err(format!(
+            "validate_folder_delete failed for {}: expected a trusted directory",
+            directory.display()
+        ));
+    }
+
+    let entries = fs::read_dir(directory).map_err(|error| {
+        format!(
+            "read_folder_delete failed for {}: {}",
+            directory.display(),
+            error
+        )
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            format!(
+                "read_folder_delete_entry failed for {}: {}",
+                directory.display(),
+                error
+            )
+        })?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path).map_err(|error| {
+            format!(
+                "inspect_folder_delete_entry failed for {}: {}",
+                path.display(),
+                error
+            )
+        })?;
+        if metadata_is_symlink_or_reparse_point(&metadata) {
+            return Err(format!(
+                "reject_symlink failed for {}: symbolic links and reparse points beneath the note library are not allowed",
+                path.display()
+            ));
+        }
+        ensure_path_within_canonical_root(trusted_root, &path)
+            .map_err(|error| error.display("validate_folder_delete_entry"))?;
+
+        if metadata.is_dir() {
+            remove_trusted_directory_tree(trusted_root, &path)?;
+        } else {
+            fs::remove_file(&path).map_err(|error| {
+                format!(
+                    "remove_folder_file failed for {}: {}",
+                    path.display(),
+                    error
+                )
+            })?;
+        }
+    }
+
+    let metadata = fs::symlink_metadata(directory).map_err(|error| {
+        format!(
+            "reinspect_folder_delete failed for {}: {}",
+            directory.display(),
+            error
+        )
+    })?;
+    if metadata_is_symlink_or_reparse_point(&metadata) || !metadata.is_dir() {
+        return Err(format!(
+            "validate_folder_delete failed for {}: directory changed before removal",
+            directory.display()
+        ));
+    }
+    ensure_path_within_canonical_root(trusted_root, directory)
+        .map_err(|error| error.display("validate_folder_delete"))?;
+    fs::remove_dir(directory).map_err(|error| {
+        format!(
+            "remove_folder_directory failed for {}: {}",
+            directory.display(),
+            error
+        )
+    })
+}
+
 pub fn generate_note_id(relative_file_path: &str) -> String {
     let mut hasher = sha1::Sha1::new();
     hasher.update(relative_file_path.as_bytes());
@@ -1643,36 +2057,103 @@ pub fn get_auto_save_dir(documents_dir: &Path) -> PathBuf {
     documents_dir.join("HwanNote").join("Notes")
 }
 
-pub fn save_markdown_file(file_path: &Path, content: &str) -> Result<(), String> {
-    let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    if ext.to_lowercase() != "md" {
-        return Err("Only .md files are supported.".to_string());
+fn library_candidate_relative_path(
+    trusted_root: &TrustedLibraryRoot,
+    requested_root: &Path,
+    candidate: &Path,
+    allow_root: bool,
+) -> Result<PathBuf, String> {
+    let relative = if candidate.is_absolute() {
+        if candidate == requested_root || candidate == trusted_root.path() {
+            PathBuf::new()
+        } else if let Ok(relative) = candidate.strip_prefix(trusted_root.path()) {
+            relative.to_path_buf()
+        } else if let Ok(relative) = candidate.strip_prefix(requested_root) {
+            relative.to_path_buf()
+        } else {
+            return Err(format!(
+                "validate_library_path failed for {}: path is outside the configured note library",
+                candidate.display()
+            ));
+        }
+    } else {
+        candidate.to_path_buf()
+    };
+
+    if relative.as_os_str().is_empty() {
+        return if allow_root {
+            Ok(relative)
+        } else {
+            Err("The library root cannot be used as a file path.".to_string())
+        };
     }
-    if let Some(parent) = file_path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    fs::write(file_path, content).map_err(|e| e.to_string())
+
+    normalize_library_relative_path(trusted_root.path(), &to_posix(&relative.to_string_lossy()))
+        .map_err(|error| error.display("validate_library_path"))
 }
 
-pub fn read_markdown_file(file_path: &Path) -> Result<String, String> {
+pub fn save_markdown_file(
+    library_root: &Path,
+    file_path: &Path,
+    content: &str,
+) -> Result<(), String> {
+    let trusted_root = TrustedLibraryRoot::open(library_root)?;
     let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    if ext.to_lowercase() != "md" {
+    if !ext.eq_ignore_ascii_case("md") {
         return Err("Only .md files are supported.".to_string());
     }
-    fs::read_to_string(file_path).map_err(|e| e.to_string())
+    let relative = library_candidate_relative_path(&trusted_root, library_root, file_path, false)?;
+    let parent_relative = relative.parent().unwrap_or_else(|| Path::new(""));
+    ensure_library_subdirectory(&trusted_root, parent_relative)?;
+    let destination = trusted_root.path().join(relative);
+    write_note_file_atomically(&trusted_root, &destination, content)
 }
 
-pub fn list_markdown_files(dir_path: &Path) -> Result<Vec<String>, String> {
-    ensure_trusted_library_root(dir_path)
-        .map_err(|error| error.display("validate_library_root"))?;
-    let entries = fs::read_dir(dir_path)
-        .map_err(|error| format!("read_dir failed for {}: {}", dir_path.display(), error))?;
+pub fn read_markdown_file(library_root: &Path, file_path: &Path) -> Result<String, String> {
+    let trusted_root = TrustedLibraryRoot::open(library_root)?;
+    let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    if !ext.eq_ignore_ascii_case("md") {
+        return Err("Only .md files are supported.".to_string());
+    }
+    let relative = library_candidate_relative_path(&trusted_root, library_root, file_path, false)?;
+    let path = trusted_root.file_path(&to_posix(&relative.to_string_lossy()), true)?;
+    let metadata = fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
+    if metadata_is_symlink_or_reparse_point(&metadata) || !metadata.is_file() {
+        return Err(format!(
+            "validate_markdown_file failed for {}: expected a trusted regular file",
+            path.display()
+        ));
+    }
+    let canonical = fs::canonicalize(&path).map_err(|error| error.to_string())?;
+    ensure_path_within_canonical_root(&trusted_root, &canonical)
+        .map_err(|error| error.display("validate_markdown_file"))?;
+    fs::read_to_string(canonical).map_err(|e| e.to_string())
+}
+
+pub fn list_markdown_files(library_root: &Path, dir_path: &Path) -> Result<Vec<String>, String> {
+    let trusted_root = TrustedLibraryRoot::open(library_root)?;
+    let relative = library_candidate_relative_path(&trusted_root, library_root, dir_path, true)?;
+    validate_no_symlink_beneath_root(&trusted_root, &relative)
+        .map_err(|error| error.display("validate_library_directory"))?;
+    let directory = trusted_root.path().join(relative);
+    let metadata = fs::symlink_metadata(&directory).map_err(|error| error.to_string())?;
+    if metadata_is_symlink_or_reparse_point(&metadata) || !metadata.is_dir() {
+        return Err(format!(
+            "validate_library_directory failed for {}: expected a trusted directory",
+            directory.display()
+        ));
+    }
+    ensure_path_within_canonical_root(&trusted_root, &directory)
+        .map_err(|error| error.display("validate_library_directory"))?;
+
+    let entries = fs::read_dir(&directory)
+        .map_err(|error| format!("read_dir failed for {}: {}", directory.display(), error))?;
     let mut files = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|error| {
             format!(
                 "read_dir_entry failed for {}: {}",
-                dir_path.display(),
+                directory.display(),
                 error
             )
         })?;
@@ -1686,7 +2167,10 @@ pub fn list_markdown_files(dir_path: &Path) -> Result<Vec<String>, String> {
             ));
         }
         if metadata.is_file() && is_markdown_path(&path) {
-            files.push(path.to_string_lossy().to_string());
+            let canonical = fs::canonicalize(&path).map_err(|error| error.to_string())?;
+            ensure_path_within_canonical_root(&trusted_root, &canonical)
+                .map_err(|error| error.display("validate_markdown_file"))?;
+            files.push(canonical.to_string_lossy().to_string());
         }
     }
     Ok(files)
@@ -1696,10 +2180,16 @@ fn list_folders_with_fs<F: LibraryFileSystem>(
     auto_save_dir: &Path,
     file_system: &F,
 ) -> Result<Vec<String>, String> {
-    ensure_trusted_library_root(auto_save_dir)
-        .map_err(|error| error.display("validate_library_root"))?;
+    let trusted_root = TrustedLibraryRoot::open(auto_save_dir)?;
 
-    let scan = scan_library_tree(file_system, auto_save_dir, None, false);
+    list_folders_with_root(&trusted_root, file_system)
+}
+
+fn list_folders_with_root<F: LibraryFileSystem>(
+    trusted_root: &TrustedLibraryRoot,
+    file_system: &F,
+) -> Result<Vec<String>, String> {
+    let scan = scan_library_tree(file_system, trusted_root, None, false);
     if scan.is_complete() {
         Ok(scan.folders)
     } else {
@@ -1717,20 +2207,20 @@ pub fn list_folders(auto_save_dir: &Path) -> Result<Vec<String>, String> {
 }
 
 pub fn create_folder(auto_save_dir: &Path, folder_path: &str) -> Result<Vec<String>, String> {
+    let trusted_root = TrustedLibraryRoot::open(auto_save_dir)?;
     let normalized = sanitize_folder_path(Some(folder_path))?;
     if normalized.is_empty() {
         return Err("Folder path is required.".to_string());
     }
 
-    let relative_path = normalize_library_relative_path(auto_save_dir, &normalized)
+    let relative_path = normalize_library_relative_path(trusted_root.path(), &normalized)
         .map_err(|error| error.display("validate_folder_path"))?;
-    ensure_library_subdirectory(auto_save_dir, &relative_path)?;
-    list_folders(auto_save_dir)
+    ensure_library_subdirectory(&trusted_root, &relative_path)?;
+    list_folders_with_root(&trusted_root, &ProductionFileSystem)
 }
 
 pub fn rename_folder(auto_save_dir: &Path, from: &str, to: &str) -> Result<Vec<String>, String> {
-    ensure_trusted_library_root(auto_save_dir)
-        .map_err(|error| error.display("validate_library_root"))?;
+    let trusted_root = TrustedLibraryRoot::open(auto_save_dir)?;
 
     let from_path = sanitize_folder_path(Some(from))?;
     let to_path = sanitize_folder_path(Some(to))?;
@@ -1739,38 +2229,49 @@ pub fn rename_folder(auto_save_dir: &Path, from: &str, to: &str) -> Result<Vec<S
         return Err("Folder path is required.".to_string());
     }
     if from_path == to_path {
-        return list_folders(auto_save_dir);
+        return list_folders_with_root(&trusted_root, &ProductionFileSystem);
     }
     if to_path.starts_with(&format!("{}/", from_path)) {
         return Err("Cannot move a folder into its own child.".to_string());
     }
-    let from_relative = normalize_library_relative_path(auto_save_dir, &from_path)
+    let from_relative = normalize_library_relative_path(trusted_root.path(), &from_path)
         .map_err(|error| error.display("validate_source_folder"))?;
-    let to_relative = normalize_library_relative_path(auto_save_dir, &to_path)
+    let to_relative = normalize_library_relative_path(trusted_root.path(), &to_path)
         .map_err(|error| error.display("validate_target_folder"))?;
 
     let _index_guard = lock_note_index();
-    let index_snapshot = require_index_snapshot(auto_save_dir)?;
+    let index_snapshot = require_index_snapshot(&trusted_root)?;
     let mut index = index_snapshot.index.clone();
 
-    validate_no_symlink_beneath_root(auto_save_dir, &from_relative)
+    validate_no_symlink_beneath_root(&trusted_root, &from_relative)
         .map_err(|error| error.display("validate_source_folder"))?;
-    let source_dir = auto_save_dir.join(&from_relative);
-    if !source_dir.exists() {
-        return Err("Folder not found.".to_string());
+    let source_dir = trusted_root.path().join(&from_relative);
+    match fs::symlink_metadata(&source_dir) {
+        Ok(metadata) if metadata.is_dir() && !metadata_is_symlink_or_reparse_point(&metadata) => {}
+        Ok(_) => return Err("Folder is not a trusted directory.".to_string()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err("Folder not found.".to_string());
+        }
+        Err(error) => return Err(error.to_string()),
     }
+    ensure_directory_tree_trusted(&trusted_root, &from_relative)?;
 
-    validate_no_symlink_beneath_root(auto_save_dir, &to_relative)
+    validate_no_symlink_beneath_root(&trusted_root, &to_relative)
         .map_err(|error| error.display("validate_target_folder"))?;
-    let target_dir = auto_save_dir.join(&to_relative);
-    if target_dir.exists() {
-        return Err("Target folder already exists.".to_string());
+    let target_dir = trusted_root.path().join(&to_relative);
+    match fs::symlink_metadata(&target_dir) {
+        Ok(_) => return Err("Target folder already exists.".to_string()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.to_string()),
     }
 
     if let Some(parent_relative) = to_relative.parent() {
-        ensure_library_subdirectory(auto_save_dir, parent_relative)?;
+        ensure_library_subdirectory(&trusted_root, parent_relative)?;
     }
 
+    ensure_directory_tree_trusted(&trusted_root, &from_relative)?;
+    validate_no_symlink_beneath_root(&trusted_root, &to_relative)
+        .map_err(|error| error.display("validate_target_folder"))?;
     fs::rename(&source_dir, &target_dir).map_err(|e| e.to_string())?;
 
     let from_prefix = format!("{}/", from_path);
@@ -1786,19 +2287,18 @@ pub fn rename_folder(auto_save_dir: &Path, from: &str, to: &str) -> Result<Vec<S
     }
 
     if index_changed {
-        write_index_from_snapshot(auto_save_dir, &index_snapshot, &index)
+        write_index_from_snapshot(&trusted_root, &index_snapshot, &index)
             .map_err(index_write_failure_to_string)?;
     }
 
-    list_folders(auto_save_dir)
+    list_folders_with_root(&trusted_root, &ProductionFileSystem)
 }
 
 pub fn delete_folder(
     auto_save_dir: &Path,
     folder_path: &str,
 ) -> Result<FolderDeleteResult, String> {
-    ensure_trusted_library_root(auto_save_dir)
-        .map_err(|error| error.display("validate_library_root"))?;
+    let trusted_root = TrustedLibraryRoot::open(auto_save_dir)?;
 
     let normalized = sanitize_folder_path(Some(folder_path))?;
     if normalized.is_empty() {
@@ -1806,13 +2306,14 @@ pub fn delete_folder(
     }
 
     let _index_guard = lock_note_index();
-    let index_snapshot = require_index_snapshot(auto_save_dir)?;
-    let folder_relative = normalize_library_relative_path(auto_save_dir, &normalized)
+    let index_snapshot = require_index_snapshot(&trusted_root)?;
+    let folder_relative = normalize_library_relative_path(trusted_root.path(), &normalized)
         .map_err(|error| error.display("validate_folder_path"))?;
-    validate_no_symlink_beneath_root(auto_save_dir, &folder_relative)
+    validate_no_symlink_beneath_root(&trusted_root, &folder_relative)
         .map_err(|error| error.display("validate_folder_path"))?;
+    ensure_directory_tree_trusted(&trusted_root, &folder_relative)?;
 
-    let source_dir = auto_save_dir.join(&folder_relative);
+    let source_dir = trusted_root.path().join(&folder_relative);
     let prefix = format!("{}/", normalized);
     let mut index = index_snapshot.index.clone();
     let matching_entries = index
@@ -1827,44 +2328,50 @@ pub fn delete_folder(
         })
         .collect::<Vec<_>>();
 
-    if !source_dir.exists() && matching_entries.is_empty() {
+    let source_exists = match fs::symlink_metadata(&source_dir) {
+        Ok(metadata) if metadata.is_dir() && !metadata_is_symlink_or_reparse_point(&metadata) => {
+            true
+        }
+        Ok(_) => return Err("Folder is not a trusted directory.".to_string()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.to_string()),
+    };
+    if !source_exists && matching_entries.is_empty() {
         return Err("Folder not found.".to_string());
     }
 
     let mut moved_note_ids = Vec::new();
 
     for (note_id, old_relative_path) in matching_entries {
-        let old_path = validated_library_file_path(auto_save_dir, &old_relative_path)?;
-        if !old_path.exists() {
-            return Err(format!(
-                "Note file missing during folder delete: {}",
-                old_relative_path
-            ));
-        }
+        let old_path = validated_library_file_path(&trusted_root, &old_relative_path)?;
+        validate_existing_trusted_file(&trusted_root, &old_path, "validate_folder_note")?;
 
         let base_name = old_path
             .file_stem()
             .and_then(|value| value.to_str())
             .filter(|value| !value.is_empty())
             .unwrap_or("untitled");
-        let new_path = ensure_unique_file_path(auto_save_dir, base_name, None)?;
+        let new_path = ensure_unique_file_path(trusted_root.path(), base_name, None)?;
+        validate_note_destination_before_replace(&trusted_root, &new_path)?;
+        validate_existing_trusted_file(&trusted_root, &old_path, "validate_folder_note")?;
+        validate_note_destination_before_replace(&trusted_root, &new_path)?;
         fs::rename(&old_path, &new_path).map_err(|e| e.to_string())?;
 
         if let Some(entry) = index.entries.get_mut(&note_id) {
-            entry.relative_path = relative_path(auto_save_dir, &new_path);
+            entry.relative_path = relative_path(trusted_root.path(), &new_path);
         }
         moved_note_ids.push(note_id);
     }
 
-    write_index_from_snapshot(auto_save_dir, &index_snapshot, &index)
+    write_index_from_snapshot(&trusted_root, &index_snapshot, &index)
         .map_err(index_write_failure_to_string)?;
 
-    if source_dir.exists() {
-        fs::remove_dir_all(&source_dir).map_err(|e| e.to_string())?;
+    if source_exists {
+        remove_trusted_directory_tree(&trusted_root, &source_dir)?;
     }
 
     Ok(FolderDeleteResult {
-        folders: list_folders(auto_save_dir)?,
+        folders: list_folders_with_root(&trusted_root, &ProductionFileSystem)?,
         moved_note_ids,
     })
 }
@@ -1873,6 +2380,7 @@ pub fn auto_save_markdown_note(
     auto_save_dir: &Path,
     payload: &AutoSavePayload,
 ) -> Result<AutoSaveResult, String> {
+    let trusted_root = TrustedLibraryRoot::open(auto_save_dir)?;
     let safe_id = {
         let sanitized = sanitize_note_id(&payload.note_id);
         if sanitized.is_empty() {
@@ -1885,19 +2393,19 @@ pub fn auto_save_markdown_note(
     let safe_folder_path = if safe_folder.is_empty() {
         PathBuf::new()
     } else {
-        normalize_library_relative_path(auto_save_dir, &safe_folder)
+        normalize_library_relative_path(trusted_root.path(), &safe_folder)
             .map_err(|error| error.display("validate_note_folder"))?
     };
 
     let _index_guard = lock_note_index();
-    let index_snapshot = require_index_snapshot(auto_save_dir)?;
+    let index_snapshot = require_index_snapshot(&trusted_root)?;
     let mut index = index_snapshot.index.clone();
 
-    let target_dir = ensure_library_subdirectory(auto_save_dir, &safe_folder_path)?;
+    let target_dir = ensure_library_subdirectory(&trusted_root, &safe_folder_path)?;
     let existing_entry = index.entries.get(&safe_id).cloned();
     let existing_path = existing_entry
         .as_ref()
-        .map(|entry| validated_library_file_path(auto_save_dir, &entry.relative_path))
+        .map(|entry| validated_library_file_path(&trusted_root, &entry.relative_path))
         .transpose()?;
 
     let title_for_slug = if payload.title.is_empty() {
@@ -1915,10 +2423,10 @@ pub fn auto_save_markdown_note(
     };
     let stored_markdown = embed_manual_title_metadata(&payload.content, manual_title.as_deref());
 
-    validate_no_symlink_beneath_root(auto_save_dir, &safe_folder_path)
+    validate_no_symlink_beneath_root(&trusted_root, &safe_folder_path)
         .map_err(|error| error.display("validate_note_folder"))?;
     write_note_file_atomically(
-        auto_save_dir,
+        &trusted_root,
         &next_file_path,
         &to_platform_line_endings(&stored_markdown),
     )?;
@@ -1926,6 +2434,18 @@ pub fn auto_save_markdown_note(
     // Remove old file if path changed
     if let Some(ref old_path) = existing_path {
         if to_posix(&old_path.to_string_lossy()) != to_posix(&next_file_path.to_string_lossy()) {
+            let old_relative = old_path
+                .strip_prefix(trusted_root.path())
+                .map_err(|error| {
+                    format!(
+                        "validate_old_note failed for {}: {}",
+                        old_path.display(),
+                        error
+                    )
+                })?;
+            validate_no_symlink_beneath_root(&trusted_root, old_relative)
+                .map_err(|error| error.display("validate_old_note"))?;
+            validate_existing_trusted_file(&trusted_root, old_path, "validate_old_note")?;
             fs::remove_file(old_path).map_err(|error| {
                 format!(
                     "remove_old_note failed for {}: {}",
@@ -1960,7 +2480,7 @@ pub fn auto_save_markdown_note(
         )
     })?);
 
-    let rel = relative_path(auto_save_dir, &next_file_path);
+    let rel = relative_path(trusted_root.path(), &next_file_path);
 
     index.entries.insert(
         safe_id.clone(),
@@ -1972,7 +2492,7 @@ pub fn auto_save_markdown_note(
         },
     );
 
-    write_index_from_snapshot(auto_save_dir, &index_snapshot, &index)
+    write_index_from_snapshot(&trusted_root, &index_snapshot, &index)
         .map_err(index_write_failure_to_string)?;
 
     Ok(AutoSaveResult {
@@ -2029,7 +2549,7 @@ fn materialize_notes(index: &NoteIndex, scan: &LibraryScan) -> Vec<LoadedNote> {
 }
 
 fn incomplete_load_result(
-    auto_save_dir: &Path,
+    trusted_root: &TrustedLibraryRoot,
     index: &NoteIndex,
     scan: LibraryScan,
     issues: Vec<NoteLoadIssue>,
@@ -2039,7 +2559,11 @@ fn incomplete_load_result(
         folders: scan.folders,
         load_state: NoteLoadState::Incomplete,
         issues,
-        index_source_path: Some(get_index_path(auto_save_dir).to_string_lossy().to_string()),
+        index_source_path: Some(
+            get_index_path(trusted_root.path())
+                .to_string_lossy()
+                .to_string(),
+        ),
         index_backup_path: None,
     }
 }
@@ -2048,25 +2572,30 @@ fn load_markdown_library_with_fs<F: LibraryFileSystem>(
     auto_save_dir: &Path,
     file_system: &F,
 ) -> MarkdownLibraryLoadResult {
-    let index_source_path = get_index_path(auto_save_dir);
-    if let Err(error) = ensure_trusted_library_root(auto_save_dir) {
-        return MarkdownLibraryLoadResult {
-            notes: Vec::new(),
-            folders: Vec::new(),
-            load_state: NoteLoadState::Incomplete,
-            issues: vec![NoteLoadIssue::new(
-                NoteLoadIssueKind::Scan,
-                "validate_library_root",
-                &error.path,
-                error.reason,
-            )],
-            index_source_path: Some(index_source_path.to_string_lossy().to_string()),
-            index_backup_path: None,
-        };
-    }
+    let trusted_root = match resolve_trusted_library_root(auto_save_dir) {
+        Ok(trusted_root) => trusted_root,
+        Err(error) => {
+            return MarkdownLibraryLoadResult {
+                notes: Vec::new(),
+                folders: Vec::new(),
+                load_state: NoteLoadState::Incomplete,
+                issues: vec![NoteLoadIssue::new(
+                    NoteLoadIssueKind::Scan,
+                    "validate_library_root",
+                    &error.path,
+                    error.reason,
+                )],
+                index_source_path: Some(
+                    get_index_path(auto_save_dir).to_string_lossy().to_string(),
+                ),
+                index_backup_path: None,
+            };
+        }
+    };
+    let index_source_path = get_index_path(trusted_root.path());
 
     let _index_guard = lock_note_index();
-    let index_snapshot = match read_index_state(auto_save_dir) {
+    let index_snapshot = match read_index_state(&trusted_root) {
         IndexReadState::Ready(snapshot) => snapshot,
         IndexReadState::Corrupt(state) => {
             return MarkdownLibraryLoadResult {
@@ -2082,17 +2611,17 @@ fn load_markdown_library_with_fs<F: LibraryFileSystem>(
         }
     };
 
-    let scan = scan_library_tree(file_system, auto_save_dir, None, true);
+    let scan = scan_library_tree(file_system, &trusted_root, None, true);
     if !scan.is_complete() {
         let issues = scan.issues.clone();
-        return incomplete_load_result(auto_save_dir, &index_snapshot.index, scan, issues);
+        return incomplete_load_result(&trusted_root, &index_snapshot.index, scan, issues);
     }
 
     let (reconciled_index, index_changed) = reconcile_index_with_scan(&index_snapshot.index, &scan);
     let notes = materialize_notes(&reconciled_index, &scan);
 
     if index_changed {
-        match write_index_from_snapshot(auto_save_dir, &index_snapshot, &reconciled_index) {
+        match write_index_from_snapshot(&trusted_root, &index_snapshot, &reconciled_index) {
             Ok(()) => {}
             Err(IndexWriteFailure::Corrupt(state)) => {
                 return MarkdownLibraryLoadResult {
@@ -2108,7 +2637,7 @@ fn load_markdown_library_with_fs<F: LibraryFileSystem>(
             }
             Err(IndexWriteFailure::Issue(issue)) => {
                 return incomplete_load_result(
-                    auto_save_dir,
+                    &trusted_root,
                     &index_snapshot.index,
                     scan,
                     vec![issue],
@@ -2155,12 +2684,13 @@ pub fn resolve_note_file_path(
     auto_save_dir: &Path,
     note_id: &str,
 ) -> Result<Option<PathBuf>, String> {
+    let trusted_root = TrustedLibraryRoot::open(auto_save_dir)?;
     let _index_guard = lock_note_index();
-    resolve_note_file_path_unlocked(auto_save_dir, note_id)
+    resolve_note_file_path_unlocked(&trusted_root, note_id)
 }
 
 fn resolve_note_file_path_unlocked(
-    auto_save_dir: &Path,
+    trusted_root: &TrustedLibraryRoot,
     note_id: &str,
 ) -> Result<Option<PathBuf>, String> {
     let safe_id = sanitize_note_id(note_id);
@@ -2168,14 +2698,14 @@ fn resolve_note_file_path_unlocked(
         return Ok(None);
     }
 
-    let index = read_index(auto_save_dir)?;
+    let index = require_index_snapshot(trusted_root)?.index;
     let entry = match index.entries.get(&safe_id) {
         Some(e) => e,
         None => return Ok(None),
     };
 
     Ok(Some(validated_library_file_path(
-        auto_save_dir,
+        trusted_root,
         &entry.relative_path,
     )?))
 }
@@ -2186,12 +2716,12 @@ where
 {
     match delete_file(file_path) {
         Ok(()) => Ok(()),
-        Err(delete_error) => match file_path
-            .try_exists()
-            .map_err(|e| format!("Failed to recheck note file after trash error: {e}"))?
-        {
-            false => Ok(()),
-            true => Err(delete_error),
+        Err(delete_error) => match fs::symlink_metadata(file_path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Ok(_) => Err(delete_error),
+            Err(error) => Err(format!(
+                "Failed to recheck note file after trash error: {error}"
+            )),
         },
     }
 }
@@ -2207,12 +2737,16 @@ pub fn remove_note_from_index_if_path(
         return Ok(None);
     }
 
+    let trusted_root = resolve_trusted_library_root(auto_save_dir)
+        .map_err(|error| error.display("validate_library_root"))?;
+    let expected_file_path =
+        canonicalize_expected_library_path(&trusted_root, auto_save_dir, expected_file_path)?;
     let _index_guard = lock_note_index();
-    remove_note_from_index_if_path_unlocked(auto_save_dir, note_id, expected_file_path)
+    remove_note_from_index_if_path_unlocked(&trusted_root, note_id, &expected_file_path)
 }
 
 fn remove_note_from_index_if_path_unlocked(
-    auto_save_dir: &Path,
+    trusted_root: &TrustedLibraryRoot,
     note_id: &str,
     expected_file_path: &Path,
 ) -> Result<Option<PathBuf>, String> {
@@ -2221,26 +2755,29 @@ fn remove_note_from_index_if_path_unlocked(
         return Ok(None);
     }
 
-    let index_snapshot = require_index_snapshot(auto_save_dir)?;
+    let index_snapshot = require_index_snapshot(trusted_root)?;
     let mut index = index_snapshot.index.clone();
     let entry = match index.entries.get(&safe_id) {
         Some(e) => e.clone(),
         None => return Ok(None),
     };
 
-    let file_path = validated_library_file_path(auto_save_dir, &entry.relative_path)?;
+    let file_path = validated_library_file_path(trusted_root, &entry.relative_path)?;
     if file_path != expected_file_path {
         return Err("Note index changed before delete completed".to_string());
     }
-    if expected_file_path
-        .try_exists()
-        .map_err(|e| format!("Failed to check note file before delete cleanup: {e}"))?
-    {
-        return Err("Note file changed before delete completed".to_string());
+    match fs::symlink_metadata(expected_file_path) {
+        Ok(_) => return Err("Note file changed before delete completed".to_string()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "Failed to check note file before delete cleanup: {error}"
+            ));
+        }
     }
 
     index.entries.remove(&safe_id);
-    write_index_from_snapshot(auto_save_dir, &index_snapshot, &index)
+    write_index_from_snapshot(trusted_root, &index_snapshot, &index)
         .map_err(index_write_failure_to_string)?;
     Ok(Some(file_path))
 }
@@ -2253,20 +2790,25 @@ pub fn delete_note_file_and_index<F>(
 where
     F: FnOnce(&Path) -> Result<(), String>,
 {
+    let trusted_root = resolve_trusted_library_root(auto_save_dir)
+        .map_err(|error| error.display("validate_library_root"))?;
     let _index_guard = lock_note_index();
-    let file_path = match resolve_note_file_path_unlocked(auto_save_dir, note_id)? {
+    let file_path = match resolve_note_file_path_unlocked(&trusted_root, note_id)? {
         Some(p) => p,
         None => return Ok(false),
     };
 
-    if file_path
-        .try_exists()
-        .map_err(|e| format!("Failed to check note file before delete: {e}"))?
-    {
-        trash_note_file_or_accept_missing(&file_path, delete_file)?;
+    match fs::symlink_metadata(&file_path) {
+        Ok(_) => {
+            validate_existing_trusted_file(&trusted_root, &file_path, "validate_note_delete")?;
+            validate_existing_trusted_file(&trusted_root, &file_path, "validate_note_delete")?;
+            trash_note_file_or_accept_missing(&file_path, delete_file)?;
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("Failed to check note file before delete: {error}")),
     }
 
-    let removed = remove_note_from_index_if_path_unlocked(auto_save_dir, note_id, &file_path)?;
+    let removed = remove_note_from_index_if_path_unlocked(&trusted_root, note_id, &file_path)?;
     Ok(removed.is_some())
 }
 
@@ -2326,26 +2868,79 @@ pub struct MigrationResult {
     pub index_copied: bool,
 }
 
+fn copy_trusted_library_file(
+    src_root: &TrustedLibraryRoot,
+    src_path: &Path,
+    dst_root: &TrustedLibraryRoot,
+    dst_path: &Path,
+) -> Result<(), String> {
+    validate_existing_trusted_file(src_root, src_path, "validate_migration_source")?;
+    let mut src_file = fs::File::open(src_path).map_err(|error| {
+        format!(
+            "open_migration_source failed for {}: {}",
+            src_path.display(),
+            error
+        )
+    })?;
+    validate_existing_trusted_file(src_root, src_path, "validate_migration_source")?;
+    validate_note_destination_before_replace(dst_root, dst_path)?;
+    let mut dst_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dst_path)
+        .map_err(|error| {
+            format!(
+                "create_migration_destination failed for {}: {}",
+                dst_path.display(),
+                error
+            )
+        })?;
+
+    if let Err(error) = io::copy(&mut src_file, &mut dst_file).and_then(|_| dst_file.sync_all()) {
+        drop(dst_file);
+        return Err(cleanup_file_with_reason(
+            dst_path,
+            format!(
+                "copy_migration_file failed from {} to {}: {}",
+                src_path.display(),
+                dst_path.display(),
+                error
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Merge all .md files from src_dir into dst_dir without overwriting
 /// existing destination notes or replacing the destination index.
 /// Preserves relative directory structure and creates empty folders.
 pub fn migrate_notes(src_dir: &Path, dst_dir: &Path) -> Result<MigrationResult, String> {
-    ensure_trusted_library_root(src_dir)
+    let src_root = resolve_trusted_library_root(src_dir)
         .map_err(|error| error.display("validate_source_library_root"))?;
-    ensure_trusted_library_root(dst_dir)
+    let dst_root = resolve_trusted_library_root(dst_dir)
         .map_err(|error| error.display("validate_destination_library_root"))?;
+
+    if src_root.path() == dst_root.path() {
+        return Ok(MigrationResult {
+            files_copied: 0,
+            index_copied: false,
+        });
+    }
 
     // When the current local library root is the parent of the cloud library root
     // (for example `.../HwanNote` -> `.../HwanNote/Notes`), skip the destination
     // subtree while collecting source files so we do not recursively copy the
     // cloud library back into itself.
-    let skip_src_subtree = dst_dir.starts_with(src_dir).then_some(dst_dir);
+    let skip_src_subtree = dst_root
+        .path()
+        .starts_with(src_root.path())
+        .then_some(dst_root.path());
 
     let _index_guard = lock_note_index();
-    let src_snapshot = require_index_snapshot(src_dir)?;
-    let dst_snapshot = require_index_snapshot(dst_dir)?;
-    let src_scan = scan_library_tree(&ProductionFileSystem, src_dir, skip_src_subtree, true);
-    let dst_scan = scan_library_tree(&ProductionFileSystem, dst_dir, None, true);
+    let src_snapshot = require_index_snapshot(&src_root)?;
+    let dst_snapshot = require_index_snapshot(&dst_root)?;
+    let src_scan = scan_library_tree(&ProductionFileSystem, &src_root, skip_src_subtree, true);
+    let dst_scan = scan_library_tree(&ProductionFileSystem, &dst_root, None, true);
 
     if !src_scan.is_complete() || !dst_scan.is_complete() {
         return Err(src_scan
@@ -2362,9 +2957,9 @@ pub fn migrate_notes(src_dir: &Path, dst_dir: &Path) -> Result<MigrationResult, 
         reconcile_index_with_scan(&dst_snapshot.index, &dst_scan);
 
     for folder in &src_scan.folders {
-        let relative_folder = normalize_library_relative_path(dst_dir, folder)
+        let relative_folder = normalize_library_relative_path(dst_root.path(), folder)
             .map_err(|error| error.display("validate_migration_folder"))?;
-        ensure_library_subdirectory(dst_dir, &relative_folder)?;
+        ensure_library_subdirectory(&dst_root, &relative_folder)?;
     }
 
     let mut existing_dst_paths: HashSet<String> = dst_scan.files.keys().cloned().collect();
@@ -2385,15 +2980,16 @@ pub fn migrate_notes(src_dir: &Path, dst_dir: &Path) -> Result<MigrationResult, 
             }
         }
 
-        let desired_relative = normalize_library_relative_path(dst_dir, &src_entry.relative_path)
+        let desired_relative =
+            normalize_library_relative_path(dst_root.path(), &src_entry.relative_path)
+                .map_err(|error| error.display("validate_migration_note_path"))?;
+        validate_no_symlink_beneath_root(&dst_root, &desired_relative)
             .map_err(|error| error.display("validate_migration_note_path"))?;
-        validate_no_symlink_beneath_root(dst_dir, &desired_relative)
-            .map_err(|error| error.display("validate_migration_note_path"))?;
-        let desired_path = dst_dir.join(&desired_relative);
+        let desired_path = dst_root.path().join(&desired_relative);
         let parent_dir = desired_path
             .parent()
             .map(Path::to_path_buf)
-            .unwrap_or_else(|| dst_dir.to_path_buf());
+            .unwrap_or_else(|| dst_root.path().to_path_buf());
         let base_name = src_file
             .full_path
             .file_stem()
@@ -2401,35 +2997,33 @@ pub fn migrate_notes(src_dir: &Path, dst_dir: &Path) -> Result<MigrationResult, 
             .filter(|value| !value.is_empty())
             .unwrap_or("untitled");
 
-        let final_path =
-            if existing_dst_paths.contains(&src_entry.relative_path) || desired_path.exists() {
-                ensure_unique_file_path(&parent_dir, base_name, None)?
-            } else {
-                desired_path
-            };
+        let desired_exists = match fs::symlink_metadata(&desired_path) {
+            Ok(_) => true,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+            Err(error) => return Err(error.to_string()),
+        };
+        let final_path = if existing_dst_paths.contains(&src_entry.relative_path) || desired_exists
+        {
+            ensure_unique_file_path(&parent_dir, base_name, None)?
+        } else {
+            desired_path
+        };
 
         if let Some(parent) = final_path.parent() {
-            let parent_relative = parent.strip_prefix(dst_dir).map_err(|error| {
+            let parent_relative = parent.strip_prefix(dst_root.path()).map_err(|error| {
                 format!(
                     "validate_migration_parent failed for {}: {}",
                     parent.display(),
                     error
                 )
             })?;
-            ensure_library_subdirectory(dst_dir, parent_relative)?;
+            ensure_library_subdirectory(&dst_root, parent_relative)?;
         }
 
-        fs::copy(&src_file.full_path, &final_path).map_err(|e| {
-            format!(
-                "Failed to copy {} to {}: {}",
-                src_file.full_path.display(),
-                final_path.display(),
-                e
-            )
-        })?;
+        copy_trusted_library_file(&src_root, &src_file.full_path, &dst_root, &final_path)?;
         files_copied += 1;
 
-        let final_rel = relative_path(dst_dir, &final_path);
+        let final_rel = relative_path(dst_root.path(), &final_path);
         let final_note_id = if existing_dst_ids.contains(src_note_id) {
             ensure_unique_note_id(&existing_dst_ids, &final_rel)
         } else {
@@ -2451,11 +3045,11 @@ pub fn migrate_notes(src_dir: &Path, dst_dir: &Path) -> Result<MigrationResult, 
     }
 
     if dst_index_changed {
-        write_index_from_snapshot(dst_dir, &dst_snapshot, &dst_index)
+        write_index_from_snapshot(&dst_root, &dst_snapshot, &dst_index)
             .map_err(index_write_failure_to_string)?;
     }
     if src_index_changed {
-        write_index_from_snapshot(src_dir, &src_snapshot, &src_index)
+        write_index_from_snapshot(&src_root, &src_snapshot, &src_index)
             .map_err(index_write_failure_to_string)?;
     }
 
@@ -2466,30 +3060,58 @@ pub fn migrate_notes(src_dir: &Path, dst_dir: &Path) -> Result<MigrationResult, 
 }
 
 pub fn migrate_calendar_file(src_dir: &Path, dst_dir: &Path) -> Result<bool, String> {
-    ensure_trusted_library_root(src_dir)
+    let src_root = resolve_trusted_library_root(src_dir)
         .map_err(|error| error.display("validate_source_library_root"))?;
-    ensure_trusted_library_root(dst_dir)
+    let dst_root = resolve_trusted_library_root(dst_dir)
         .map_err(|error| error.display("validate_destination_library_root"))?;
-    let src_path = src_dir.join(CALENDAR_FILENAME);
-    if !src_path.exists() {
-        return Ok(false);
-    }
-
-    let dst_path = dst_dir.join(CALENDAR_FILENAME);
-    let bytes = fs::read(&src_path).map_err(|e| format!("Failed to read {:?}: {}", src_path, e))?;
-    let mut dst_file = match OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&dst_path)
-    {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
-        Err(error) => return Err(format!("Failed to create {:?}: {}", dst_path, error)),
+    let src_path = src_root.path().join(CALENDAR_FILENAME);
+    let src_metadata = match fs::symlink_metadata(&src_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(format!(
+                "inspect_calendar_source failed for {}: {}",
+                src_path.display(),
+                error
+            ));
+        }
     };
+    if metadata_is_symlink_or_reparse_point(&src_metadata) || !src_metadata.is_file() {
+        return Err(format!(
+            "validate_calendar_source failed for {}: expected a trusted regular file",
+            src_path.display()
+        ));
+    }
+    validate_no_symlink_beneath_root(&src_root, Path::new(CALENDAR_FILENAME))
+        .map_err(|error| error.display("validate_calendar_source"))?;
+    ensure_path_within_canonical_root(&src_root, &src_path)
+        .map_err(|error| error.display("validate_calendar_source"))?;
 
-    dst_file
-        .write_all(&bytes)
-        .map_err(|e| format!("Failed to copy {:?}: {}", src_path, e))?;
+    let dst_path = dst_root.path().join(CALENDAR_FILENAME);
+    match fs::symlink_metadata(&dst_path) {
+        Ok(metadata) => {
+            if metadata_is_symlink_or_reparse_point(&metadata) {
+                return Err(format!(
+                    "validate_calendar_destination failed for {}: symbolic links and reparse points are not allowed",
+                    dst_path.display()
+                ));
+            }
+            return Ok(false);
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "inspect_calendar_destination failed for {}: {}",
+                dst_path.display(),
+                error
+            ));
+        }
+    }
+    validate_no_symlink_beneath_root(&dst_root, Path::new(CALENDAR_FILENAME))
+        .map_err(|error| error.display("validate_calendar_destination"))?;
+    ensure_path_within_canonical_root(&dst_root, &dst_path)
+        .map_err(|error| error.display("validate_calendar_destination"))?;
+    copy_trusted_library_file(&src_root, &src_path, &dst_root, &dst_path)?;
     Ok(true)
 }
 
@@ -2507,6 +3129,8 @@ pub fn title_from_filename(file_path: &Path) -> String {
 mod tests {
     use super::*;
     use std::process;
+    #[cfg(windows)]
+    use std::process::Command;
 
     fn make_temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -2523,10 +3147,27 @@ mod tests {
         let _ = fs::remove_dir_all(path);
     }
 
+    fn normalized_test_path(path: &Path) -> PathBuf {
+        let Some(parent) = path.parent() else {
+            return path.to_path_buf();
+        };
+        let Some(file_name) = path.file_name() else {
+            return fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        };
+        fs::canonicalize(parent)
+            .map(|canonical_parent| canonical_parent.join(file_name))
+            .unwrap_or_else(|_| path.to_path_buf())
+    }
+
+    fn test_paths_equal(left: &Path, right: &Path) -> bool {
+        normalized_test_path(left) == normalized_test_path(right)
+    }
+
     #[derive(Default)]
     struct FaultInjectingFileSystem {
         failures: HashMap<(&'static str, PathBuf), String>,
         entry_type_overrides: HashMap<PathBuf, LibraryEntryType>,
+        canonical_dir_overrides: HashMap<PathBuf, PathBuf>,
     }
 
     impl FaultInjectingFileSystem {
@@ -2538,6 +3179,7 @@ mod tests {
             Self {
                 failures: HashMap::from([((operation, path.into()), reason.into())]),
                 entry_type_overrides: HashMap::new(),
+                canonical_dir_overrides: HashMap::new(),
             }
         }
 
@@ -2545,7 +3187,27 @@ mod tests {
             Self {
                 failures: HashMap::new(),
                 entry_type_overrides: HashMap::from([(path.into(), entry_type)]),
+                canonical_dir_overrides: HashMap::new(),
             }
+        }
+
+        fn with_canonical_dir_override(
+            mut self,
+            path: impl Into<PathBuf>,
+            canonical: impl Into<PathBuf>,
+        ) -> Self {
+            self.canonical_dir_overrides
+                .insert(path.into(), canonical.into());
+            self
+        }
+
+        fn with_entry_type_override(
+            mut self,
+            path: impl Into<PathBuf>,
+            entry_type: LibraryEntryType,
+        ) -> Self {
+            self.entry_type_overrides.insert(path.into(), entry_type);
+            self
         }
 
         fn failure(
@@ -2554,8 +3216,11 @@ mod tests {
             path: &Path,
         ) -> Option<FileSystemOperationError> {
             self.failures
-                .get(&(operation, path.to_path_buf()))
-                .map(|reason| FileSystemOperationError::injected(operation, path, reason))
+                .iter()
+                .find(|((candidate_operation, candidate_path), _)| {
+                    *candidate_operation == operation && test_paths_equal(candidate_path, path)
+                })
+                .map(|(_, reason)| FileSystemOperationError::injected(operation, path, reason))
         }
     }
 
@@ -2571,7 +3236,11 @@ mod tests {
             if let Some(error) = self.failure("entry_file_type", path) {
                 return Err(error);
             }
-            if let Some(entry_type) = self.entry_type_overrides.get(path) {
+            if let Some((_, entry_type)) = self
+                .entry_type_overrides
+                .iter()
+                .find(|(candidate, _)| test_paths_equal(candidate, path))
+            {
                 return Ok(*entry_type);
             }
             ProductionFileSystem.entry_type(path)
@@ -2584,11 +3253,163 @@ mod tests {
             ProductionFileSystem.read_markdown(path)
         }
 
+        fn canonicalize_path(&self, path: &Path) -> Result<PathBuf, FileSystemOperationError> {
+            if let Some(error) = self.failure("canonicalize_path", path) {
+                return Err(error);
+            }
+            if let Some((_, canonical)) = self
+                .canonical_dir_overrides
+                .iter()
+                .find(|(candidate, _)| test_paths_equal(candidate, path))
+            {
+                return Ok(fs::canonicalize(canonical).unwrap_or_else(|_| canonical.clone()));
+            }
+            ProductionFileSystem.canonicalize_path(path)
+        }
+
         fn markdown_metadata(&self, path: &Path) -> Result<fs::Metadata, FileSystemOperationError> {
             if let Some(error) = self.failure("read_metadata", path) {
                 return Err(error);
             }
             ProductionFileSystem.markdown_metadata(path)
+        }
+    }
+
+    #[cfg(unix)]
+    fn create_directory_link(link: &Path, target: &Path) -> Result<bool, String> {
+        match std::os::unix::fs::symlink(target, link) {
+            Ok(()) => Ok(true),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::PermissionDenied | io::ErrorKind::Unsupported
+                ) =>
+            {
+                eprintln!("skipping link test: directory symlink creation is unavailable: {error}");
+                Ok(false)
+            }
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    #[cfg(windows)]
+    fn create_directory_link(link: &Path, target: &Path) -> Result<bool, String> {
+        match std::os::windows::fs::symlink_dir(target, link) {
+            Ok(()) => Ok(true),
+            Err(symlink_error) => {
+                let is_privilege_error = symlink_error.kind() == io::ErrorKind::PermissionDenied
+                    || symlink_error.kind() == io::ErrorKind::Unsupported
+                    || symlink_error.raw_os_error() == Some(1314);
+                if !is_privilege_error {
+                    return Err(symlink_error.to_string());
+                }
+
+                let output = Command::new("cmd")
+                    .args(["/C", "mklink", "/J"])
+                    .arg(link)
+                    .arg(target)
+                    .output()
+                    .map_err(|command_error| {
+                        format!(
+                            "symlink_dir failed with {symlink_error}; mklink /J could not run: {command_error}"
+                        )
+                    })?;
+                if output.status.success() {
+                    Ok(true)
+                } else {
+                    eprintln!(
+                        "skipping link test: symlink privilege is unavailable and junction creation failed ({}): {}",
+                        output.status,
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    );
+                    Ok(false)
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn create_file_link(link: &Path, target: &Path) -> Result<bool, String> {
+        match std::os::unix::fs::symlink(target, link) {
+            Ok(()) => Ok(true),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::PermissionDenied | io::ErrorKind::Unsupported
+                ) =>
+            {
+                eprintln!("skipping link test: file symlink creation is unavailable: {error}");
+                Ok(false)
+            }
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    #[cfg(windows)]
+    fn create_file_link(link: &Path, target: &Path) -> Result<bool, String> {
+        match std::os::windows::fs::symlink_file(target, link) {
+            Ok(()) => Ok(true),
+            Err(error)
+                if error.kind() == io::ErrorKind::PermissionDenied
+                    || error.kind() == io::ErrorKind::Unsupported
+                    || error.raw_os_error() == Some(1314) =>
+            {
+                eprintln!("skipping link test: file symlink privilege is unavailable: {error}");
+                Ok(false)
+            }
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    struct TestLinkGuard {
+        path: PathBuf,
+        directory: bool,
+        active: bool,
+    }
+
+    impl TestLinkGuard {
+        fn directory(path: &Path) -> Self {
+            Self {
+                path: path.to_path_buf(),
+                directory: true,
+                active: true,
+            }
+        }
+
+        fn file(path: &Path) -> Self {
+            Self {
+                path: path.to_path_buf(),
+                directory: false,
+                active: true,
+            }
+        }
+
+        fn unlink(mut self) -> Result<(), String> {
+            remove_test_link(&self.path, self.directory).map_err(|error| error.to_string())?;
+            self.active = false;
+            Ok(())
+        }
+    }
+
+    impl Drop for TestLinkGuard {
+        fn drop(&mut self) {
+            if self.active {
+                let _ = remove_test_link(&self.path, self.directory);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn remove_test_link(path: &Path, _directory: bool) -> io::Result<()> {
+        fs::remove_file(path)
+    }
+
+    #[cfg(windows)]
+    fn remove_test_link(path: &Path, directory: bool) -> io::Result<()> {
+        if directory {
+            fs::remove_dir(path)
+        } else {
+            fs::remove_file(path)
         }
     }
 
@@ -2602,7 +3423,7 @@ mod tests {
         assert!(result.issues.iter().any(|issue| {
             issue.kind == kind
                 && issue.operation == operation
-                && Path::new(&issue.path) == path
+                && test_paths_equal(Path::new(&issue.path), path)
                 && issue.reason.contains(reason_fragment)
         }));
     }
@@ -2753,7 +3574,7 @@ mod tests {
                 },
             )?;
 
-            let files = list_markdown_files(&dir)?;
+            let files = list_markdown_files(&dir, &dir)?;
             assert_eq!(files.len(), 1);
 
             let raw_markdown = fs::read_to_string(&files[0]).unwrap();
@@ -3245,6 +4066,35 @@ mod tests {
     }
 
     #[test]
+    fn migrate_notes_rejects_directory_links_in_source_tree_without_copying_external_notes() {
+        let src = make_temp_dir("migrate-link-src");
+        let dst = make_temp_dir("migrate-link-dst");
+        let outside = make_temp_dir("migrate-link-outside");
+        let result = (|| -> Result<(), String> {
+            fs::write(outside.join("outside.md"), "# Outside").map_err(|e| e.to_string())?;
+            let linked = src.join("linked");
+            if !create_directory_link(&linked, &outside)? {
+                return Ok(());
+            }
+            let link_guard = TestLinkGuard::directory(&linked);
+
+            let error = migrate_notes(&src, &dst).unwrap_err();
+            assert!(error.contains("reject_symlink"));
+            assert!(load_markdown_notes(&dst)?.is_empty());
+            assert_eq!(
+                fs::read_to_string(outside.join("outside.md")).map_err(|e| e.to_string())?,
+                "# Outside"
+            );
+            link_guard.unlink()?;
+            Ok(())
+        })();
+        cleanup_temp_dir(&src);
+        cleanup_temp_dir(&dst);
+        cleanup_temp_dir(&outside);
+        result.unwrap();
+    }
+
+    #[test]
     fn migrate_calendar_file_copies_when_destination_is_missing() {
         let src = make_temp_dir("migrate-calendar-src");
         let dst = make_temp_dir("migrate-calendar-dst");
@@ -3289,6 +4139,178 @@ mod tests {
         cleanup_temp_dir(&src);
         cleanup_temp_dir(&dst);
         result.unwrap();
+    }
+
+    #[test]
+    fn normal_nested_folders_support_save_rename_and_delete() {
+        let dir = make_temp_dir("normal-nested-boundary");
+        let result = (|| -> Result<(), String> {
+            let folders = create_folder(&dir, "projects/rust/security")?;
+            assert!(folders.contains(&"projects/rust/security".to_string()));
+
+            auto_save_markdown_note(
+                &dir,
+                &AutoSavePayload {
+                    note_id: "nested-note".to_string(),
+                    title: "Nested".to_string(),
+                    content: "# Nested".to_string(),
+                    folder_path: Some("projects/rust/security".to_string()),
+                    is_title_manual: Some(true),
+                    is_pinned: Some(false),
+                },
+            )?;
+
+            let renamed = rename_folder(&dir, "projects", "archive")?;
+            assert!(renamed.contains(&"archive/rust/security".to_string()));
+            let deleted = delete_folder(&dir, "archive")?;
+            assert_eq!(deleted.moved_note_ids, vec!["nested-note".to_string()]);
+
+            let notes = load_markdown_notes(&dir)?;
+            assert_eq!(notes.len(), 1);
+            assert_eq!(notes[0].folder_path, "");
+            assert_eq!(notes[0].markdown, "# Nested");
+            Ok(())
+        })();
+        cleanup_temp_dir(&dir);
+        result.unwrap();
+    }
+
+    #[test]
+    fn folder_mutations_reject_directory_links_without_touching_external_tree() {
+        let dir = make_temp_dir("folder-link-boundary");
+        let outside = make_temp_dir("folder-link-boundary-outside");
+        let result = (|| -> Result<(), String> {
+            let container = dir.join("container");
+            fs::create_dir_all(&container).map_err(|e| e.to_string())?;
+            let sentinel = outside.join("sentinel.md");
+            fs::write(&sentinel, "outside-original").map_err(|e| e.to_string())?;
+            let link = container.join("linked");
+            if !create_directory_link(&link, &outside)? {
+                return Ok(());
+            }
+            let link_guard = TestLinkGuard::directory(&link);
+
+            let create_error = create_folder(&dir, "container/linked/new").unwrap_err();
+            assert!(create_error.contains("symbolic links and reparse points"));
+            let rename_error = rename_folder(&dir, "container", "renamed").unwrap_err();
+            assert!(rename_error.contains("reject_symlink"));
+            let delete_error = delete_folder(&dir, "container").unwrap_err();
+            assert!(delete_error.contains("reject_symlink"));
+
+            assert!(container.exists());
+            assert!(!dir.join("renamed").exists());
+            assert_eq!(
+                fs::read_to_string(&sentinel).map_err(|e| e.to_string())?,
+                "outside-original"
+            );
+            link_guard.unlink()?;
+            Ok(())
+        })();
+        cleanup_temp_dir(&dir);
+        let outside_contents = fs::read_to_string(outside.join("sentinel.md"));
+        cleanup_temp_dir(&outside);
+        result.unwrap();
+        assert_eq!(outside_contents.unwrap(), "outside-original");
+    }
+
+    #[test]
+    fn note_delete_rejects_file_links_without_invoking_the_deleter() {
+        use std::cell::Cell;
+
+        let dir = make_temp_dir("delete-file-link-boundary");
+        let outside = make_temp_dir("delete-file-link-boundary-outside");
+        let result = (|| -> Result<(), String> {
+            let saved = auto_save_markdown_note(
+                &dir,
+                &AutoSavePayload {
+                    note_id: "linked-delete".to_string(),
+                    title: "Linked Delete".to_string(),
+                    content: "# Internal".to_string(),
+                    folder_path: None,
+                    is_title_manual: Some(true),
+                    is_pinned: Some(false),
+                },
+            )?;
+            let note_path = PathBuf::from(saved.file_path);
+            fs::remove_file(&note_path).map_err(|e| e.to_string())?;
+
+            let outside_file = outside.join("victim.md");
+            fs::write(&outside_file, "outside-original").map_err(|e| e.to_string())?;
+            if !create_file_link(&note_path, &outside_file)? {
+                return Ok(());
+            }
+            let link_guard = TestLinkGuard::file(&note_path);
+            let delete_called = Cell::new(false);
+
+            let error = delete_note_file_and_index(&dir, "linked-delete", |_| {
+                delete_called.set(true);
+                Ok(())
+            })
+            .unwrap_err();
+            assert!(error.contains("symbolic links and reparse points"));
+            assert!(!delete_called.get());
+            assert_eq!(
+                fs::read_to_string(&outside_file).map_err(|e| e.to_string())?,
+                "outside-original"
+            );
+            link_guard.unlink()?;
+            Ok(())
+        })();
+        cleanup_temp_dir(&dir);
+        let outside_contents = fs::read_to_string(outside.join("victim.md"));
+        cleanup_temp_dir(&outside);
+        result.unwrap();
+        assert_eq!(outside_contents.unwrap(), "outside-original");
+    }
+
+    #[test]
+    fn calendar_migration_rejects_source_and_destination_file_links() {
+        let src = make_temp_dir("calendar-link-src");
+        let dst = make_temp_dir("calendar-link-dst");
+        let outside = make_temp_dir("calendar-link-outside");
+        let result = (|| -> Result<(), String> {
+            let outside_source = outside.join("source.json");
+            fs::write(&outside_source, "outside-source").map_err(|e| e.to_string())?;
+            let outside_destination = outside.join("destination.json");
+            fs::write(&outside_destination, "outside-destination").map_err(|e| e.to_string())?;
+            let linked_source = src.join(CALENDAR_FILENAME);
+            if !create_file_link(&linked_source, &outside_source)? {
+                return Ok(());
+            }
+            let source_guard = TestLinkGuard::file(&linked_source);
+            let source_error = migrate_calendar_file(&src, &dst).unwrap_err();
+            assert!(source_error.contains("trusted regular file"));
+            assert!(!dst.join(CALENDAR_FILENAME).exists());
+            assert_eq!(
+                fs::read_to_string(&outside_source).map_err(|e| e.to_string())?,
+                "outside-source"
+            );
+            source_guard.unlink()?;
+
+            fs::write(src.join(CALENDAR_FILENAME), "internal-calendar")
+                .map_err(|e| e.to_string())?;
+            let linked_destination = dst.join(CALENDAR_FILENAME);
+            if !create_file_link(&linked_destination, &outside_destination)? {
+                return Ok(());
+            }
+            let destination_guard = TestLinkGuard::file(&linked_destination);
+            let destination_error = migrate_calendar_file(&src, &dst).unwrap_err();
+            assert!(destination_error.contains("symbolic links and reparse points"));
+            assert_eq!(
+                fs::read_to_string(&outside_destination).map_err(|e| e.to_string())?,
+                "outside-destination"
+            );
+            destination_guard.unlink()?;
+            Ok(())
+        })();
+        cleanup_temp_dir(&src);
+        cleanup_temp_dir(&dst);
+        let source_contents = fs::read_to_string(outside.join("source.json"));
+        let destination_contents = fs::read_to_string(outside.join("destination.json"));
+        cleanup_temp_dir(&outside);
+        result.unwrap();
+        assert_eq!(source_contents.unwrap(), "outside-source");
+        assert_eq!(destination_contents.unwrap(), "outside-destination");
     }
 
     #[test]
@@ -3614,7 +4636,7 @@ mod tests {
                 fs::read(&index_path).map_err(|e| e.to_string())?,
                 corrupt_bytes
             );
-            assert!(list_markdown_files(&dir)?.is_empty());
+            assert!(list_markdown_files(&dir, &dir)?.is_empty());
             Ok(())
         })();
         cleanup_temp_dir(&dir);
@@ -3857,7 +4879,9 @@ mod tests {
         let dir = make_temp_dir("index-second-verification");
         let result = (|| -> Result<(), String> {
             write_index(&dir, &empty_index())?;
-            let snapshot = require_index_snapshot(&dir)?;
+            let trusted_root = resolve_trusted_library_root(&dir)
+                .map_err(|error| error.display("validate_library_root"))?;
+            let snapshot = require_index_snapshot(&trusted_root)?;
             let planned_index = NoteIndex {
                 entries: HashMap::from([(
                     "planned".to_string(),
@@ -3884,15 +4908,19 @@ mod tests {
                 serde_json::to_vec_pretty(&concurrent_index).map_err(|e| e.to_string())?;
             let index_path = get_index_path(&dir);
 
-            let write_result =
-                write_index_from_snapshot_after_temp_hook(&dir, &snapshot, &planned_index, || {
+            let write_result = write_index_from_snapshot_after_temp_hook(
+                &trusted_root,
+                &snapshot,
+                &planned_index,
+                || {
                     fs::write(&index_path, &concurrent_bytes).unwrap();
-                });
+                },
+            );
 
             match write_result {
                 Err(IndexWriteFailure::Issue(issue)) => {
                     assert_eq!(issue.operation, "verify_index_unchanged");
-                    assert_eq!(Path::new(&issue.path), index_path);
+                    assert!(test_paths_equal(Path::new(&issue.path), &index_path));
                 }
                 other => panic!("expected second verification failure, got {other:?}"),
             }
@@ -3914,17 +4942,42 @@ mod tests {
         result.unwrap();
     }
 
-    #[cfg(unix)]
     #[test]
-    fn production_scan_and_auto_save_reject_real_symlink_ancestors() {
-        use std::os::unix::fs::symlink;
+    fn scanner_detects_repeated_canonical_directory_without_recursing_forever() {
+        let dir = make_temp_dir("scanner-detects-cycle");
+        let result = (|| -> Result<(), String> {
+            let child = dir.join("child");
+            fs::create_dir_all(&child).map_err(|e| e.to_string())?;
 
+            let file_system = FaultInjectingFileSystem::default()
+                .with_entry_type_override(&child, LibraryEntryType::Directory)
+                .with_canonical_dir_override(&dir, dir.clone())
+                .with_canonical_dir_override(&child, dir.clone());
+
+            let load = load_markdown_library_with_fs(&dir, &file_system);
+            assert_eq!(load.load_state, NoteLoadState::Incomplete);
+            assert!(load.issues.iter().any(|issue| {
+                issue.kind == NoteLoadIssueKind::Scan
+                    && issue.operation == "detect_cycle"
+                    && issue.reason.contains("same canonical directory twice")
+            }));
+            Ok(())
+        })();
+        cleanup_temp_dir(&dir);
+        result.unwrap();
+    }
+
+    #[test]
+    fn production_scan_and_auto_save_reject_real_directory_links_to_outside_root() {
         let dir = make_temp_dir("real-symlink-library");
         let outside = make_temp_dir("real-symlink-outside");
         let result = (|| -> Result<(), String> {
             fs::write(outside.join("outside.md"), "# Outside").map_err(|e| e.to_string())?;
             let link = dir.join("linked");
-            symlink(&outside, &link).map_err(|e| e.to_string())?;
+            if !create_directory_link(&link, &outside)? {
+                return Ok(());
+            }
+            let link_guard = TestLinkGuard::directory(&link);
 
             let load = load_markdown_library(&dir);
             assert_eq!(load.load_state, NoteLoadState::Incomplete);
@@ -3951,6 +5004,11 @@ mod tests {
             .unwrap_err();
             assert!(save_error.contains("symbolic links and reparse points"));
             assert!(!outside.join("Blocked.md").exists());
+            assert_eq!(
+                fs::read_to_string(outside.join("outside.md")).map_err(|e| e.to_string())?,
+                "# Outside"
+            );
+            link_guard.unlink()?;
             Ok(())
         })();
         cleanup_temp_dir(&dir);
@@ -3958,11 +5016,87 @@ mod tests {
         result.unwrap();
     }
 
+    #[test]
+    fn autosave_rejects_existing_file_link_without_overwriting_external_target() {
+        let dir = make_temp_dir("autosave-rejects-file-link");
+        let outside = make_temp_dir("autosave-rejects-file-link-outside");
+        let result = (|| -> Result<(), String> {
+            let outside_file = outside.join("victim.md");
+            fs::write(&outside_file, "outside-original").map_err(|e| e.to_string())?;
+
+            let linked_file = dir.join("linked.md");
+            if !create_file_link(&linked_file, &outside_file)? {
+                return Ok(());
+            }
+            let link_guard = TestLinkGuard::file(&linked_file);
+
+            let index = NoteIndex {
+                entries: HashMap::from([(
+                    "linked-note".to_string(),
+                    NoteIndexEntry {
+                        relative_path: "linked.md".to_string(),
+                        created_at: 1,
+                        manual_title: Some("Linked".to_string()),
+                        is_pinned: Some(false),
+                    },
+                )]),
+            };
+            write_index(&dir, &index)?;
+
+            let error = auto_save_markdown_note(
+                &dir,
+                &AutoSavePayload {
+                    note_id: "linked-note".to_string(),
+                    title: "Blocked".to_string(),
+                    content: "# Blocked".to_string(),
+                    folder_path: None,
+                    is_title_manual: Some(true),
+                    is_pinned: Some(false),
+                },
+            )
+            .unwrap_err();
+            assert!(error.contains("symbolic links and reparse points"));
+            assert_eq!(
+                fs::read_to_string(&outside_file).map_err(|e| e.to_string())?,
+                "outside-original"
+            );
+            link_guard.unlink()?;
+            Ok(())
+        })();
+        cleanup_temp_dir(&dir);
+        cleanup_temp_dir(&outside);
+        result.unwrap();
+    }
+
+    #[test]
+    fn real_directory_cycle_links_are_rejected_without_descending_forever() {
+        let dir = make_temp_dir("real-directory-cycle");
+        let result = (|| -> Result<(), String> {
+            let loop_link = dir.join("loop");
+            if !create_directory_link(&loop_link, &dir)? {
+                return Ok(());
+            }
+            let link_guard = TestLinkGuard::directory(&loop_link);
+
+            let load = load_markdown_library(&dir);
+            assert_eq!(load.load_state, NoteLoadState::Incomplete);
+            assert_issue(
+                &load,
+                NoteLoadIssueKind::Scan,
+                "reject_symlink",
+                &loop_link,
+                "symbolic links and reparse points",
+            );
+            link_guard.unlink()?;
+            Ok(())
+        })();
+        cleanup_temp_dir(&dir);
+        result.unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn atomic_note_write_rejects_destination_symlink_swap_after_temp_sync() {
-        use std::os::unix::fs::symlink;
-
         let dir = make_temp_dir("atomic-note-symlink-swap");
         let outside = make_temp_dir("atomic-note-symlink-swap-outside");
         let destination = dir.join("target.md");
@@ -3970,14 +5104,18 @@ mod tests {
         let result = (|| -> Result<(), String> {
             fs::write(&outside_file, "outside-original").map_err(|e| e.to_string())?;
 
+            let trusted_root = resolve_trusted_library_root(&dir)
+                .map_err(|error| error.display("validate_library_root"))?;
+
             let write_result = write_note_file_atomically_after_temp_hook(
-                &dir,
+                &trusted_root,
                 &destination,
                 "must-not-escape",
                 || {
-                    symlink(&outside_file, &destination).unwrap();
+                    std::os::unix::fs::symlink(&outside_file, &destination).unwrap();
                 },
             );
+            let link_guard = TestLinkGuard::file(&destination);
 
             let error = write_result.unwrap_err();
             assert!(error.contains("symbolic links and reparse points"));
@@ -3996,7 +5134,7 @@ mod tests {
                     .to_string_lossy()
                     .starts_with(".hwan-note-write-"));
             }
-            fs::remove_file(&destination).map_err(|e| e.to_string())?;
+            link_guard.unlink()?;
             Ok(())
         })();
         cleanup_temp_dir(&dir);
@@ -4004,17 +5142,17 @@ mod tests {
         result.unwrap();
     }
 
-    #[cfg(unix)]
     #[test]
-    fn library_root_symlink_is_rejected_before_load_or_save() {
-        use std::os::unix::fs::symlink;
-
+    fn library_root_directory_link_is_rejected_before_load_or_save() {
         let parent = make_temp_dir("root-symlink-parent");
         let outside = make_temp_dir("root-symlink-outside");
         let root_link = parent.join("notes-link");
         let result = (|| -> Result<(), String> {
             fs::write(outside.join("outside.md"), "# Outside").map_err(|e| e.to_string())?;
-            symlink(&outside, &root_link).map_err(|e| e.to_string())?;
+            if !create_directory_link(&root_link, &outside)? {
+                return Ok(());
+            }
+            let link_guard = TestLinkGuard::directory(&root_link);
 
             let load = load_markdown_library(&root_link);
             assert_eq!(load.load_state, NoteLoadState::Incomplete);
@@ -4041,7 +5179,11 @@ mod tests {
             .unwrap_err();
             assert!(save_error.contains("validate_library_root"));
             assert!(!outside.join("Blocked.md").exists());
-            fs::remove_file(&root_link).map_err(|e| e.to_string())?;
+            assert_eq!(
+                fs::read_to_string(outside.join("outside.md")).map_err(|e| e.to_string())?,
+                "# Outside"
+            );
+            link_guard.unlink()?;
             Ok(())
         })();
         cleanup_temp_dir(&parent);
