@@ -84,7 +84,7 @@ HwanNote는 Tauri v2 + React 18 + TypeScript 기반의 로컬 우선 메모 앱�
   - 마감일을 지정한 Inbox 항목의 완료·수정·삭제 및 한글 조합 Enter 처리 수정
   - Shift+Enter 다음 줄과 문자 그대로 입력한 `<br>`의 마크다운 저장·재열기 안정화
   - Linux 업데이트 설치 실패 시 불필요한 재시작 방지
-  - Ubuntu 검증과 Windows·Linux 릴리스 빌드 전에 프런트엔드·Rust 테스트 실행
+  - Windows·Ubuntu 검증과 Windows·Linux 릴리스 빌드 전에 프런트엔드·Rust 테스트 실행
 - `v0.9.14`
   - 노트와 인덱스 저장을 4단계 durable journal로 묶어 비정상 종료 후 시작 시 결정적으로 복구
   - 제목·폴더 변경 도중 실패해도 기존 note ID와 생성 시각을 유지하고 중복·orphan 파일 증가 방지
