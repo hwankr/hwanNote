@@ -10,6 +10,24 @@ const markdownParser = new MarkdownIt({
   typographer: false
 });
 
+// Recognize only source markup; escaped text and entities must remain literal.
+markdownParser.inline.ruler.before("html_inline", "hwan_html_break", (state, silent) => {
+  if (state.src[state.pos] !== "<") {
+    return false;
+  }
+
+  const match = /^<br\s*\/?\s*>/i.exec(state.src.slice(state.pos, state.posMax));
+  if (!match) {
+    return false;
+  }
+
+  if (!silent) {
+    state.push("hwan_html_break", "br", 0).content = match[0];
+  }
+  state.pos += match[0].length;
+  return true;
+});
+
 const TOGGLE_START = /^:::toggle\[(open|closed)\](?:\s+(.*))?\s*$/i;
 const TOGGLE_END = /^:::\s*$/;
 const FENCE_START = /^\s{0,3}(`{3,}|~{3,})/;
@@ -53,27 +71,6 @@ function closeMark(markStack: MarkdownMark[], type: string) {
   }
 }
 
-function appendTextWithOptionalBreaks(
-  content: JSONContent[],
-  text: string,
-  marks: MarkdownMark[],
-  parseHtmlBreaks: boolean
-) {
-  if (!parseHtmlBreaks) {
-    appendText(content, text, marks);
-    return;
-  }
-
-  const segments = text.split(/(<br\s*\/?\s*>)/gi);
-  for (const segment of segments) {
-    if (/^<br\s*\/?\s*>$/i.test(segment)) {
-      content.push({ type: "hardBreak" });
-    } else {
-      appendText(content, segment, marks);
-    }
-  }
-}
-
 function parseInlineTokens(tokens: MarkdownToken[], parseHtmlBreaks = false): JSONContent[] {
   const content: JSONContent[] = [];
   const marks: MarkdownMark[] = [];
@@ -81,7 +78,15 @@ function parseInlineTokens(tokens: MarkdownToken[], parseHtmlBreaks = false): JS
   for (const token of tokens) {
     switch (token.type) {
       case "text":
-        appendTextWithOptionalBreaks(content, token.content, marks, parseHtmlBreaks);
+        appendText(content, token.content, marks);
+        break;
+
+      case "hwan_html_break":
+        if (parseHtmlBreaks) {
+          content.push({ type: "hardBreak" });
+        } else {
+          appendText(content, token.content, marks);
+        }
         break;
 
       case "strong_open":
@@ -611,14 +616,16 @@ function serializeInline(content: JSONContent[] = [], hardBreak = "  \n"): strin
 
 function escapeParagraphOpening(value: string) {
   return value
-    .replace(/^\t/, "&#9;")
-    .replace(/^ {4}/, "&#32;   ")
-    .replace(/^(\s{0,3})(:::)/, "$1\\$2")
-    .replace(/^(\s{0,3})(-{3,})(\s*)$/, (_match, leading: string, dashes: string, trailing: string) =>
-      `${leading}\\${dashes}${trailing}`
+    .split("\n")
+    .map((line) => line
+      .replace(/^\t/, "&#9;")
+      .replace(/^ {4}/, "&#32;   ")
+      .replace(/^(\s{0,3})(:::)/, "$1\\$2")
+      .replace(/^(\s{0,3})(-+|=+)(\s*)$/, "$1\\$2$3")
+      .replace(/^(\s{0,3})([-+>])(?=\s)/, "$1\\$2")
+      .replace(/^(\s{0,3})(\d+)([.)])(?=\s)/, "$1$2\\$3")
     )
-    .replace(/^(\s{0,3})([-+>])(?=\s)/, "$1\\$2")
-    .replace(/^(\s{0,3})(\d+)([.)])(?=\s)/, "$1$2\\$3");
+    .join("\n");
 }
 
 function indent(value: string, spaces = 4) {
