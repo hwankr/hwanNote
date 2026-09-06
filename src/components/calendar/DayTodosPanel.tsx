@@ -82,6 +82,9 @@ export default function DayTodosPanel({
           value={newTodoText}
           onChange={(event) => setNewTodoText(event.target.value)}
           onKeyDown={(event) => {
+            if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) {
+              return;
+            }
             if (event.key === "Enter") {
               handleAddTodo();
             }

@@ -1,4 +1,4 @@
-use crate::atomic_file::{publish_temp_file, sync_parent_directory};
+use crate::atomic_file::{move_file_without_replace, publish_temp_file, sync_parent_directory};
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
@@ -18,6 +18,8 @@ pub const CALENDAR_FILENAME: &str = "calendar.json";
 const AUTOSAVE_JOURNAL_FILENAME: &str = ".hwan-note-autosave.json";
 const AUTOSAVE_JOURNAL_TEMP_FILENAME: &str = ".hwan-note-autosave.json.next";
 const AUTOSAVE_TRANSACTION_VERSION: u32 = 1;
+const FOLDER_JOURNAL_FILENAME: &str = ".hwan-note-folders.json";
+const FOLDER_JOURNAL_TEMP_FILENAME: &str = ".hwan-note-folders.json.next";
 
 static TOGGLE_BLOCK_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^:::toggle\[(open|closed)\](?:\s+(.*))?$").unwrap());
@@ -85,6 +87,38 @@ struct AutosaveTransactionJournal {
     next_index: NoteIndex,
     next_note_digest: String,
     previous_note_digest: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FolderFileMove {
+    from: String,
+    to: String,
+    digest: String,
+}
+
+/// Immutable intent: replay determines progress from the recorded file and index
+/// identities, including a move that completed just before process termination.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FolderTransactionJournal {
+    version: u32,
+    operation_id: String,
+    source: String,
+    target: Option<String>,
+    original_index_bytes: Option<Vec<u8>>,
+    next_index: NoteIndex,
+    files: Vec<FolderFileMove>,
+    directories: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FolderFaultPoint {
+    JournalPublished,
+    FileMoved(usize),
+    DirectoryMoved,
+    IndexPublished,
+    DirectoryCleanup,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -2659,7 +2693,503 @@ fn recover_pending_note_save_unlocked_with_faults(
 }
 
 fn recover_pending_note_save_unlocked(trusted_root: &TrustedLibraryRoot) -> Result<(), String> {
+    recover_pending_folder_transaction(trusted_root, &|_| Ok(())).map_err(|error| {
+        format!(
+            "recover_folder_transaction failed for {}: {error}",
+            trusted_root.path().join(FOLDER_JOURNAL_FILENAME).display()
+        )
+    })?;
     recover_pending_note_save_unlocked_with_faults(trusted_root, &NoopAutosaveFaultInjector)
+}
+
+fn folder_path_key(path: &str) -> String {
+    if cfg!(windows) {
+        path.to_lowercase()
+    } else {
+        path.to_string()
+    }
+}
+
+fn is_reserved_library_filename(name: &str) -> bool {
+    let name = name.to_lowercase();
+    name.starts_with(".hwan-note-") || name == CALENDAR_FILENAME
+}
+
+fn collect_folder_files(
+    root: &TrustedLibraryRoot,
+    relative: &str,
+    files: &mut Vec<FolderFileMove>,
+    directories: &mut Vec<String>,
+) -> Result<(), String> {
+    let path = validated_library_file_path(root, relative)?;
+    let mut entries = fs::read_dir(&path)
+        .map_err(|error| format!("scan_folder failed for {}: {error}", path.display()))?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    entries.sort();
+    directories.push(relative.to_string());
+    for path in entries {
+        let relative = relative_path(root.path(), &path);
+        // The journal stores normalized UTF-8 paths. Refuse an unsupported Unix
+        // filename before durable intent exists, rather than recording a lossy
+        // path that recovery could never resolve.
+        if root.path().join(&relative) != path {
+            return Err(format!(
+                "Folder filename cannot be represented safely: {}",
+                path.display()
+            ));
+        }
+        let metadata = fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
+        if metadata_is_symlink_or_reparse_point(&metadata) {
+            return Err(format!(
+                "reject_symlink failed for {}: symbolic links/reparse points are not allowed",
+                path.display()
+            ));
+        }
+        if metadata.is_dir() {
+            collect_folder_files(root, &relative, files, directories)?;
+        } else {
+            let bytes = read_trusted_file_bytes(root, &path, "snapshot_folder_file")?;
+            files.push(FolderFileMove {
+                from: relative,
+                to: String::new(),
+                digest: sha256_hex(&bytes),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn unique_folder_file_destination(
+    root: &TrustedLibraryRoot,
+    source: &str,
+    reserved: &mut HashSet<String>,
+) -> Result<String, String> {
+    let source = Path::new(source);
+    let filename = source
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "Folder contains a filename that is not valid Unicode".to_string())?;
+    let stem = source
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or(filename);
+    let extension = source.extension().and_then(|value| value.to_str());
+    for counter in 1u64.. {
+        let candidate = if counter == 1 {
+            filename.to_string()
+        } else if let Some(extension) = extension {
+            format!("{stem}-{counter}.{extension}")
+        } else {
+            format!("{stem}-{counter}")
+        };
+        // Internal files stay protected even when no index/calendar exists yet.
+        if is_reserved_library_filename(&candidate) {
+            // Prefixing also makes hidden .hwan-note-* attachments usable names.
+            let safe_source = format!("imported-{filename}");
+            return unique_folder_file_destination(root, &safe_source, reserved);
+        }
+        let key = folder_path_key(&candidate);
+        if reserved.contains(&key) {
+            continue;
+        }
+        let path = root.path().join(&candidate);
+        match fs::symlink_metadata(&path) {
+            Ok(_) => continue,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                reserved.insert(key);
+                return Ok(candidate);
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    unreachable!("folder destination counter is unbounded")
+}
+
+fn prepare_folder_transaction(
+    root: &TrustedLibraryRoot,
+    source: &str,
+    target: Option<&str>,
+) -> Result<FolderTransactionJournal, String> {
+    let snapshot = require_index_snapshot(root)?;
+    let mut files = Vec::new();
+    let mut directories = Vec::new();
+    collect_folder_files(root, source, &mut files, &mut directories)?;
+    let prefix = format!("{source}/");
+    let mut reserved = HashSet::new();
+    for file in &mut files {
+        file.to = match target {
+            Some(target) => format!("{target}/{}", &file.from[prefix.len()..]),
+            None => unique_folder_file_destination(root, &file.from, &mut reserved)?,
+        };
+    }
+    let mut next_index = snapshot.index.clone();
+    let mapping = files
+        .iter()
+        .map(|file| (file.from.as_str(), file.to.as_str()))
+        .collect::<HashMap<_, _>>();
+    let mut indexed_paths = HashSet::new();
+    for entry in next_index.entries.values_mut() {
+        if entry.relative_path.starts_with(&prefix) {
+            let destination = mapping
+                .get(entry.relative_path.as_str())
+                .ok_or_else(|| format!("Folder note is missing: {}", entry.relative_path))?;
+            indexed_paths.insert(entry.relative_path.clone());
+            entry.relative_path = destination.to_string();
+        }
+    }
+    let mut ids = next_index.entries.keys().cloned().collect::<HashSet<_>>();
+    for file in &files {
+        if !is_markdown_path(Path::new(&file.from)) || indexed_paths.contains(&file.from) {
+            continue;
+        }
+        let path = validated_library_file_path(root, &file.from)?;
+        let bytes = read_trusted_file_bytes(root, &path, "read_unindexed_folder_note")?;
+        if sha256_hex(&bytes) != file.digest {
+            return Err(format!(
+                "Folder file changed while preparing: {}",
+                file.from
+            ));
+        }
+        let markdown = String::from_utf8(bytes).map_err(|error| error.to_string())?;
+        let metadata = fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
+        let created_at = metadata
+            .created()
+            .or_else(|_| metadata.modified())
+            .map(system_time_to_millis)
+            .map_err(|error| error.to_string())?;
+        let id = ensure_unique_note_id(&ids, &file.from);
+        ids.insert(id.clone());
+        next_index.entries.insert(
+            id,
+            NoteIndexEntry {
+                relative_path: file.to.clone(),
+                created_at,
+                manual_title: extract_manual_title_metadata(&markdown).0,
+                is_pinned: None,
+            },
+        );
+    }
+    Ok(FolderTransactionJournal {
+        version: 1,
+        operation_id: next_autosave_operation_id(),
+        source: source.to_string(),
+        target: target.map(str::to_string),
+        original_index_bytes: snapshot.original_bytes,
+        next_index,
+        files,
+        directories,
+    })
+}
+
+fn validate_folder_transaction(
+    root: &TrustedLibraryRoot,
+    journal: &FolderTransactionJournal,
+) -> Result<NoteIndex, String> {
+    let invalid = || "Invalid folder transaction journal".to_string();
+    if journal.version != 1 || !is_valid_autosave_operation_id(&journal.operation_id) {
+        return Err(invalid());
+    }
+    let source = validate_library_relative_path(root, &journal.source)
+        .map_err(|error| error.display("validate_folder_journal"))?;
+    let prefix = format!("{}/", journal.source);
+    if sanitize_folder_path(Some(&journal.source))? != journal.source {
+        return Err(invalid());
+    }
+    if let Some(target) = &journal.target {
+        validate_library_relative_path(root, target)
+            .map_err(|error| error.display("validate_folder_journal"))?;
+        let source_key = folder_path_key(&journal.source);
+        let target_key = folder_path_key(target);
+        if sanitize_folder_path(Some(target))? != *target
+            || target_key == source_key
+            || target_key.starts_with(&format!("{source_key}/"))
+            || source_key.starts_with(&format!("{target_key}/"))
+        {
+            return Err(invalid());
+        }
+    }
+    if !journal.directories.contains(&journal.source) {
+        return Err(invalid());
+    }
+    let mut directories = HashSet::new();
+    for directory in &journal.directories {
+        let path = validate_library_relative_path(root, directory)
+            .map_err(|error| error.display("validate_folder_journal"))?;
+        if !path.starts_with(&source) || !directories.insert(folder_path_key(directory)) {
+            return Err(invalid());
+        }
+    }
+    let mut from_paths = HashSet::new();
+    let mut to_paths = HashSet::new();
+    let mut mapping = HashMap::new();
+    for file in &journal.files {
+        validate_library_relative_path(root, &file.from)
+            .map_err(|error| error.display("validate_folder_journal"))?;
+        validate_library_relative_path(root, &file.to)
+            .map_err(|error| error.display("validate_folder_journal"))?;
+        if !file.from.starts_with(&prefix)
+            || file.digest.len() != 64
+            || !file.digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || !from_paths.insert(folder_path_key(&file.from))
+            || !to_paths.insert(folder_path_key(&file.to))
+        {
+            return Err(invalid());
+        }
+        match &journal.target {
+            Some(target) if file.to != format!("{target}/{}", &file.from[prefix.len()..]) => {
+                return Err(invalid());
+            }
+            None if Path::new(&file.to).components().count() != 1
+                || is_reserved_library_filename(&file.to) =>
+            {
+                return Err(invalid())
+            }
+            _ => {}
+        }
+        mapping.insert(file.from.as_str(), file.to.as_str());
+    }
+    let original = journal
+        .original_index_bytes
+        .as_deref()
+        .map(serde_json::from_slice::<NoteIndex>)
+        .transpose()
+        .map_err(|error| error.to_string())?
+        .unwrap_or_else(empty_index);
+    validate_index_paths(root, &get_index_path(root.path()), &original)
+        .map_err(|issue| issue.display())?;
+    validate_index_paths(root, &get_index_path(root.path()), &journal.next_index)
+        .map_err(|issue| issue.display())?;
+    let mut accounted_paths = HashSet::new();
+    for (id, entry) in &original.entries {
+        let mut expected = entry.clone();
+        if entry.relative_path.starts_with(&prefix) {
+            expected.relative_path = mapping
+                .get(entry.relative_path.as_str())
+                .ok_or_else(invalid)?
+                .to_string();
+        }
+        if journal.next_index.entries.get(id) != Some(&expected) {
+            return Err(invalid());
+        }
+        accounted_paths.insert(folder_path_key(&expected.relative_path));
+    }
+    for (id, entry) in &journal.next_index.entries {
+        if !original.entries.contains_key(id)
+            && (!to_paths.contains(&folder_path_key(&entry.relative_path))
+                || !is_markdown_path(Path::new(&entry.relative_path))
+                || !accounted_paths.insert(folder_path_key(&entry.relative_path)))
+        {
+            return Err(invalid());
+        }
+    }
+    Ok(original)
+}
+
+fn persist_folder_transaction(
+    root: &TrustedLibraryRoot,
+    journal: &FolderTransactionJournal,
+) -> Result<(), String> {
+    validate_folder_transaction(root, journal)?;
+    let candidate = root.path().join(FOLDER_JOURNAL_TEMP_FILENAME);
+    let primary = root.path().join(FOLDER_JOURNAL_FILENAME);
+    let bytes = serde_json::to_vec_pretty(journal).map_err(|error| error.to_string())?;
+    create_synced_temp_file_with_faults(
+        &candidate,
+        &bytes,
+        "write_folder_journal",
+        AutosaveFaultPoint::JournalTempCreate,
+        AutosaveFaultPoint::JournalTempWrite,
+        AutosaveFaultPoint::JournalTempSync,
+        &NoopAutosaveFaultInjector,
+    )?;
+    validate_trusted_publish_destination(root, &primary, "publish_folder_journal")?;
+    publish_temp_file(&candidate, &primary, "publish_folder_journal")
+}
+
+fn read_folder_journal(
+    root: &TrustedLibraryRoot,
+    filename: &str,
+) -> Result<Option<FolderTransactionJournal>, String> {
+    let path = root.path().join(filename);
+    match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.to_string()),
+        Ok(_) => {
+            let bytes = read_trusted_file_bytes(root, &path, "read_folder_journal")?;
+            let journal = serde_json::from_slice(&bytes)
+                .map_err(|error| format!("Invalid folder journal {}: {error}", path.display()))?;
+            Ok(Some(journal))
+        }
+    }
+}
+
+fn verify_folder_file(root: &TrustedLibraryRoot, path: &str, digest: &str) -> Result<(), String> {
+    let path = validated_library_file_path(root, path)?;
+    if !file_digest_matches(root, &path, digest, "verify_folder_file")? {
+        return Err(format!(
+            "Folder transaction file changed or is missing: {}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn move_folder_file(root: &TrustedLibraryRoot, file: &FolderFileMove) -> Result<(), String> {
+    let source = validated_library_file_path(root, &file.from)?;
+    let destination = validated_library_file_path(root, &file.to)?;
+    let source_digest = read_existing_file_digest(root, &source, "inspect_folder_move_source")?;
+    let destination_digest =
+        read_existing_file_digest(root, &destination, "inspect_folder_move_target")?;
+    match (source_digest.as_deref(), destination_digest.as_deref()) {
+        (None, Some(digest)) if digest == file.digest => return Ok(()),
+        (Some(digest), None) if digest == file.digest => {}
+        _ => {
+            return Err(format!(
+                "Folder move has conflicting or missing files: {} -> {}",
+                file.from, file.to
+            ))
+        }
+    }
+    validate_note_destination_before_replace(root, &destination)?;
+    verify_folder_file(root, &file.from, &file.digest)?;
+    move_file_without_replace(&source, &destination).map_err(|error| error.to_string())?;
+    sync_parent_directory(&destination, "publish_folder_move")?;
+    sync_parent_directory(&source, "remove_folder_move_source")
+}
+
+fn recover_pending_folder_transaction(
+    root: &TrustedLibraryRoot,
+    faults: &impl Fn(FolderFaultPoint) -> Result<(), String>,
+) -> Result<Option<FolderTransactionJournal>, String> {
+    let primary_path = root.path().join(FOLDER_JOURNAL_FILENAME);
+    let candidate_path = root.path().join(FOLDER_JOURNAL_TEMP_FILENAME);
+    let primary = read_folder_journal(root, FOLDER_JOURNAL_FILENAME)?;
+    let candidate = read_folder_journal(root, FOLDER_JOURNAL_TEMP_FILENAME)?;
+    let journal = match (primary, candidate) {
+        (None, None) => return Ok(None),
+        (Some(primary), Some(candidate)) if primary != candidate => {
+            return Err("Conflicting folder transaction journals".to_string());
+        }
+        (Some(primary), _) => primary,
+        (None, Some(candidate)) => {
+            validate_folder_transaction(root, &candidate)?;
+            validate_trusted_publish_destination(root, &primary_path, "promote_folder_journal")?;
+            publish_temp_file(&candidate_path, &primary_path, "promote_folder_journal")?;
+            candidate
+        }
+    };
+    let original_index = validate_folder_transaction(root, &journal)?;
+    let snapshot = require_index_snapshot(root)?;
+    let next_index_present = snapshot.index == journal.next_index;
+    let committed = next_index_present && original_index != journal.next_index;
+    if snapshot.original_bytes != journal.original_index_bytes && !next_index_present {
+        return Err(
+            "The index changed during the folder transaction; preserving both states".to_string(),
+        );
+    }
+    if committed {
+        // A cloud client can deliver the committed index before the moved files.
+        // Preserve that index until every destination is available; otherwise a
+        // normal scan could prune IDs. Later edits are allowed, missing files are
+        // not interpreted as deletions while durable intent still exists.
+        for file in &journal.files {
+            let path = validated_library_file_path(root, &file.to)?;
+            validate_existing_trusted_file(root, &path, "verify_committed_folder_file")?;
+        }
+        if let Some(target) = &journal.target {
+            ensure_directory_tree_trusted(root, Path::new(target))?;
+        }
+    }
+    if !committed {
+        if let Some(target) = &journal.target {
+            let source = validated_library_file_path(root, &journal.source)?;
+            let destination = validated_library_file_path(root, target)?;
+            let source_exists = fs::symlink_metadata(&source)
+                .map(|_| true)
+                .or_else(|error| {
+                    if error.kind() == io::ErrorKind::NotFound {
+                        Ok(false)
+                    } else {
+                        Err(error)
+                    }
+                })
+                .map_err(|error| error.to_string())?;
+            let destination_exists = fs::symlink_metadata(&destination)
+                .map(|_| true)
+                .or_else(|error| {
+                    if error.kind() == io::ErrorKind::NotFound {
+                        Ok(false)
+                    } else {
+                        Err(error)
+                    }
+                })
+                .map_err(|error| error.to_string())?;
+            match (source_exists, destination_exists) {
+                (true, false) => {
+                    ensure_directory_tree_trusted(root, Path::new(&journal.source))?;
+                    for file in &journal.files {
+                        verify_folder_file(root, &file.from, &file.digest)?;
+                    }
+                    if let Some(parent) = Path::new(target).parent() {
+                        ensure_library_subdirectory(root, parent)?;
+                    }
+                    validate_no_symlink_beneath_root(root, Path::new(target))
+                        .map_err(|error| error.display("validate_folder_target"))?;
+                    move_file_without_replace(&source, &destination)
+                        .map_err(|error| error.to_string())?;
+                    sync_parent_directory(&source, "rename_folder_source")?;
+                    sync_parent_directory(&destination, "rename_folder_target")?;
+                    faults(FolderFaultPoint::DirectoryMoved)?;
+                }
+                (false, true) => {}
+                _ => {
+                    return Err(
+                        "Folder transaction has conflicting or missing directories".to_string()
+                    )
+                }
+            }
+            ensure_directory_tree_trusted(root, Path::new(target))?;
+        } else {
+            for (position, file) in journal.files.iter().enumerate() {
+                move_folder_file(root, file)?;
+                faults(FolderFaultPoint::FileMoved(position))?;
+            }
+        }
+        for file in &journal.files {
+            verify_folder_file(root, &file.to, &file.digest)?;
+        }
+        write_index_from_snapshot(root, &snapshot, &journal.next_index)
+            .map_err(index_write_failure_to_string)?;
+    }
+    faults(FolderFaultPoint::IndexPublished)?;
+    if journal.target.is_none() {
+        let mut directories = journal.directories.clone();
+        directories.sort_by_key(|path| std::cmp::Reverse(path.matches('/').count()));
+        for directory in directories {
+            let path = validated_library_file_path(root, &directory)?;
+            match fs::symlink_metadata(&path) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.to_string()),
+                Ok(metadata) if !metadata.is_dir() => {
+                    return Err("Folder cleanup path is not a directory".to_string())
+                }
+                Ok(_) => {}
+            }
+            faults(FolderFaultPoint::DirectoryCleanup)?;
+            // A file arriving after the snapshot is never deleted. Keep that
+            // directory visible and let a later explicit deletion move it too.
+            match fs::remove_dir(&path) {
+                Ok(()) => sync_parent_directory(&path, "cleanup_empty_folder")?,
+                Err(error) if error.kind() == io::ErrorKind::DirectoryNotEmpty => {}
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+    }
+    remove_regular_file_if_exists_and_sync(&candidate_path, "cleanup_folder_journal_candidate")?;
+    remove_regular_file_if_exists_and_sync(&primary_path, "cleanup_folder_journal")?;
+    Ok(Some(journal))
 }
 
 fn write_note_file_atomically_after_temp_hook<F>(
@@ -2797,95 +3327,6 @@ fn ensure_unique_note_id(existing_ids: &HashSet<String>, seed: &str) -> String {
     }
 }
 
-fn remove_trusted_directory_tree(
-    trusted_root: &TrustedLibraryRoot,
-    directory: &Path,
-) -> Result<(), String> {
-    ensure_path_within_canonical_root(trusted_root, directory)
-        .map_err(|error| error.display("validate_folder_delete"))?;
-    let metadata = fs::symlink_metadata(directory).map_err(|error| {
-        format!(
-            "inspect_folder_delete failed for {}: {}",
-            directory.display(),
-            error
-        )
-    })?;
-    if metadata_is_symlink_or_reparse_point(&metadata) || !metadata.is_dir() {
-        return Err(format!(
-            "validate_folder_delete failed for {}: expected a trusted directory",
-            directory.display()
-        ));
-    }
-
-    let entries = fs::read_dir(directory).map_err(|error| {
-        format!(
-            "read_folder_delete failed for {}: {}",
-            directory.display(),
-            error
-        )
-    })?;
-    for entry in entries {
-        let entry = entry.map_err(|error| {
-            format!(
-                "read_folder_delete_entry failed for {}: {}",
-                directory.display(),
-                error
-            )
-        })?;
-        let path = entry.path();
-        let metadata = fs::symlink_metadata(&path).map_err(|error| {
-            format!(
-                "inspect_folder_delete_entry failed for {}: {}",
-                path.display(),
-                error
-            )
-        })?;
-        if metadata_is_symlink_or_reparse_point(&metadata) {
-            return Err(format!(
-                "reject_symlink failed for {}: symbolic links and reparse points beneath the note library are not allowed",
-                path.display()
-            ));
-        }
-        ensure_path_within_canonical_root(trusted_root, &path)
-            .map_err(|error| error.display("validate_folder_delete_entry"))?;
-
-        if metadata.is_dir() {
-            remove_trusted_directory_tree(trusted_root, &path)?;
-        } else {
-            fs::remove_file(&path).map_err(|error| {
-                format!(
-                    "remove_folder_file failed for {}: {}",
-                    path.display(),
-                    error
-                )
-            })?;
-        }
-    }
-
-    let metadata = fs::symlink_metadata(directory).map_err(|error| {
-        format!(
-            "reinspect_folder_delete failed for {}: {}",
-            directory.display(),
-            error
-        )
-    })?;
-    if metadata_is_symlink_or_reparse_point(&metadata) || !metadata.is_dir() {
-        return Err(format!(
-            "validate_folder_delete failed for {}: directory changed before removal",
-            directory.display()
-        ));
-    }
-    ensure_path_within_canonical_root(trusted_root, directory)
-        .map_err(|error| error.display("validate_folder_delete"))?;
-    fs::remove_dir(directory).map_err(|error| {
-        format!(
-            "remove_folder_directory failed for {}: {}",
-            directory.display(),
-            error
-        )
-    })
-}
-
 pub fn generate_note_id(relative_file_path: &str) -> String {
     let mut hasher = Sha1::new();
     hasher.update(relative_file_path.as_bytes());
@@ -2940,6 +3381,8 @@ pub fn save_markdown_file(
     content: &str,
 ) -> Result<(), String> {
     let trusted_root = TrustedLibraryRoot::open(library_root)?;
+    let _guard = lock_note_index();
+    recover_pending_note_save_unlocked(&trusted_root)?;
     let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
     if !ext.eq_ignore_ascii_case("md") {
         return Err("Only .md files are supported.".to_string());
@@ -2953,6 +3396,8 @@ pub fn save_markdown_file(
 
 pub fn read_markdown_file(library_root: &Path, file_path: &Path) -> Result<String, String> {
     let trusted_root = TrustedLibraryRoot::open(library_root)?;
+    let _guard = lock_note_index();
+    recover_pending_note_save_unlocked(&trusted_root)?;
     let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
     if !ext.eq_ignore_ascii_case("md") {
         return Err("Only .md files are supported.".to_string());
@@ -2974,6 +3419,8 @@ pub fn read_markdown_file(library_root: &Path, file_path: &Path) -> Result<Strin
 
 pub fn list_markdown_files(library_root: &Path, dir_path: &Path) -> Result<Vec<String>, String> {
     let trusted_root = TrustedLibraryRoot::open(library_root)?;
+    let _guard = lock_note_index();
+    recover_pending_note_save_unlocked(&trusted_root)?;
     let relative = library_candidate_relative_path(&trusted_root, library_root, dir_path, true)?;
     validate_no_symlink_beneath_root(&trusted_root, &relative)
         .map_err(|error| error.display("validate_library_directory"))?;
@@ -3023,7 +3470,8 @@ fn list_folders_with_fs<F: LibraryFileSystem>(
     file_system: &F,
 ) -> Result<Vec<String>, String> {
     let trusted_root = TrustedLibraryRoot::open(auto_save_dir)?;
-
+    let _guard = lock_note_index();
+    recover_pending_note_save_unlocked(&trusted_root)?;
     list_folders_with_root(&trusted_root, file_system)
 }
 
@@ -3050,6 +3498,8 @@ pub fn list_folders(auto_save_dir: &Path) -> Result<Vec<String>, String> {
 
 pub fn create_folder(auto_save_dir: &Path, folder_path: &str) -> Result<Vec<String>, String> {
     let trusted_root = TrustedLibraryRoot::open(auto_save_dir)?;
+    let _guard = lock_note_index();
+    recover_pending_note_save_unlocked(&trusted_root)?;
     let normalized = sanitize_folder_path(Some(folder_path))?;
     if normalized.is_empty() {
         return Err("Folder path is required.".to_string());
@@ -3062,160 +3512,93 @@ pub fn create_folder(auto_save_dir: &Path, folder_path: &str) -> Result<Vec<Stri
 }
 
 pub fn rename_folder(auto_save_dir: &Path, from: &str, to: &str) -> Result<Vec<String>, String> {
-    let trusted_root = TrustedLibraryRoot::open(auto_save_dir)?;
+    rename_folder_with_faults(auto_save_dir, from, to, &|_| Ok(()))
+}
 
-    let from_path = sanitize_folder_path(Some(from))?;
-    let to_path = sanitize_folder_path(Some(to))?;
-
-    if from_path.is_empty() || to_path.is_empty() {
+fn rename_folder_with_faults(
+    auto_save_dir: &Path,
+    from: &str,
+    to: &str,
+    faults: &impl Fn(FolderFaultPoint) -> Result<(), String>,
+) -> Result<Vec<String>, String> {
+    let root = TrustedLibraryRoot::open(auto_save_dir)?;
+    let source = sanitize_folder_path(Some(from))?;
+    let target = sanitize_folder_path(Some(to))?;
+    if source.is_empty() || target.is_empty() {
         return Err("Folder path is required.".to_string());
     }
-    if from_path == to_path {
-        return list_folders_with_root(&trusted_root, &ProductionFileSystem);
+    let _guard = lock_note_index();
+    let recovered = recover_pending_folder_transaction(&root, faults)?;
+    recover_pending_note_save_unlocked(&root)?;
+    if source == target
+        || recovered.as_ref().is_some_and(|journal| {
+            journal.source == source && journal.target.as_deref() == Some(target.as_str())
+        })
+    {
+        return list_folders_with_root(&root, &ProductionFileSystem);
     }
-    if to_path.starts_with(&format!("{}/", from_path)) {
+    if folder_path_key(&target).starts_with(&format!("{}/", folder_path_key(&source))) {
         return Err("Cannot move a folder into its own child.".to_string());
     }
-    let from_relative = normalize_library_relative_path(trusted_root.path(), &from_path)
-        .map_err(|error| error.display("validate_source_folder"))?;
-    let to_relative = normalize_library_relative_path(trusted_root.path(), &to_path)
-        .map_err(|error| error.display("validate_target_folder"))?;
-
-    let _index_guard = lock_note_index();
-    recover_pending_note_save_unlocked(&trusted_root)?;
-    let index_snapshot = require_index_snapshot(&trusted_root)?;
-    let mut index = index_snapshot.index.clone();
-
-    validate_no_symlink_beneath_root(&trusted_root, &from_relative)
-        .map_err(|error| error.display("validate_source_folder"))?;
-    let source_dir = trusted_root.path().join(&from_relative);
-    match fs::symlink_metadata(&source_dir) {
-        Ok(metadata) if metadata.is_dir() && !metadata_is_symlink_or_reparse_point(&metadata) => {}
-        Ok(_) => return Err("Folder is not a trusted directory.".to_string()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Err("Folder not found.".to_string());
-        }
-        Err(error) => return Err(error.to_string()),
-    }
-    ensure_directory_tree_trusted(&trusted_root, &from_relative)?;
-
-    validate_no_symlink_beneath_root(&trusted_root, &to_relative)
-        .map_err(|error| error.display("validate_target_folder"))?;
-    let target_dir = trusted_root.path().join(&to_relative);
-    match fs::symlink_metadata(&target_dir) {
+    let destination = validated_library_file_path(&root, &target)?;
+    match fs::symlink_metadata(&destination) {
         Ok(_) => return Err("Target folder already exists.".to_string()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.to_string()),
     }
-
-    if let Some(parent_relative) = to_relative.parent() {
-        ensure_library_subdirectory(&trusted_root, parent_relative)?;
-    }
-
-    ensure_directory_tree_trusted(&trusted_root, &from_relative)?;
-    validate_no_symlink_beneath_root(&trusted_root, &to_relative)
-        .map_err(|error| error.display("validate_target_folder"))?;
-    fs::rename(&source_dir, &target_dir).map_err(|e| e.to_string())?;
-
-    let from_prefix = format!("{}/", from_path);
-    let to_prefix = format!("{}/", to_path);
-    let mut index_changed = false;
-
-    for entry in index.entries.values_mut() {
-        if entry.relative_path.starts_with(&from_prefix) {
-            entry.relative_path =
-                format!("{}{}", to_prefix, &entry.relative_path[from_prefix.len()..]);
-            index_changed = true;
-        }
-    }
-
-    if index_changed {
-        write_index_from_snapshot(&trusted_root, &index_snapshot, &index)
-            .map_err(index_write_failure_to_string)?;
-    }
-
-    list_folders_with_root(&trusted_root, &ProductionFileSystem)
+    let journal = prepare_folder_transaction(&root, &source, Some(&target))?;
+    persist_folder_transaction(&root, &journal)?;
+    faults(FolderFaultPoint::JournalPublished)?;
+    recover_pending_folder_transaction(&root, faults)?;
+    list_folders_with_root(&root, &ProductionFileSystem)
 }
 
 pub fn delete_folder(
     auto_save_dir: &Path,
     folder_path: &str,
 ) -> Result<FolderDeleteResult, String> {
-    let trusted_root = TrustedLibraryRoot::open(auto_save_dir)?;
+    delete_folder_with_faults(auto_save_dir, folder_path, &|_| Ok(()))
+}
 
-    let normalized = sanitize_folder_path(Some(folder_path))?;
-    if normalized.is_empty() {
+fn delete_folder_with_faults(
+    auto_save_dir: &Path,
+    folder_path: &str,
+    faults: &impl Fn(FolderFaultPoint) -> Result<(), String>,
+) -> Result<FolderDeleteResult, String> {
+    let root = TrustedLibraryRoot::open(auto_save_dir)?;
+    let source = sanitize_folder_path(Some(folder_path))?;
+    if source.is_empty() {
         return Err("Folder path is required.".to_string());
     }
-
-    let _index_guard = lock_note_index();
-    recover_pending_note_save_unlocked(&trusted_root)?;
-    let index_snapshot = require_index_snapshot(&trusted_root)?;
-    let folder_relative = normalize_library_relative_path(trusted_root.path(), &normalized)
-        .map_err(|error| error.display("validate_folder_path"))?;
-    validate_no_symlink_beneath_root(&trusted_root, &folder_relative)
-        .map_err(|error| error.display("validate_folder_path"))?;
-    ensure_directory_tree_trusted(&trusted_root, &folder_relative)?;
-
-    let source_dir = trusted_root.path().join(&folder_relative);
-    let prefix = format!("{}/", normalized);
-    let mut index = index_snapshot.index.clone();
-    let matching_entries = index
+    let _guard = lock_note_index();
+    let recovered = recover_pending_folder_transaction(&root, faults)?;
+    recover_pending_note_save_unlocked(&root)?;
+    let journal = if let Some(journal) =
+        recovered.filter(|journal| journal.source == source && journal.target.is_none())
+    {
+        journal
+    } else {
+        let journal = prepare_folder_transaction(&root, &source, None)?;
+        persist_folder_transaction(&root, &journal)?;
+        faults(FolderFaultPoint::JournalPublished)?;
+        recover_pending_folder_transaction(&root, faults)?;
+        journal
+    };
+    let moved_paths = journal
+        .files
+        .iter()
+        .map(|file| file.to.as_str())
+        .collect::<HashSet<_>>();
+    let mut moved_note_ids = journal
+        .next_index
         .entries
         .iter()
-        .filter_map(|(note_id, entry)| {
-            if entry.relative_path.starts_with(&prefix) {
-                Some((note_id.clone(), entry.relative_path.clone()))
-            } else {
-                None
-            }
-        })
+        .filter(|(_, entry)| moved_paths.contains(entry.relative_path.as_str()))
+        .map(|(id, _)| id.clone())
         .collect::<Vec<_>>();
-
-    let source_exists = match fs::symlink_metadata(&source_dir) {
-        Ok(metadata) if metadata.is_dir() && !metadata_is_symlink_or_reparse_point(&metadata) => {
-            true
-        }
-        Ok(_) => return Err("Folder is not a trusted directory.".to_string()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
-        Err(error) => return Err(error.to_string()),
-    };
-    if !source_exists && matching_entries.is_empty() {
-        return Err("Folder not found.".to_string());
-    }
-
-    let mut moved_note_ids = Vec::new();
-
-    for (note_id, old_relative_path) in matching_entries {
-        let old_path = validated_library_file_path(&trusted_root, &old_relative_path)?;
-        validate_existing_trusted_file(&trusted_root, &old_path, "validate_folder_note")?;
-
-        let base_name = old_path
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .filter(|value| !value.is_empty())
-            .unwrap_or("untitled");
-        let new_path = ensure_unique_file_path(trusted_root.path(), base_name, None)?;
-        validate_note_destination_before_replace(&trusted_root, &new_path)?;
-        validate_existing_trusted_file(&trusted_root, &old_path, "validate_folder_note")?;
-        validate_note_destination_before_replace(&trusted_root, &new_path)?;
-        fs::rename(&old_path, &new_path).map_err(|e| e.to_string())?;
-
-        if let Some(entry) = index.entries.get_mut(&note_id) {
-            entry.relative_path = relative_path(trusted_root.path(), &new_path);
-        }
-        moved_note_ids.push(note_id);
-    }
-
-    write_index_from_snapshot(&trusted_root, &index_snapshot, &index)
-        .map_err(index_write_failure_to_string)?;
-
-    if source_exists {
-        remove_trusted_directory_tree(&trusted_root, &source_dir)?;
-    }
-
+    moved_note_ids.sort();
     Ok(FolderDeleteResult {
-        folders: list_folders_with_root(&trusted_root, &ProductionFileSystem)?,
+        folders: list_folders_with_root(&root, &ProductionFileSystem)?,
         moved_note_ids,
     })
 }
@@ -4108,6 +4491,480 @@ pub fn title_from_filename(file_path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn folder_fault(point: FolderFaultPoint) -> impl Fn(FolderFaultPoint) -> Result<(), String> {
+        move |current| {
+            if current == point {
+                Err(format!("injected folder interruption at {point:?}"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn folder_delete_preserves_unindexed_notes_attachments_and_reserved_filenames() {
+        let root = make_temp_dir("folder-preserve-all-files");
+        auto_save_markdown_note(
+            &root,
+            &autosave_payload("known", "Known", "# Known", Some("alpha")),
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("alpha/nested")).unwrap();
+        fs::write(root.join("alpha/external.md"), "# External").unwrap();
+        fs::write(root.join("alpha/report.txt"), "first attachment").unwrap();
+        fs::write(root.join("alpha/nested/report.txt"), "second attachment").unwrap();
+        fs::write(root.join("report.txt"), "existing attachment").unwrap();
+        fs::write(
+            root.join("alpha/.hwan-note-index.json"),
+            "external metadata",
+        )
+        .unwrap();
+        fs::write(root.join("alpha/calendar.json"), "external calendar").unwrap();
+        fs::write(root.join("calendar.json"), "app calendar").unwrap();
+        let result = delete_folder(&root, "alpha").unwrap();
+        assert!(!root.join("alpha").exists());
+        assert!(result.moved_note_ids.contains(&"known".to_string()));
+        let loaded = load_markdown_library(&root);
+        assert_eq!(loaded.load_state, NoteLoadState::Ready);
+        assert_eq!(loaded.notes.len(), 2);
+        assert!(loaded
+            .notes
+            .iter()
+            .any(|note| note.note_id == "known" && note.is_pinned));
+        assert!(loaded
+            .notes
+            .iter()
+            .any(|note| note.markdown == "# External"));
+        assert_eq!(
+            fs::read_to_string(root.join("report.txt")).unwrap(),
+            "existing attachment"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("report-2.txt")).unwrap(),
+            "second attachment"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("report-3.txt")).unwrap(),
+            "first attachment"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("imported-.hwan-note-index.json")).unwrap(),
+            "external metadata"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("imported-calendar.json")).unwrap(),
+            "external calendar"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("calendar.json")).unwrap(),
+            "app calendar"
+        );
+        cleanup_temp_dir(&root);
+    }
+
+    #[test]
+    fn folder_rename_recovers_each_interruption_without_replacing_note_identity() {
+        for point in [
+            FolderFaultPoint::JournalPublished,
+            FolderFaultPoint::DirectoryMoved,
+            FolderFaultPoint::IndexPublished,
+        ] {
+            let root = make_temp_dir("folder-rename-recovery");
+            auto_save_markdown_note(
+                &root,
+                &autosave_payload("stable", "Title", "# Original", Some("alpha")),
+            )
+            .unwrap();
+            let before = read_index(&root).unwrap().entries["stable"].clone();
+            fs::create_dir_all(root.join("alpha/empty")).unwrap();
+            fs::write(root.join("alpha/attachment.txt"), "attachment").unwrap();
+            assert!(
+                rename_folder_with_faults(&root, "alpha", "beta", &folder_fault(point)).is_err()
+            );
+            assert!(root.join(FOLDER_JOURNAL_FILENAME).exists());
+            let loaded = load_markdown_library(&root);
+            assert_eq!(
+                loaded.load_state,
+                NoteLoadState::Ready,
+                "{:?}",
+                loaded.issues
+            );
+            assert_eq!(loaded.notes.len(), 1);
+            assert_eq!(loaded.notes[0].note_id, "stable");
+            assert!(loaded.notes[0].is_pinned);
+            assert_eq!(loaded.notes[0].created_at, before.created_at);
+            assert_eq!(loaded.notes[0].folder_path, "beta");
+            assert!(!root.join("alpha").exists());
+            assert!(root.join("beta/empty").is_dir());
+            assert_eq!(
+                fs::read_to_string(root.join("beta/attachment.txt")).unwrap(),
+                "attachment"
+            );
+            assert!(!root.join(FOLDER_JOURNAL_FILENAME).exists());
+            assert_eq!(load_markdown_library(&root).notes[0].note_id, "stable");
+            cleanup_temp_dir(&root);
+        }
+    }
+
+    #[test]
+    fn folder_delete_retries_partial_multi_file_moves_without_duplicates() {
+        for point in [
+            FolderFaultPoint::JournalPublished,
+            FolderFaultPoint::FileMoved(0),
+            FolderFaultPoint::FileMoved(1),
+            FolderFaultPoint::IndexPublished,
+            FolderFaultPoint::DirectoryCleanup,
+        ] {
+            let root = make_temp_dir("folder-delete-retry");
+            for id in ["a", "b"] {
+                auto_save_markdown_note(&root, &autosave_payload(id, id, id, Some("alpha")))
+                    .unwrap();
+            }
+            fs::write(root.join("alpha/attachment.bin"), [0, 1, 255]).unwrap();
+            assert!(delete_folder_with_faults(&root, "alpha", &folder_fault(point)).is_err());
+            let retried = delete_folder(&root, "alpha").unwrap();
+            assert_eq!(retried.moved_note_ids, vec!["a", "b"]);
+            let loaded = load_markdown_library(&root);
+            assert_eq!(
+                loaded.load_state,
+                NoteLoadState::Ready,
+                "{:?}",
+                loaded.issues
+            );
+            assert_eq!(loaded.notes.len(), 2);
+            assert!(loaded
+                .notes
+                .iter()
+                .all(|note| note.is_pinned && note.folder_path.is_empty()));
+            assert_eq!(fs::read(root.join("attachment.bin")).unwrap(), [0, 1, 255]);
+            assert!(!root.join("alpha").exists());
+            assert!(!root.join(FOLDER_JOURNAL_FILENAME).exists());
+            assert_eq!(count_markdown_files_recursively(&root).unwrap(), 2);
+            cleanup_temp_dir(&root);
+        }
+    }
+
+    #[test]
+    fn folder_transactions_handle_empty_and_attachment_only_directories() {
+        for with_attachment in [false, true] {
+            let root = make_temp_dir("folder-no-index-change");
+            fs::create_dir_all(root.join("alpha/empty")).unwrap();
+            if with_attachment {
+                fs::write(root.join("alpha/file.txt"), "attachment").unwrap();
+            }
+            assert!(rename_folder_with_faults(
+                &root,
+                "alpha",
+                "beta",
+                &folder_fault(FolderFaultPoint::DirectoryMoved)
+            )
+            .is_err());
+            rename_folder(&root, "alpha", "beta").unwrap();
+            assert!(root.join("beta/empty").is_dir());
+            assert!(delete_folder_with_faults(
+                &root,
+                "beta",
+                &folder_fault(FolderFaultPoint::IndexPublished)
+            )
+            .is_err());
+            delete_folder(&root, "beta").unwrap();
+            assert!(!root.join("beta").exists());
+            if with_attachment {
+                assert_eq!(
+                    fs::read_to_string(root.join("file.txt")).unwrap(),
+                    "attachment"
+                );
+            }
+            assert_eq!(
+                load_markdown_library(&root).load_state,
+                NoteLoadState::Ready
+            );
+            cleanup_temp_dir(&root);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn folder_index_replace_lock_recovers_rename_and_delete_with_ids_and_pins() {
+        use std::os::windows::fs::OpenOptionsExt;
+        for rename in [true, false] {
+            let root = make_temp_dir("folder-index-lock");
+            auto_save_markdown_note(
+                &root,
+                &autosave_payload("stable", "Title", "content", Some("alpha")),
+            )
+            .unwrap();
+            let before = fs::read(root.join(INDEX_FILENAME)).unwrap();
+            let guard = OpenOptions::new()
+                .read(true)
+                .share_mode(3)
+                .open(root.join(INDEX_FILENAME))
+                .unwrap();
+            let failed = if rename {
+                rename_folder(&root, "alpha", "beta").map(|_| ())
+            } else {
+                delete_folder(&root, "alpha").map(|_| ())
+            };
+            assert!(failed.is_err());
+            assert_eq!(fs::read(root.join(INDEX_FILENAME)).unwrap(), before);
+            assert_eq!(
+                load_markdown_library(&root).load_state,
+                NoteLoadState::Incomplete
+            );
+            drop(guard);
+            let loaded = load_markdown_library(&root);
+            assert_eq!(
+                loaded.load_state,
+                NoteLoadState::Ready,
+                "{:?}",
+                loaded.issues
+            );
+            assert_eq!(loaded.notes.len(), 1);
+            assert_eq!(loaded.notes[0].note_id, "stable");
+            assert!(loaded.notes[0].is_pinned);
+            assert_eq!(
+                loaded.notes[0].folder_path,
+                if rename { "beta" } else { "" }
+            );
+            cleanup_temp_dir(&root);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn folder_delete_recovers_when_a_later_source_file_is_locked() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = make_temp_dir("folder-later-file-locked");
+        for id in ["a", "b"] {
+            auto_save_markdown_note(&root, &autosave_payload(id, id, id, Some("alpha"))).unwrap();
+        }
+        let original_index = fs::read(root.join(INDEX_FILENAME)).unwrap();
+        let guard = OpenOptions::new()
+            .read(true)
+            .share_mode(3)
+            .open(root.join("alpha/b.md"))
+            .unwrap();
+        assert!(delete_folder(&root, "alpha").is_err());
+        assert!(root.join("a.md").is_file());
+        assert!(root.join("alpha/b.md").is_file());
+        assert_eq!(fs::read(root.join(INDEX_FILENAME)).unwrap(), original_index);
+        drop(guard);
+        let result = delete_folder(&root, "alpha").unwrap();
+        assert_eq!(result.moved_note_ids, vec!["a", "b"]);
+        let loaded = load_markdown_library(&root);
+        assert_eq!(loaded.load_state, NoteLoadState::Ready);
+        assert_eq!(loaded.notes.len(), 2);
+        assert!(loaded
+            .notes
+            .iter()
+            .all(|note| note.is_pinned && ["a", "b"].contains(&note.note_id.as_str())));
+        assert!(!root.join("alpha").exists());
+        cleanup_temp_dir(&root);
+    }
+
+    #[test]
+    fn folder_delete_preserves_files_arriving_after_snapshot() {
+        let root = make_temp_dir("folder-late-arrival");
+        auto_save_markdown_note(
+            &root,
+            &autosave_payload("stable", "Title", "content", Some("alpha")),
+        )
+        .unwrap();
+        let arrived = std::cell::Cell::new(false);
+        let result = delete_folder_with_faults(&root, "alpha", &|point| {
+            if point == FolderFaultPoint::DirectoryCleanup && !arrived.replace(true) {
+                fs::write(root.join("alpha/late.txt"), "late content").unwrap();
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert!(result.folders.contains(&"alpha".to_string()));
+        assert_eq!(
+            fs::read_to_string(root.join("alpha/late.txt")).unwrap(),
+            "late content"
+        );
+        assert!(!root.join(FOLDER_JOURNAL_FILENAME).exists());
+        delete_folder(&root, "alpha").unwrap();
+        assert!(!root.join("alpha").exists());
+        assert_eq!(
+            fs::read_to_string(root.join("late.txt")).unwrap(),
+            "late content"
+        );
+        cleanup_temp_dir(&root);
+    }
+
+    #[test]
+    fn folder_committed_recovery_preserves_subsequent_external_note_edits() {
+        for rename in [true, false] {
+            let root = make_temp_dir("folder-post-commit-edit");
+            auto_save_markdown_note(
+                &root,
+                &autosave_payload("stable", "Title", "original", Some("alpha")),
+            )
+            .unwrap();
+            if rename {
+                assert!(rename_folder_with_faults(
+                    &root,
+                    "alpha",
+                    "beta",
+                    &folder_fault(FolderFaultPoint::IndexPublished)
+                )
+                .is_err());
+            } else {
+                assert!(delete_folder_with_faults(
+                    &root,
+                    "alpha",
+                    &folder_fault(FolderFaultPoint::IndexPublished)
+                )
+                .is_err());
+            }
+            let index = read_index(&root).unwrap();
+            fs::write(
+                root.join(&index.entries["stable"].relative_path),
+                "external edit after commit",
+            )
+            .unwrap();
+            let loaded = load_markdown_library(&root);
+            assert_eq!(
+                loaded.load_state,
+                NoteLoadState::Ready,
+                "{:?}",
+                loaded.issues
+            );
+            assert_eq!(loaded.notes[0].note_id, "stable");
+            assert!(loaded.notes[0].is_pinned);
+            assert_eq!(loaded.notes[0].markdown, "external edit after commit");
+            cleanup_temp_dir(&root);
+        }
+    }
+
+    #[test]
+    fn folder_committed_index_waits_for_missing_destination_without_pruning_ids() {
+        let root = make_temp_dir("folder-committed-file-missing");
+        auto_save_markdown_note(
+            &root,
+            &autosave_payload("stable", "Title", "content", Some("alpha")),
+        )
+        .unwrap();
+        assert!(delete_folder_with_faults(
+            &root,
+            "alpha",
+            &folder_fault(FolderFaultPoint::IndexPublished)
+        )
+        .is_err());
+        let index_bytes = fs::read(root.join(INDEX_FILENAME)).unwrap();
+        fs::rename(root.join("Title.md"), root.join("delivery-pending.txt")).unwrap();
+        assert_eq!(
+            load_markdown_library(&root).load_state,
+            NoteLoadState::Incomplete
+        );
+        assert_eq!(fs::read(root.join(INDEX_FILENAME)).unwrap(), index_bytes);
+        fs::rename(root.join("delivery-pending.txt"), root.join("Title.md")).unwrap();
+        let loaded = load_markdown_library(&root);
+        assert_eq!(loaded.load_state, NoteLoadState::Ready);
+        assert_eq!(loaded.notes[0].note_id, "stable");
+        assert!(loaded.notes[0].is_pinned);
+        cleanup_temp_dir(&root);
+    }
+
+    #[test]
+    fn folder_recovery_promotes_candidate_and_rejects_unsafe_journal_paths() {
+        for unsafe_path in [false, true] {
+            let root = make_temp_dir("folder-journal-validation");
+            auto_save_markdown_note(
+                &root,
+                &autosave_payload("stable", "Title", "original", Some("alpha")),
+            )
+            .unwrap();
+            assert!(delete_folder_with_faults(
+                &root,
+                "alpha",
+                &folder_fault(FolderFaultPoint::JournalPublished)
+            )
+            .is_err());
+            let primary = root.join(FOLDER_JOURNAL_FILENAME);
+            if unsafe_path {
+                let mut journal: FolderTransactionJournal =
+                    serde_json::from_slice(&fs::read(&primary).unwrap()).unwrap();
+                journal.files[0].to = "../outside.md".to_string();
+                fs::write(&primary, serde_json::to_vec(&journal).unwrap()).unwrap();
+            } else {
+                fs::rename(&primary, root.join(FOLDER_JOURNAL_TEMP_FILENAME)).unwrap();
+            }
+            let loaded = load_markdown_library(&root);
+            if unsafe_path {
+                assert_eq!(loaded.load_state, NoteLoadState::Incomplete);
+                assert!(root.join("alpha/Title.md").exists());
+            } else {
+                assert_eq!(
+                    loaded.load_state,
+                    NoteLoadState::Ready,
+                    "{:?}",
+                    loaded.issues
+                );
+                assert_eq!(loaded.notes[0].note_id, "stable");
+                assert!(!root.join(FOLDER_JOURNAL_TEMP_FILENAME).exists());
+            }
+            cleanup_temp_dir(&root);
+        }
+    }
+
+    #[test]
+    fn folder_recovery_preserves_conflicting_destination_until_resolved() {
+        let root = make_temp_dir("folder-destination-conflict");
+        auto_save_markdown_note(
+            &root,
+            &autosave_payload("stable", "Title", "original", Some("alpha")),
+        )
+        .unwrap();
+        assert!(delete_folder_with_faults(
+            &root,
+            "alpha",
+            &folder_fault(FolderFaultPoint::JournalPublished)
+        )
+        .is_err());
+        fs::write(root.join("Title.md"), "external sentinel").unwrap();
+        assert_eq!(
+            load_markdown_library(&root).load_state,
+            NoteLoadState::Incomplete
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("Title.md")).unwrap(),
+            "external sentinel"
+        );
+        assert!(root.join("alpha/Title.md").exists());
+        fs::rename(root.join("Title.md"), root.join("sentinel-backup.txt")).unwrap();
+        let loaded = load_markdown_library(&root);
+        assert_eq!(
+            loaded.load_state,
+            NoteLoadState::Ready,
+            "{:?}",
+            loaded.issues
+        );
+        assert_eq!(loaded.notes[0].note_id, "stable");
+        cleanup_temp_dir(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn folder_unsupported_unix_filenames_fail_before_publishing_journal() {
+        use std::os::unix::ffi::OsStringExt;
+        for name in [
+            std::ffi::OsString::from("a\\b.png"),
+            std::ffi::OsString::from_vec(vec![b'a', 0xff, b'.', b'p', b'n', b'g']),
+        ] {
+            let root = make_temp_dir("folder-unsupported-name");
+            fs::create_dir(root.join("alpha")).unwrap();
+            let file = root.join("alpha").join(name);
+            fs::write(&file, "sentinel").unwrap();
+            assert!(delete_folder(&root, "alpha").is_err());
+            assert!(!root.join(FOLDER_JOURNAL_FILENAME).exists());
+            assert!(!root.join(FOLDER_JOURNAL_TEMP_FILENAME).exists());
+            assert_eq!(fs::read_to_string(&file).unwrap(), "sentinel");
+            cleanup_temp_dir(&root);
+        }
+    }
     use std::process;
     #[cfg(windows)]
     use std::process::Command;
@@ -4783,9 +5640,18 @@ mod tests {
             let outside_file = outside.join("victim-index.json");
             fs::write(&outside_file, "outside-index-original").map_err(|e| e.to_string())?;
 
+            let probe = dir.join("link-probe");
+            if !create_file_link(&probe, &outside_file)? {
+                return Ok(());
+            }
+            TestLinkGuard::file(&probe).unlink()?;
+
+            write_index(&dir, &empty_index())?;
             let trusted_root = TrustedLibraryRoot::open(&dir)?;
             let snapshot = require_index_snapshot(&trusted_root)?;
             let index_path = get_index_path(&dir);
+            let original_bytes = fs::read(&index_path).map_err(|e| e.to_string())?;
+            let preserved_index = dir.join("original-index.json");
             let planned_index = NoteIndex {
                 entries: HashMap::from([(
                     "planned".to_string(),
@@ -4804,27 +5670,61 @@ mod tests {
                 &snapshot,
                 &planned_index,
                 || {
-                    if create_file_link(&index_path, &outside_file).unwrap_or(false) {
-                        link_guard = Some(TestLinkGuard::file(&index_path));
-                    }
+                    // The hook runs after the new index is staged and synced.
+                    // Replace the previously valid index at this exact point.
+                    assert!(fs::read_dir(&dir).unwrap().any(|entry| entry
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".hwan-note-index.json.tmp-")));
+                    fs::rename(&index_path, &preserved_index).unwrap();
+                    assert!(create_file_link(&index_path, &outside_file).unwrap());
+                    link_guard = Some(TestLinkGuard::file(&index_path));
                 },
             );
-            if link_guard.is_none() {
-                return Ok(());
-            }
 
             match write_result {
-                Err(IndexWriteFailure::Issue(issue)) => {
-                    assert_eq!(issue.operation, "replace_index");
-                    assert!(issue.reason.contains("symbolic links and reparse points"));
+                Err(IndexWriteFailure::Corrupt(state)) => {
+                    assert_eq!(state.issues.len(), 1);
+                    let issue = &state.issues[0];
+                    assert_eq!(issue.kind, NoteLoadIssueKind::Index);
+                    assert_eq!(issue.operation, "validate_index_file");
+                    assert!(test_paths_equal(Path::new(&issue.path), &index_path));
+                    assert_eq!(
+                        issue.reason,
+                        "the index file is a symbolic link or reparse point"
+                    );
+                    // A link is rejected before reading/backing up its external target.
+                    assert!(state.backup_path.is_none());
                 }
-                other => panic!("expected trusted-destination failure, got {other:?}"),
+                other => panic!("expected second-verification index-link rejection, got {other:?}"),
             }
             assert_eq!(
                 fs::read_to_string(&outside_file).map_err(|e| e.to_string())?,
                 "outside-index-original"
             );
+            assert_eq!(
+                fs::read(&preserved_index).map_err(|e| e.to_string())?,
+                original_bytes
+            );
+            assert!(fs::symlink_metadata(&index_path)
+                .map_err(|e| e.to_string())?
+                .file_type()
+                .is_symlink());
+            assert!(!fs::read_dir(&dir)
+                .map_err(|e| e.to_string())?
+                .any(|entry| entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".hwan-note-index.json.tmp-")));
             link_guard.unwrap().unlink()?;
+            fs::rename(&preserved_index, &index_path).map_err(|e| e.to_string())?;
+            assert_eq!(
+                fs::read(&index_path).map_err(|e| e.to_string())?,
+                original_bytes
+            );
+            assert_eq!(require_index_snapshot(&trusted_root)?.index, snapshot.index);
             Ok(())
         })();
         cleanup_temp_dir(&dir);
@@ -6923,11 +7823,7 @@ mod tests {
             fs::write(&outside_file, "outside-original").map_err(|e| e.to_string())?;
 
             let linked_file = dir.join("linked.md");
-            if !create_file_link(&linked_file, &outside_file)? {
-                return Ok(());
-            }
-            let link_guard = TestLinkGuard::file(&linked_file);
-
+            fs::write(&linked_file, "library-original").map_err(|e| e.to_string())?;
             let index = NoteIndex {
                 entries: HashMap::from([(
                     "linked-note".to_string(),
@@ -6940,6 +7836,14 @@ mod tests {
                 )]),
             };
             write_index(&dir, &index)?;
+            let index_bytes = fs::read(get_index_path(&dir)).map_err(|e| e.to_string())?;
+            // Model an external replacement of an already indexed regular note.
+            // Creating the link before write_index would only test fixture setup.
+            fs::remove_file(&linked_file).map_err(|e| e.to_string())?;
+            if !create_file_link(&linked_file, &outside_file)? {
+                return Ok(());
+            }
+            let link_guard = TestLinkGuard::file(&linked_file);
 
             let error = auto_save_markdown_note(
                 &dir,
@@ -6953,11 +7857,24 @@ mod tests {
                 },
             )
             .unwrap_err();
+            assert!(error.contains("validate_index_path"), "{error}");
+            assert!(error.contains("linked-note"), "{error}");
             assert!(error.contains("symbolic links and reparse points"));
             assert_eq!(
                 fs::read_to_string(&outside_file).map_err(|e| e.to_string())?,
                 "outside-original"
             );
+            assert_eq!(
+                fs::read(get_index_path(&dir)).map_err(|e| e.to_string())?,
+                index_bytes
+            );
+            assert!(fs::symlink_metadata(&linked_file)
+                .map_err(|e| e.to_string())?
+                .file_type()
+                .is_symlink());
+            assert!(!dir.join("Blocked.md").exists());
+            assert!(!dir.join(AUTOSAVE_JOURNAL_FILENAME).exists());
+            assert!(!dir.join(AUTOSAVE_JOURNAL_TEMP_FILENAME).exists());
             link_guard.unlink()?;
             Ok(())
         })();

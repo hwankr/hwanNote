@@ -1,6 +1,6 @@
 [package]
 name = "hwan-note"
-version = "0.9.14"
+version = "0.9.15"
 edition = "2021"
 description = "Windows 11 Notepad-style desktop markdown note app"
 
@@ -29,3 +29,6 @@ dirs = "5"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

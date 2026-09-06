@@ -88,6 +88,9 @@ export default function AllTodosPanel({
             value={inboxDraft}
             onChange={(event) => setInboxDraft(event.target.value)}
             onKeyDown={(event) => {
+              if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) {
+                return;
+              }
               if (event.key === "Enter") {
                 handleAddInbox();
               }
@@ -182,22 +185,34 @@ export default function AllTodosPanel({
           <div className="calendar-task-section-list">
             {section.items.map((row) => {
               const rowDateKey = row.sourceDateKey as string;
+              const handleToggle = row.isInbox
+                ? () => onToggleInboxTodo(row.id)
+                : () => onToggleTodo(rowDateKey, row.id);
+              const handleUpdate = row.isInbox
+                ? (text: string) => onUpdateInboxTodo(row.id, text)
+                : (text: string) => onUpdateTodo(rowDateKey, row.id, text);
+              const handleDelete = row.isInbox
+                ? () => onDeleteInboxTodo(row.id)
+                : () => onDeleteTodo(rowDateKey, row.id);
+              const handleSetDueDate = row.isInbox
+                ? onSetInboxTodoDueDate
+                  ? (dueDateKey: string | null) => onSetInboxTodoDueDate(row.id, dueDateKey)
+                  : undefined
+                : onSetTodoDueDate
+                  ? (dueDateKey: string | null) => onSetTodoDueDate(rowDateKey, row.id, dueDateKey)
+                  : undefined;
               return (
                 <TodoItem
-                  key={`${rowDateKey}:${row.id}`}
+                  key={row.isInbox ? `inbox:${row.id}` : `${rowDateKey}:${row.id}`}
                   item={row}
                   sourceDateKey={rowDateKey}
-                  showSourceDate
+                  showSourceDate={!row.isInbox}
                   isOverdue={row.isOverdue}
-                  onToggle={() => onToggleTodo(rowDateKey, row.id)}
-                  onUpdate={(text) => onUpdateTodo(rowDateKey, row.id, text)}
-                  onDelete={() => onDeleteTodo(rowDateKey, row.id)}
+                  onToggle={handleToggle}
+                  onUpdate={handleUpdate}
+                  onDelete={handleDelete}
                   onSelectSourceDate={onOpenSourceDate}
-                  onSetDueDate={
-                    onSetTodoDueDate
-                      ? (dueDateKey) => onSetTodoDueDate(rowDateKey, row.id, dueDateKey)
-                      : undefined
-                  }
+                  onSetDueDate={handleSetDueDate}
                 />
               );
             })}

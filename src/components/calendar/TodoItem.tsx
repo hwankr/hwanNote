@@ -169,6 +169,9 @@ export default function TodoItem({
             onChange={(event) => setEditText(event.target.value)}
             onBlur={commitEdit}
             onKeyDown={(event) => {
+              if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) {
+                return;
+              }
               if (event.key === "Enter") {
                 commitEdit();
               }

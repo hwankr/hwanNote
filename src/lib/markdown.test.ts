@@ -45,6 +45,19 @@ function expectSchemaValid(document: JSONContent) {
   expect(() => editorSchema.nodeFromJSON(document).check()).not.toThrow();
 }
 
+function expectDocumentRoundTrip(document: JSONContent) {
+  const expected = editorSchema.nodeFromJSON(document);
+  expected.check();
+
+  const markdown = tiptapDocumentToMarkdown(document);
+  const reparsed = markdownToTiptapDocument(markdown);
+  const actual = editorSchema.nodeFromJSON(reparsed);
+  actual.check();
+
+  expect(actual.toJSON()).toEqual(expected.toJSON());
+  expect(tiptapDocumentToMarkdown(reparsed)).toBe(markdown);
+}
+
 describe("Tiptap JSON and Markdown round trips", () => {
   it("preserves headings, inline marks, link URLs, tables, and both list kinds", () => {
     const markdown = [
@@ -358,6 +371,97 @@ describe("Tiptap JSON and Markdown round trips", () => {
 
     expect(walk(reparsed).some((node) => ["blockquote", "codeBlock", "toggleBlock"].includes(node.type ?? ""))).toBe(false);
     expect(tiptapDocumentToPlainText(reparsed)).toBe(plainText);
+  });
+
+  it.each([
+    "-", "--", "---", "=", "==", "===",
+    "- item", "+ item", "* item", "1. item", "10) item",
+    "# Heading", "> quote", "```js", "~~~",
+    ":::toggle[open]", ":::", "    indented", "\\---"
+  ])("preserves literal %j after a hard break", (line) => {
+    const paragraph: JSONContent = {
+      type: "paragraph",
+      content: [
+        { type: "text", text: "Keep this" },
+        { type: "hardBreak" },
+        { type: "text", text: line },
+        { type: "hardBreak" },
+        { type: "text", text: "and this" }
+      ]
+    };
+
+    expectDocumentRoundTrip({ type: "doc", content: [paragraph] });
+    expectDocumentRoundTrip({ type: "doc", content: [{ type: "blockquote", content: [paragraph] }] });
+    expectDocumentRoundTrip({
+      type: "doc",
+      content: [{
+        type: "orderedList",
+        attrs: { start: 100 },
+        content: [{ type: "listItem", content: [paragraph] }]
+      }]
+    });
+  });
+
+  it.each(["paragraph", "heading", "table", "toggleBlock"])(
+    "preserves literal break tags alongside hard breaks in %s",
+    (type) => {
+      const content: JSONContent[] = [
+        { type: "text", text: "literal <br> / <BR /> / <br/> / \\<br> / &lt;br&gt; | " },
+        { type: "text", text: "<br>", marks: [{ type: "code" }] },
+        { type: "hardBreak" },
+        { type: "text", text: "bold <br>", marks: [{ type: "bold" }] },
+        { type: "hardBreak" },
+        { type: "text", text: "last" }
+      ];
+      const paragraph: JSONContent = { type: "paragraph", content };
+      const block: JSONContent = type === "table"
+        ? {
+          type,
+          content: ["tableHeader", "tableCell"].map((cellType) => ({
+            type: "tableRow",
+            content: [{ type: cellType, content: [paragraph] }]
+          }))
+        }
+        : type === "toggleBlock"
+          ? {
+            type,
+            attrs: { open: false },
+            content: [
+              { type: "toggleSummary", content },
+              { type: "toggleContent", content: [paragraph] }
+            ]
+          }
+          : { type, ...(type === "heading" ? { attrs: { level: 2 } } : {}), content };
+
+      expectDocumentRoundTrip({ type: "doc", content: [block] });
+    }
+  );
+
+  it("recognizes only unescaped source break tags in Markdown headings", () => {
+    const document = markdownToTiptapDocument(
+      "# \\<br> &lt;br&gt; &#60;br&#62; `<br>`<BR /><br/><br >after"
+    );
+
+    expectSchemaValid(document);
+    expect(document.content?.[0]?.content).toEqual([
+      { type: "text", text: "<br> <br> <br> " },
+      { type: "text", text: "<br>", marks: [{ type: "code", attrs: undefined }] },
+      { type: "hardBreak" },
+      { type: "hardBreak" },
+      { type: "hardBreak" },
+      { type: "text", text: "after" }
+    ]);
+    expectDocumentRoundTrip(document);
+  });
+
+  it("keeps raw HTML and break tags literal in imported paragraphs", () => {
+    const document = markdownToTiptapDocument("before<br><b>text</b><br />after");
+
+    expectSchemaValid(document);
+    expect(document.content?.[0]?.content).toEqual([
+      { type: "text", text: "before<br><b>text</b><br />after" }
+    ]);
+    expectDocumentRoundTrip(document);
   });
 
   it("preserves an intentional trailing newline inside a code block", () => {

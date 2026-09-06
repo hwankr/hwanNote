@@ -1680,6 +1680,8 @@ pub fn cmd_updater_install(app: AppHandle) {
                 error: Some(error.to_string()),
             },
         );
+        #[cfg(not(target_os = "windows"))]
+        return;
     }
 
     #[cfg(not(target_os = "windows"))]

@@ -111,6 +111,49 @@ References:
 
 ## Guarantee boundary
 
+### Folder rename and deletion
+
+Folder operations use a separate immutable intent journal,
+`.hwan-note-folders.json`, published through
+`.hwan-note-folders.json.next` before changing any library path. It records the
+original index bytes, the exact next index, source and destination paths, file
+SHA-256 digests, and source directories. The same note-index lock serializes
+folder and autosave recovery. Every library load recovers pending folder intent
+before scanning; direct Markdown reads/writes, folder operations, and migration
+also pass through this recovery gate.
+
+A rename moves the whole directory, preserving empty directories and attachments.
+Deleting a folder enumerates its actual files, including externally added
+Markdown and non-note attachments, and moves them to the library root. Name
+collisions receive numeric suffixes while retaining their extension. Internal
+index/journal names and `calendar.json` are reserved; similarly named attachments
+receive an `imported-` prefix. Newly discovered Markdown gets an index entry
+before the transaction is published. Existing entries retain IDs, creation
+timestamps, manual titles, and pinned status.
+
+Recovery verifies the original index or recognizes the next index, resumes
+recorded moves, and publishes the complete next index only after all moves
+succeed. Windows uses `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING`; Linux uses
+`renameat2(RENAME_NOREPLACE)`, and macOS uses `renamex_np(RENAME_EXCL)`. A racing
+external destination is preserved. An unsupported filesystem operation reports
+an error and retains the journal for recovery.
+
+Cleanup removes only empty source directories. Files arriving after the initial
+snapshot remain visible in their original folder and can be moved by another
+explicit folder deletion; cleanup never recursively deletes leftover files.
+Once a changed next index proves the transaction committed, recovery preserves
+subsequent external note edits instead of requiring the pre-move digest again.
+All recorded destinations must still be available before scanning; an index
+delivered ahead of files by cloud sync must not cause the scanner to prune IDs.
+When the index does not change (empty or attachment-only folders), recorded
+filesystem identities determine progress. Unsupported non-UTF-8 or backslash
+filenames on Unix are rejected before journal creation.
+
+Tests cover unindexed Markdown and attachments, reserved names and collisions,
+interruption after journal/directory/file/index publication, partial multi-file
+retries, Windows index locks, late external arrivals, edits after commit, unsafe
+journal paths, and candidate-only recovery.
+
 HwanNote guarantees deterministic recovery from process termination, panic,
 and filesystem operations that report failure, provided the same library later
 becomes accessible and its recorded files have not been externally changed.

@@ -5,6 +5,44 @@ All notable user-facing changes to HwanNote are documented here.
 This project follows [Semantic Versioning](https://semver.org/) and commit messages use the
 [Conventional Commits](https://www.conventionalcommits.org/) style.
 
+## [0.9.15] - 2026-09-07
+
+Preserves edits across startup and shutdown, makes folder changes recoverable,
+and fixes calendar and Markdown editing regressions.
+
+### Fixed
+
+- **Folder deletion preserves files added outside the app.** Unindexed Markdown
+  notes and other files are moved out of the deleted folder without losing their
+  contents or extensions. Files arriving during cleanup are left intact.
+- **Interrupted folder changes recover consistently.** Folder renames and the
+  file moves used by folder deletion keep their original note IDs, pin state,
+  and calendar links across index failures and retries.
+- **Typing during startup survives library loading.** Initial hydration merges
+  the loaded session with notes created or edited while the library is loading.
+- **Shutdown waits for the latest note edits.** Changes made while calendar or
+  note saves are pending are saved before the app exits.
+- **Cancelled actions resume autosave.** Cancelling a close request or closing
+  another tab no longer leaves dirty library notes without a save timer.
+- **Inbox tasks remain editable after setting a due date.** Completion, text
+  edits, deletion, and due-date changes use the correct Inbox actions in every
+  task section.
+- **Calendar inputs respect Korean IME composition.** Enter used to finish
+  composing text no longer submits a task or commits an edit prematurely.
+- **Markdown preserves literal text after Shift+Enter.** Text after a hard
+  break is protected from being reinterpreted as headings or lists when the
+  note is reopened.
+- **Escaped `<br>` text stays literal.** Headings, table cells, and toggle
+  summaries distinguish typed text from serialized hard breaks.
+- **Failed Linux updates do not restart the app.** Installation errors leave
+  the running app open so the error can be handled without a forced restart.
+
+### Development
+
+- Frontend and Rust regression suites run in Ubuntu verification and before
+  both Windows and Linux release builds.
+- Releases remain drafts until both platform builds succeed.
+
 ## [0.9.14] - 2026-08-20
 
 Makes automatic note saving recoverable across note-file, path, cleanup, and
