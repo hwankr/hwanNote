@@ -1,4 +1,4 @@
-name: Ubuntu Verify
+name: Platform Verify
 
 on:
   push:
@@ -7,13 +7,19 @@ on:
   pull_request:
 
 jobs:
-  ubuntu-verify:
-    runs-on: ubuntu-24.04
+  platform-verify:
+    name: Verify (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@v5
 
       - name: Install Linux dependencies
+        if: matrix.os == 'ubuntu-24.04'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -46,7 +52,12 @@ jobs:
         run: npm ci
 
       - name: Verify Ubuntu baseline
+        if: matrix.os == 'ubuntu-24.04'
         run: npm run verify:ubuntu
+
+      - name: Check Windows TypeScript
+        if: matrix.os == 'windows-latest'
+        run: npm run typecheck
 
       - name: Run frontend tests
         run: npm test

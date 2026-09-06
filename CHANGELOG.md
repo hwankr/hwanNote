@@ -39,7 +39,7 @@ and fixes calendar and Markdown editing regressions.
 
 ### Development
 
-- Frontend and Rust regression suites run in Ubuntu verification and before
+- Frontend and Rust regression suites run in Windows and Ubuntu verification and before
   both Windows and Linux release builds.
 - Releases remain drafts until both platform builds succeed.
 

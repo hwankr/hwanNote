@@ -7175,7 +7175,10 @@ mod tests {
 
     #[test]
     fn incomplete_nested_read_dir_preserves_index_bytes_and_metadata() {
-        let dir = make_temp_dir("incomplete-nested-read-dir");
+        // Exercise a root spelling that differs from its canonical identity on
+        // every host, including CI temp paths using Windows short-name aliases.
+        let created_dir = make_temp_dir("incomplete-nested-read-dir");
+        let dir = created_dir.join(".");
         let result = (|| -> Result<(), String> {
             auto_save_markdown_note(
                 &dir,
@@ -7246,12 +7249,22 @@ mod tests {
             assert_eq!(nested_after.is_pinned, nested_before.is_pinned);
 
             let folder_error = list_folders_with_fs(&dir, &file_system).unwrap_err();
-            assert!(folder_error.contains("read_dir"));
-            assert!(folder_error.contains(&blocked_dir.to_string_lossy().to_string()));
-            assert!(folder_error.contains("injected nested directory denial"));
+            let source_issue = load
+                .issues
+                .iter()
+                .find(|issue| {
+                    issue.kind == NoteLoadIssueKind::Scan
+                        && issue.operation == "read_dir"
+                        && test_paths_equal(Path::new(&issue.path), &blocked_dir)
+                        && issue.reason == "injected nested directory denial"
+                })
+                .expect("the denied directory must retain its path, operation, and reason");
+            // list_folders must propagate the same source diagnostic, not the
+            // caller's possibly noncanonical path spelling.
+            assert_eq!(folder_error, source_issue.display());
             Ok(())
         })();
-        cleanup_temp_dir(&dir);
+        cleanup_temp_dir(&created_dir);
         result.unwrap();
     }
 
