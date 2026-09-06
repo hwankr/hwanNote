@@ -5640,9 +5640,18 @@ mod tests {
             let outside_file = outside.join("victim-index.json");
             fs::write(&outside_file, "outside-index-original").map_err(|e| e.to_string())?;
 
+            let probe = dir.join("link-probe");
+            if !create_file_link(&probe, &outside_file)? {
+                return Ok(());
+            }
+            TestLinkGuard::file(&probe).unlink()?;
+
+            write_index(&dir, &empty_index())?;
             let trusted_root = TrustedLibraryRoot::open(&dir)?;
             let snapshot = require_index_snapshot(&trusted_root)?;
             let index_path = get_index_path(&dir);
+            let original_bytes = fs::read(&index_path).map_err(|e| e.to_string())?;
+            let preserved_index = dir.join("original-index.json");
             let planned_index = NoteIndex {
                 entries: HashMap::from([(
                     "planned".to_string(),
@@ -5661,27 +5670,61 @@ mod tests {
                 &snapshot,
                 &planned_index,
                 || {
-                    if create_file_link(&index_path, &outside_file).unwrap_or(false) {
-                        link_guard = Some(TestLinkGuard::file(&index_path));
-                    }
+                    // The hook runs after the new index is staged and synced.
+                    // Replace the previously valid index at this exact point.
+                    assert!(fs::read_dir(&dir).unwrap().any(|entry| entry
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".hwan-note-index.json.tmp-")));
+                    fs::rename(&index_path, &preserved_index).unwrap();
+                    assert!(create_file_link(&index_path, &outside_file).unwrap());
+                    link_guard = Some(TestLinkGuard::file(&index_path));
                 },
             );
-            if link_guard.is_none() {
-                return Ok(());
-            }
 
             match write_result {
-                Err(IndexWriteFailure::Issue(issue)) => {
-                    assert_eq!(issue.operation, "replace_index");
-                    assert!(issue.reason.contains("symbolic links and reparse points"));
+                Err(IndexWriteFailure::Corrupt(state)) => {
+                    assert_eq!(state.issues.len(), 1);
+                    let issue = &state.issues[0];
+                    assert_eq!(issue.kind, NoteLoadIssueKind::Index);
+                    assert_eq!(issue.operation, "validate_index_file");
+                    assert!(test_paths_equal(Path::new(&issue.path), &index_path));
+                    assert_eq!(
+                        issue.reason,
+                        "the index file is a symbolic link or reparse point"
+                    );
+                    // A link is rejected before reading/backing up its external target.
+                    assert!(state.backup_path.is_none());
                 }
-                other => panic!("expected trusted-destination failure, got {other:?}"),
+                other => panic!("expected second-verification index-link rejection, got {other:?}"),
             }
             assert_eq!(
                 fs::read_to_string(&outside_file).map_err(|e| e.to_string())?,
                 "outside-index-original"
             );
+            assert_eq!(
+                fs::read(&preserved_index).map_err(|e| e.to_string())?,
+                original_bytes
+            );
+            assert!(fs::symlink_metadata(&index_path)
+                .map_err(|e| e.to_string())?
+                .file_type()
+                .is_symlink());
+            assert!(!fs::read_dir(&dir)
+                .map_err(|e| e.to_string())?
+                .any(|entry| entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".hwan-note-index.json.tmp-")));
             link_guard.unwrap().unlink()?;
+            fs::rename(&preserved_index, &index_path).map_err(|e| e.to_string())?;
+            assert_eq!(
+                fs::read(&index_path).map_err(|e| e.to_string())?,
+                original_bytes
+            );
+            assert_eq!(require_index_snapshot(&trusted_root)?.index, snapshot.index);
             Ok(())
         })();
         cleanup_temp_dir(&dir);
@@ -7780,11 +7823,7 @@ mod tests {
             fs::write(&outside_file, "outside-original").map_err(|e| e.to_string())?;
 
             let linked_file = dir.join("linked.md");
-            if !create_file_link(&linked_file, &outside_file)? {
-                return Ok(());
-            }
-            let link_guard = TestLinkGuard::file(&linked_file);
-
+            fs::write(&linked_file, "library-original").map_err(|e| e.to_string())?;
             let index = NoteIndex {
                 entries: HashMap::from([(
                     "linked-note".to_string(),
@@ -7797,6 +7836,14 @@ mod tests {
                 )]),
             };
             write_index(&dir, &index)?;
+            let index_bytes = fs::read(get_index_path(&dir)).map_err(|e| e.to_string())?;
+            // Model an external replacement of an already indexed regular note.
+            // Creating the link before write_index would only test fixture setup.
+            fs::remove_file(&linked_file).map_err(|e| e.to_string())?;
+            if !create_file_link(&linked_file, &outside_file)? {
+                return Ok(());
+            }
+            let link_guard = TestLinkGuard::file(&linked_file);
 
             let error = auto_save_markdown_note(
                 &dir,
@@ -7810,11 +7857,24 @@ mod tests {
                 },
             )
             .unwrap_err();
+            assert!(error.contains("validate_index_path"), "{error}");
+            assert!(error.contains("linked-note"), "{error}");
             assert!(error.contains("symbolic links and reparse points"));
             assert_eq!(
                 fs::read_to_string(&outside_file).map_err(|e| e.to_string())?,
                 "outside-original"
             );
+            assert_eq!(
+                fs::read(get_index_path(&dir)).map_err(|e| e.to_string())?,
+                index_bytes
+            );
+            assert!(fs::symlink_metadata(&linked_file)
+                .map_err(|e| e.to_string())?
+                .file_type()
+                .is_symlink());
+            assert!(!dir.join("Blocked.md").exists());
+            assert!(!dir.join(AUTOSAVE_JOURNAL_FILENAME).exists());
+            assert!(!dir.join(AUTOSAVE_JOURNAL_TEMP_FILENAME).exists());
             link_guard.unlink()?;
             Ok(())
         })();
