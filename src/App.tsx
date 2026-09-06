@@ -331,6 +331,7 @@ export default function App() {
     secondary: { line: 1, column: 1, chars: 0 }
   });
   const [isMaximized, setIsMaximized] = useState(false);
+  const exitUiLockedRef = useRef(false);
   const editorWorkspaceRef = useRef<HTMLElement | null>(null);
   const [splitDropTarget, setSplitDropTarget] = useState<PaneId | null>(null);
   const splitResizeRef = useRef<{
@@ -341,6 +342,7 @@ export default function App() {
   const openIntentBufferRef = useRef<string[]>([]);
   const inFlightIntentKeysRef = useRef<Set<string>>(new Set());
   const hydrationCompleteRef = useRef(false);
+  const startupTabRef = useRef(useNoteStore.getState().activeOpenTab);
   const initialHydrationPromiseRef = useRef<Promise<NoteLoadResult | null> | null>(null);
   const initialHydrationFinalizingRef = useRef<Promise<void> | null>(null);
   const initialHydrationFinalizedRef = useRef(false);
@@ -457,7 +459,7 @@ export default function App() {
   }, []);
 
   const saveLibraryTabIfEligible = useCallback(async (tabId: string) => {
-    if (noteWritesSuspendedRef.current) {
+    if (noteWritesSuspendedRef.current || guardedFlowRef.current) {
       return false;
     }
 
@@ -486,6 +488,10 @@ export default function App() {
   const flushPendingAutoSave = useCallback(async (tabId?: string) => {
     const flushTab = async (pendingTabId: string) => {
       clearAutoSaveTimer(pendingTabId);
+
+      if (guardedFlowRef.current) {
+        return false;
+      }
 
       if (saveQueueRef.current.isBusy(pendingTabId)) {
         autoSaveDebouncerRef.current.schedule(pendingTabId, AUTO_SAVE_DELAY_MS, () => {
@@ -525,7 +531,7 @@ export default function App() {
   }, [activeView, flushPendingAutoSave]);
 
   const armAutoSaveForTab = useCallback((tabId: string | null | undefined) => {
-    if (!tabId || noteWritesSuspendedRef.current) {
+    if (!tabId || noteWritesSuspendedRef.current || guardedFlowRef.current) {
       return;
     }
 
@@ -543,7 +549,7 @@ export default function App() {
   }, [getTabById, queuePendingAutoSave]);
 
   const handleTitleDraftChange = useCallback((tabId: string, title: string) => {
-    if (!tabId) {
+    if (!tabId || exitUiLockedRef.current) {
       return;
     }
     pendingTitleDraftsRef.current[tabId] = title;
@@ -633,6 +639,9 @@ export default function App() {
   }, []);
 
   const handleEditorChange = useCallback((pane: PaneId, content: JSONContent, plainText: string) => {
+    if (exitUiLockedRef.current) {
+      return;
+    }
     const targetTabId = pane === "secondary" && isSplit ? secondaryTabId : primaryTabId;
     if (!targetTabId) {
       return;
@@ -869,13 +878,35 @@ export default function App() {
         session = readTabSessionFromStorage();
       }
 
-      hydrateTabs(reloadedLibraryTabs, session);
-      return {
-        tabs: reloadedLibraryTabs,
-        session,
-        preservedDirtyTabIds: [],
-        recoveredCount: 0
-      };
+      Object.keys(pendingTitleDraftsRef.current).forEach(flushTitleDraft);
+      const state = useNoteStore.getState();
+      // Only replace the untouched startup placeholder. Typing, importing, or
+      // creating tabs while either IPC load is pending must survive hydration.
+      const currentTabs = Object.values(state.notesById).filter((tab) =>
+        tab !== startupTabRef.current || tab.persistence !== "transient" ||
+        tab.isDirty || tab.isTitleManual || tab.isPinned || Boolean(tab.plainText)
+      );
+      const currentIds = new Set(currentTabs.map((tab) => tab.id));
+      const merged = mergeReloadedNoteTabs({
+        reloadedLibraryTabs,
+        currentTabs,
+        currentSession: {
+          openTabIds: [...session.openTabIds, ...state.openTabIds.filter((id) => currentIds.has(id))],
+          activeTabId: state.activeTabId && currentIds.has(state.activeTabId)
+            ? state.activeTabId
+            : session.activeTabId
+        },
+        sameStorageSource: loadedFrom === hydratedNoteStorageSourceRef.current,
+        authoritativeSnapshot: true,
+        createRecoveryId: (sourceTab) => `note-recovered-${Date.now()}-${sourceTab.id}`,
+        recoveryTitle: (title) =>
+          formatRecoveredNoteTitle(
+            tRef.current("settings.cloudSyncRecoveredCopyTitle", { title: RECOVERY_TITLE_TOKEN }),
+            title
+          )
+      });
+      hydrateTabs(merged.tabs, merged.session);
+      return merged;
     },
     [flushTitleDraft, hydrateTabs, mapLoadedNoteToTab]
   );
@@ -1779,6 +1810,10 @@ export default function App() {
   }, [focusedTabId, handleSaveTab]);
 
   const resolveDirtyTabs = useCallback(async (tabIds: string[], options: ResolveDirtyTabsOptions = {}) => {
+    // An already-started save cannot be cancelled. Let it establish the saved
+    // snapshot before offering discard, so its late completion cannot undo the
+    // user's decision or recreate a tab that was just discarded.
+    await saveQueueRef.current.waitForIdle();
     for (const tabId of tabIds) {
       flushTitleDraft(tabId);
       const tab = getTabById(tabId);
@@ -1872,8 +1907,11 @@ export default function App() {
       return await action();
     } finally {
       guardedFlowRef.current = false;
+      Object.values(useNoteStore.getState().notesById)
+        .filter((tab) => tab.persistence === "library" && tab.isDirty)
+        .forEach((tab) => armAutoSaveForTab(tab.id));
     }
-  }, [clearAutoSaveTimer]);
+  }, [armAutoSaveForTab, clearAutoSaveTimer]);
 
   const handleRequestCloseTab = useCallback(async (tabId: string) => {
     return runGuardedFlow(() => resolveDirtyTabs([tabId], { closeResolvedTabs: true }));
@@ -1920,7 +1958,7 @@ export default function App() {
         return false;
       }
 
-      const didSaveCalendar = await ensureCalendarSaved({
+      const saveCalendarForExit = () => ensureCalendarSaved({
         save: () => useCalendarStore.getState().saveCalendarData(),
         onBlocked: notifyCalendarSaveBlocked,
         onError: async (error) => {
@@ -1931,13 +1969,34 @@ export default function App() {
           });
         },
       });
-      if (!didSaveCalendar) {
+      const savedCalendarData = useCalendarStore.getState().data;
+      if (!(await saveCalendarForExit())) {
         return false;
       }
-      await hwanNote.window.exit();
-      return true;
+      if (!(await drainNoteSaveQueue())) {
+        return false;
+      }
+      // Drain completion and this lock run in the same microtask turn. Keep the
+      // whole workspace inert while the final IPC is pending, then restore it
+      // if exit returns or rejects instead of terminating the process.
+      exitUiLockedRef.current = true;
+      const bodyWasInert = document.body.inert;
+      document.body.inert = true;
+      try {
+        if (useCalendarStore.getState().data !== savedCalendarData && !(await saveCalendarForExit())) {
+          return false;
+        }
+        await hwanNote.window.exit();
+        return true;
+      } catch (error) {
+        console.error("Failed to exit the application:", error);
+        return false;
+      } finally {
+        exitUiLockedRef.current = false;
+        document.body.inert = bodyWasInert;
+      }
     });
-  }, [notifyCalendarSaveBlocked, resolveDirtyTabs, runGuardedFlow, t]);
+  }, [drainNoteSaveQueue, notifyCalendarSaveBlocked, resolveDirtyTabs, runGuardedFlow, t]);
 
   const resolveOpenTabsBeforeReload = useCallback(async () => {
     return runGuardedFlow(async () => {
@@ -2416,6 +2475,10 @@ export default function App() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if (exitUiLockedRef.current) {
+        event.preventDefault();
+        return;
+      }
       if (settingsOpen) {
         return;
       }

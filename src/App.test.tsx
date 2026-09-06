@@ -10,12 +10,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   autoSave: vi.fn(),
   browseAutoSaveDir: vi.fn(),
+  calendarData: { version: 1 },
   calendarLoadState: "ready" as "idle" | "loading" | "ready" | "corrupt" | "load_error",
   cleanOrphanNoteLinks: vi.fn(),
   closeRequestHandlers: [] as Array<(event: { preventDefault: () => void }) => void | Promise<void>>,
   detectCloudProviders: vi.fn(),
   dialogMessage: vi.fn(),
   getAutoSaveDir: vi.fn(),
+  importTxt: vi.fn(),
   loadAll: vi.fn(),
   loadCalendarData: vi.fn(),
   loadSession: vi.fn(),
@@ -26,6 +28,7 @@ const mocks = vi.hoisted(() => ({
   recoverCalendarDataFromCloud: vi.fn(),
   saveCalendarData: vi.fn(),
   saveSession: vi.fn(),
+  saveTxt: vi.fn(),
   setAutoSaveDir: vi.fn(),
   setActiveSource: vi.fn(),
   cloudStatus: vi.fn(),
@@ -44,12 +47,12 @@ vi.mock("./lib/tauriApi", () => ({
     note: {
       autoSave: mocks.autoSave,
       loadAll: mocks.loadAll,
-      importTxt: vi.fn().mockResolvedValue(null),
+      importTxt: mocks.importTxt,
       readExternalTxt: mocks.readExternalTxt,
       drainOpenIntents: vi.fn().mockResolvedValue([]),
       onOpenIntent: mocks.onOpenIntent,
       pickSavePath: vi.fn().mockResolvedValue(null),
-      saveTxt: vi.fn().mockResolvedValue(true),
+      saveTxt: mocks.saveTxt,
       delete: vi.fn().mockResolvedValue(true),
     },
     folder: {
@@ -84,6 +87,7 @@ vi.mock("./stores/calendarStore", () => ({
   useCalendarStore: {
     getState: () => ({
       backupPath: null,
+      data: mocks.calendarData,
       cleanOrphanNoteLinks: mocks.cleanOrphanNoteLinks,
       loadCalendarData: mocks.loadCalendarData,
       loadError: null,
@@ -185,12 +189,39 @@ vi.mock("./components/StatusBar", async () => {
 
 vi.mock("./components/TitleBar", async () => {
   const { createElement } = await import("react");
-  return { default: () => createElement("div") };
+  return {
+    default: ({ tabs, onCloseTab, onSelectTab }: {
+      tabs: Array<{ id: string }>;
+      onCloseTab: (id: string) => void;
+      onSelectTab: (id: string) => void;
+    }) =>
+      createElement("div", null, ...tabs.flatMap((tab) => [createElement("button", {
+        key: `close-${tab.id}`,
+        "data-testid": `close-${tab.id}`,
+        onClick: () => onCloseTab(tab.id),
+      }, "close tab"), createElement("button", {
+        key: `select-${tab.id}`,
+        "data-testid": `select-${tab.id}`,
+        onClick: () => onSelectTab(tab.id),
+      }, "select tab")])),
+  };
 });
 
 vi.mock("./components/Toolbar", async () => {
   const { createElement } = await import("react");
-  return { default: () => createElement("div") };
+  return {
+    default: ({ activeTabId, onImportTxt, onTitleDraftChange }: {
+      activeTabId: string;
+      onImportTxt: () => void;
+      onTitleDraftChange: (id: string, title: string) => void;
+    }) => createElement("div", null,
+      createElement("button", { "data-testid": "import-txt", onClick: onImportTxt }, "import txt"),
+      createElement("button", {
+        "data-testid": "draft-title",
+        onClick: () => onTitleDraftChange(activeTabId, "Startup title"),
+      }, "draft title"),
+    ),
+  };
 });
 
 vi.mock("./components/UpdateToast", async () => {
@@ -347,6 +378,12 @@ async function renderApp(root: Root) {
   await flushReactWork();
 }
 
+function requestWindowClose() {
+  const handler = mocks.closeRequestHandlers[mocks.closeRequestHandlers.length - 1];
+  if (!handler) throw new Error("Expected a close-request handler");
+  return Promise.resolve(handler({ preventDefault: vi.fn() }));
+}
+
 describe("App locale changes", () => {
   let container: HTMLDivElement;
   let consoleErrorSpy: ReturnType<typeof vi.spyOn> | null;
@@ -356,6 +393,7 @@ describe("App locale changes", () => {
     consoleErrorSpy = null;
     vi.useFakeTimers();
     window.localStorage.clear();
+    document.body.inert = false;
     Object.defineProperty(window, "matchMedia", {
       configurable: true,
       value: vi.fn(() => ({
@@ -387,6 +425,8 @@ describe("App locale changes", () => {
       openTabIds: [NOTE_ID],
       activeTabId: NOTE_ID,
     });
+    mocks.importTxt.mockReset().mockResolvedValue(null);
+    mocks.saveTxt.mockReset().mockResolvedValue(true);
     mocks.dialogMessage.mockReset().mockResolvedValue("Yes");
     mocks.saveCalendarData.mockReset().mockResolvedValue("saved");
     mocks.saveSession.mockReset().mockResolvedValue(undefined);
@@ -409,6 +449,7 @@ describe("App locale changes", () => {
       error: null,
     });
     mocks.calendarLoadState = "ready";
+    mocks.calendarData = { version: 1 };
     mocks.cloudStatus.mockReset().mockResolvedValue({
       enabled: false,
       provider: null,
@@ -450,6 +491,309 @@ describe("App locale changes", () => {
     container.remove();
     vi.useRealTimers();
     consoleErrorSpy?.mockRestore();
+  });
+
+  it("preserves startup body and title drafts when initial library loading finishes", async () => {
+    const initialLoad = createDeferred<ReturnType<typeof createLoadResult>>();
+    mocks.loadAll.mockReturnValue(initialLoad.promise);
+    useNoteStore.getState().createTab();
+    const draftId = useNoteStore.getState().activeTabId!;
+    await renderApp(root);
+
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="edit-note"]').click();
+      requiredElement<HTMLButtonElement>(container, '[data-testid="draft-title"]').click();
+      initialLoad.resolve(createLoadResult("local"));
+    });
+    await flushReactWork();
+
+    expect(useNoteStore.getState().notesById[draftId]).toMatchObject({
+      plainText: "dirty draft", title: "Startup title", isDirty: true, persistence: "transient",
+    });
+    expect(useNoteStore.getState().openTabIds).toEqual([NOTE_ID, draftId]);
+    expect(useNoteStore.getState().activeTabId).toBe(draftId);
+    expect(mocks.autoSave).not.toHaveBeenCalled();
+  });
+
+  it("preserves a txt import during session loading and drops only the untouched startup placeholder", async () => {
+    const initialSession = createDeferred<{ openTabIds: string[]; activeTabId: string }>();
+    mocks.loadSession.mockReturnValue(initialSession.promise);
+    mocks.importTxt.mockResolvedValue([{ title: "Imported", content: "external body", filePath: "C:/import.txt" }]);
+    useNoteStore.getState().createTab();
+    const placeholderId = useNoteStore.getState().activeTabId!;
+    await renderApp(root);
+
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="import-txt"]').click();
+    });
+    await flushReactWork();
+    const importedId = Object.values(useNoteStore.getState().notesById)
+      .find((tab) => tab.sourceFilePath === "C:/import.txt")!.id;
+    expect(importedId).not.toBe(placeholderId);
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, `[data-testid="select-${importedId}"]`).click();
+    });
+    await act(async () => { initialSession.resolve({ openTabIds: [NOTE_ID], activeTabId: NOTE_ID }); });
+    await flushReactWork();
+
+    expect(useNoteStore.getState().notesById[placeholderId]).toBeUndefined();
+    expect(useNoteStore.getState().notesById[importedId]).toMatchObject({
+      plainText: "external body", sourceFilePath: "C:/import.txt", persistence: "external", isDirty: false,
+    });
+    expect(useNoteStore.getState().openTabIds).toEqual([NOTE_ID, importedId]);
+    expect(useNoteStore.getState().activeTabId).toBe(importedId);
+  });
+
+  it("preserves a user-created empty tab while replacing the initial placeholder", async () => {
+    const initialLoad = createDeferred<ReturnType<typeof createLoadResult>>();
+    mocks.loadAll.mockReturnValue(initialLoad.promise);
+    useNoteStore.getState().createTab();
+    const placeholderId = useNoteStore.getState().activeTabId!;
+    await renderApp(root);
+    let createdId!: string;
+    await act(async () => {
+      useNoteStore.getState().createTab();
+      createdId = useNoteStore.getState().activeTabId!;
+    });
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, `[data-testid="select-${createdId}"]`).click();
+      initialLoad.resolve(createLoadResult("local"));
+    });
+    await flushReactWork();
+    expect(useNoteStore.getState().notesById[placeholderId]).toBeUndefined();
+    expect(useNoteStore.getState().notesById[createdId]).toMatchObject({ plainText: "", isDirty: false });
+    expect(useNoteStore.getState().activeTabId).toBe(createdId);
+    expect(useNoteStore.getState().openTabIds).toEqual([NOTE_ID, createdId]);
+  });
+
+  it("preserves an initial draft when a blocked library is successfully retried", async () => {
+    mocks.loadAll.mockResolvedValueOnce(createRecoveryLoadResult({
+      loadState: "incomplete", operation: "read_markdown", path: "C:/notes/blocked.md", reason: "access denied",
+    }));
+    useNoteStore.getState().createTab();
+    const draftId = useNoteStore.getState().activeTabId!;
+    await renderApp(root);
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="edit-note"]').click();
+      requiredElement<HTMLButtonElement>(container, ".note-recovery-actions button").click();
+    });
+    await flushUntil(() => mocks.loadAll.mock.calls.length === 2, "the ready retry");
+    await flushReactWork();
+    expect(useNoteStore.getState().notesById[draftId]).toMatchObject({ plainText: "dirty draft", isDirty: true });
+    expect(useNoteStore.getState().openTabIds).toEqual([NOTE_ID, draftId]);
+  });
+
+  it.each(["cancel", "save failure"])("resumes autosave after closing is stopped by %s", async (reason) => {
+    mocks.dialogMessage.mockResolvedValueOnce(reason === "cancel" ? "Cancel" : "Yes");
+    if (reason === "save failure") {
+      consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      mocks.autoSave.mockRejectedValueOnce(new Error("temporary write failure"));
+    }
+    await renderApp(root);
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="edit-note"]').click();
+      await requestWindowClose();
+    });
+    expect(mocks.windowExit).not.toHaveBeenCalled();
+    expect(useNoteStore.getState().notesById[NOTE_ID].isDirty).toBe(true);
+    const attemptsBeforeRetry = mocks.autoSave.mock.calls.length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(AUTO_SAVE_DELAY_MS); });
+    expect(mocks.autoSave).toHaveBeenCalledTimes(attemptsBeforeRetry + 1);
+    expect(useNoteStore.getState().notesById[NOTE_ID].isDirty).toBe(false);
+  });
+
+  it("keeps another tab's autosave scheduled when closing an untouched tab", async () => {
+    const loaded = createLoadResult("local");
+    loaded.notes.push({ ...loaded.notes[0], noteId: "other-note", title: "Other note" });
+    mocks.loadAll.mockResolvedValue(loaded);
+    mocks.loadSession.mockResolvedValue({ openTabIds: [NOTE_ID, "other-note"], activeTabId: NOTE_ID });
+    await renderApp(root);
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="edit-note"]').click();
+      requiredElement<HTMLButtonElement>(container, '[data-testid="close-other-note"]').click();
+    });
+    await flushReactWork();
+    expect(useNoteStore.getState().openTabIds).toEqual([NOTE_ID]);
+    await act(async () => { await vi.advanceTimersByTimeAsync(AUTO_SAVE_DELAY_MS); });
+    expect(mocks.autoSave).toHaveBeenCalledTimes(1);
+    expect(useNoteStore.getState().notesById[NOTE_ID].isDirty).toBe(false);
+  });
+
+  it("drains edits made during the exit calendar save and retries a newer revision before exiting", async () => {
+    const calendarSave = createDeferred<"saved">();
+    const firstSave = createDeferred<void>();
+    const latestSave = createDeferred<void>();
+    mocks.saveCalendarData.mockReturnValueOnce(calendarSave.promise);
+    mocks.autoSave.mockReturnValueOnce(firstSave.promise).mockReturnValueOnce(latestSave.promise);
+    await renderApp(root);
+    let closing!: Promise<void>;
+    await act(async () => { closing = requestWindowClose(); });
+    await flushUntil(() => mocks.saveCalendarData.mock.calls.length === 1, "the exit calendar save");
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="edit-note"]').click();
+      calendarSave.resolve("saved");
+    });
+    await flushUntil(() => mocks.autoSave.mock.calls.length === 1, "the first exit note save");
+    expect(mocks.windowExit).not.toHaveBeenCalled();
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="edit-concurrently"]').click();
+      firstSave.resolve();
+    });
+    await flushUntil(() => mocks.autoSave.mock.calls.length === 2, "the latest exit note save");
+    expect(mocks.autoSave.mock.calls[1][2]).toContain("concurrent edit");
+    expect(mocks.windowExit).not.toHaveBeenCalled();
+    await act(async () => { latestSave.resolve(); await closing; });
+    expect(mocks.windowExit).toHaveBeenCalledOnce();
+    expect(useNoteStore.getState().notesById[NOTE_ID]).toMatchObject({ isDirty: false, plainText: "concurrent edit" });
+  });
+
+  it("keeps the window open and resumes autosave when the final exit drain fails", async () => {
+    const calendarSave = createDeferred<"saved">();
+    mocks.saveCalendarData.mockReturnValueOnce(calendarSave.promise);
+    mocks.autoSave.mockRejectedValueOnce(new Error("exit write failed"));
+    consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await renderApp(root);
+    let closing!: Promise<void>;
+    await act(async () => { closing = requestWindowClose(); });
+    await flushUntil(() => mocks.saveCalendarData.mock.calls.length === 1, "the exit calendar save");
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="edit-note"]').click();
+      calendarSave.resolve("saved");
+      await closing;
+    });
+    expect(mocks.windowExit).not.toHaveBeenCalled();
+    expect(useNoteStore.getState().notesById[NOTE_ID].isDirty).toBe(true);
+    await act(async () => { await vi.advanceTimersByTimeAsync(AUTO_SAVE_DELAY_MS); });
+    expect(mocks.autoSave).toHaveBeenCalledTimes(2);
+    expect(useNoteStore.getState().notesById[NOTE_ID].isDirty).toBe(false);
+  });
+
+  it("locks editing during final exit IPC and restores editing and autosave if exit fails", async () => {
+    const exit = createDeferred<void>();
+    mocks.windowExit.mockReturnValueOnce(exit.promise);
+    consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await renderApp(root);
+    let closing!: Promise<void>;
+    await act(async () => { closing = requestWindowClose(); });
+    await flushUntil(() => mocks.windowExit.mock.calls.length === 1, "the final exit IPC");
+    expect(document.body.inert).toBe(true);
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="edit-note"]').click();
+      requiredElement<HTMLButtonElement>(container, '[data-testid="draft-title"]').click();
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "n", ctrlKey: true, bubbles: true }));
+    });
+    expect(useNoteStore.getState().notesById[NOTE_ID]).toMatchObject({ plainText: "disk copy", isDirty: false });
+    expect(useNoteStore.getState().openTabIds).toEqual([NOTE_ID]);
+    await act(async () => {
+      exit.reject(new Error("exit IPC failed"));
+      await closing;
+    });
+    expect(document.body.inert).toBe(false);
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="edit-note"]').click();
+      await vi.advanceTimersByTimeAsync(AUTO_SAVE_DELAY_MS);
+    });
+    expect(useNoteStore.getState().notesById[NOTE_ID]).toMatchObject({ plainText: "dirty draft", title: "Disk title", isDirty: false });
+    expect(mocks.autoSave).toHaveBeenCalledOnce();
+  });
+
+  it.each(["saved", "blocked"] as const)("resaves calendar edits under the exit lock and handles a %s result", async (result) => {
+    const firstCalendarSave = createDeferred<"saved">();
+    const noteSave = createDeferred<void>();
+    const latestCalendarSave = createDeferred<"saved" | "blocked">();
+    mocks.saveCalendarData.mockReturnValueOnce(firstCalendarSave.promise).mockReturnValueOnce(latestCalendarSave.promise);
+    mocks.autoSave.mockReturnValueOnce(noteSave.promise);
+    consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await renderApp(root);
+    let closing!: Promise<void>;
+    await act(async () => { closing = requestWindowClose(); });
+    await flushUntil(() => mocks.saveCalendarData.mock.calls.length === 1, "the first calendar save");
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="edit-note"]').click();
+      firstCalendarSave.resolve("saved");
+    });
+    await flushUntil(() => mocks.autoSave.mock.calls.length === 1, "the note drain");
+    await act(async () => {
+      mocks.calendarData = { version: 2 };
+      noteSave.resolve();
+    });
+    await flushUntil(() => mocks.saveCalendarData.mock.calls.length === 2, "the latest calendar save");
+    expect(document.body.inert).toBe(true);
+    expect(mocks.windowExit).not.toHaveBeenCalled();
+    await act(async () => { latestCalendarSave.resolve(result); await closing; });
+    expect(mocks.windowExit).toHaveBeenCalledTimes(result === "saved" ? 1 : 0);
+    expect(document.body.inert).toBe(false);
+  });
+
+  it.each(["library", "transient", "external"])("does not save discarded %s changes while draining exit", async (persistence) => {
+    await renderApp(root);
+    await act(async () => {
+      if (persistence === "transient") useNoteStore.getState().createTab();
+      if (persistence === "external") {
+        useNoteStore.getState().addImportedTab("External", { type: "doc", content: [{ type: "paragraph" }] }, "", "C:/external.txt");
+      }
+    });
+    const editedId = persistence === "library" ? NOTE_ID : Object.values(useNoteStore.getState().notesById)
+      .find((tab) => tab.persistence === persistence)!.id;
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, `[data-testid="select-${editedId}"]`).click();
+    });
+    mocks.dialogMessage.mockResolvedValueOnce("No");
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="edit-note"]').click();
+      await requestWindowClose();
+    });
+    expect(mocks.windowExit).toHaveBeenCalledOnce();
+    expect(mocks.autoSave).not.toHaveBeenCalled();
+    expect(mocks.saveTxt).not.toHaveBeenCalled();
+    if (persistence === "transient") expect(useNoteStore.getState().notesById[editedId]).toBeUndefined();
+    else expect(useNoteStore.getState().notesById[editedId].isDirty).toBe(false);
+  });
+
+  it("settles an in-flight save before discarding a newer edit on tab close", async () => {
+    const inFlightSave = createDeferred<void>();
+    mocks.autoSave.mockReturnValueOnce(inFlightSave.promise);
+    await renderApp(root);
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="edit-note"]').click();
+      await vi.advanceTimersByTimeAsync(AUTO_SAVE_DELAY_MS);
+    });
+    mocks.dialogMessage.mockResolvedValueOnce("No");
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="edit-concurrently"]').click();
+      requiredElement<HTMLButtonElement>(container, `[data-testid="close-${NOTE_ID}"]`).click();
+    });
+    expect(mocks.dialogMessage).not.toHaveBeenCalled();
+    await act(async () => { inFlightSave.resolve(); });
+    await flushReactWork();
+    expect(mocks.dialogMessage).toHaveBeenCalledOnce();
+    expect(useNoteStore.getState().notesById[NOTE_ID]).toMatchObject({ plainText: "dirty draft", isDirty: false });
+    await act(async () => { await vi.advanceTimersByTimeAsync(AUTO_SAVE_DELAY_MS * 2); });
+    expect(mocks.autoSave).toHaveBeenCalledOnce();
+  });
+
+  it("waits for an external txt save before exiting", async () => {
+    const txtSave = createDeferred<boolean>();
+    mocks.saveTxt.mockReturnValueOnce(txtSave.promise);
+    await renderApp(root);
+    await act(async () => {
+      useNoteStore.getState().addImportedTab("External", { type: "doc", content: [{ type: "paragraph" }] }, "", "C:/external.txt");
+    });
+    const externalId = Object.values(useNoteStore.getState().notesById).find((tab) => tab.persistence === "external")!.id;
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, `[data-testid="select-${externalId}"]`).click();
+    });
+    let closing!: Promise<void>;
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="edit-note"]').click();
+      closing = requestWindowClose();
+    });
+    await flushUntil(() => mocks.saveTxt.mock.calls.length === 1, "the external txt save");
+    expect(mocks.saveTxt).toHaveBeenCalledWith("C:/external.txt", "dirty draft");
+    expect(mocks.windowExit).not.toHaveBeenCalled();
+    await act(async () => { txtSave.resolve(true); await closing; });
+    expect(mocks.windowExit).toHaveBeenCalledOnce();
+    expect(mocks.autoSave).not.toHaveBeenCalled();
   });
 
   it("shows the unavailable custom path in Korean and English without claiming a default fallback", async () => {
@@ -1392,8 +1736,9 @@ describe("App locale changes", () => {
     await act(async () => {
       requiredElement<HTMLButtonElement>(container, '[data-testid="install-update"]').click();
     });
-    await flushUntil(() => mocks.saveCalendarData.mock.calls.length === 1, "the pre-update calendar save");
-
+    await flushReactWork();
+    expect(mocks.saveCalendarData).not.toHaveBeenCalled();
+    expect(mocks.dialogMessage).not.toHaveBeenCalled();
     expect(mocks.updaterInstall).not.toHaveBeenCalled();
 
     await act(async () => {
