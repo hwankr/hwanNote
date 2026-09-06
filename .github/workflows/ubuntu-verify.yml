@@ -47,3 +47,9 @@ jobs:
 
       - name: Verify Ubuntu baseline
         run: npm run verify:ubuntu
+
+      - name: Run frontend tests
+        run: npm test
+
+      - name: Run Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
