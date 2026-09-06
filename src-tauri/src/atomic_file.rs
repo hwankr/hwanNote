@@ -2,6 +2,76 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+/// Move an entry without ever replacing a destination created by another writer.
+/// This also supports filesystems without hard links, such as removable FAT media.
+pub(crate) fn move_file_without_replace(source: &Path, destination: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
+        let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+        let destination: Vec<u16> = destination
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        // SAFETY: both paths are valid, live NUL-terminated UTF-16 buffers.
+        // Omitting MOVEFILE_REPLACE_EXISTING is essential: std::fs::rename sets it.
+        let result = unsafe {
+            MoveFileExW(
+                source.as_ptr(),
+                destination.as_ptr(),
+                MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if result == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let source = CString::new(source.as_os_str().as_bytes())
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        let destination = CString::new(destination.as_os_str().as_bytes())
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        // SAFETY: both NUL-terminated path buffers remain alive for the call.
+        // No pointer is retained, and each platform flag forbids replacement.
+        let result = unsafe {
+            #[cfg(target_os = "linux")]
+            {
+                libc::renameat2(
+                    libc::AT_FDCWD,
+                    source.as_ptr(),
+                    libc::AT_FDCWD,
+                    destination.as_ptr(),
+                    libc::RENAME_NOREPLACE,
+                )
+            }
+            #[cfg(target_os = "macos")]
+            {
+                libc::renamex_np(source.as_ptr(), destination.as_ptr(), libc::RENAME_EXCL)
+            }
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (source, destination);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "This platform does not provide a supported no-replace rename",
+        ))
+    }
+}
+
 pub(crate) fn publish_temp_file(
     temp_path: &Path,
     destination: &Path,
@@ -161,7 +231,7 @@ pub(crate) fn sync_parent_directory(path: &Path, operation: &str) -> Result<(), 
 
 #[cfg(test)]
 mod tests {
-    use super::publish_temp_file;
+    use super::{move_file_without_replace, publish_temp_file};
     use std::fs::{self, OpenOptions};
     use std::io::Write;
     use std::path::{Path, PathBuf};
@@ -196,6 +266,40 @@ mod tests {
             .unwrap();
         file.write_all(content.as_bytes()).unwrap();
         file.sync_all().unwrap();
+    }
+
+    #[test]
+    fn no_replace_move_preserves_existing_destination_and_source() {
+        let root = make_temp_dir("no-replace-existing");
+        let source = root.join("source.txt");
+        let destination = root.join("destination.txt");
+        fs::write(&source, "source").unwrap();
+        fs::write(&destination, "external sentinel").unwrap();
+        let error = move_file_without_replace(&source, &destination).unwrap_err();
+        assert!(error.raw_os_error().is_some());
+        assert_eq!(fs::read_to_string(&source).unwrap(), "source");
+        assert_eq!(
+            fs::read_to_string(&destination).unwrap(),
+            "external sentinel"
+        );
+        cleanup_temp_dir(&root);
+    }
+
+    #[test]
+    fn no_replace_move_supports_files_and_directories() {
+        let root = make_temp_dir("no-replace-moves");
+        let source = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("file.txt"), "content").unwrap();
+        move_file_without_replace(&source, &destination).unwrap();
+        move_file_without_replace(&destination.join("file.txt"), &root.join("file.txt")).unwrap();
+        assert!(!source.exists());
+        assert_eq!(
+            fs::read_to_string(root.join("file.txt")).unwrap(),
+            "content"
+        );
+        cleanup_temp_dir(&root);
     }
 
     #[cfg(unix)]
