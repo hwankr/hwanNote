@@ -5,6 +5,14 @@ All notable user-facing changes to HwanNote are documented here.
 This project follows [Semantic Versioning](https://semver.org/) and commit messages use the
 [Conventional Commits](https://www.conventionalcommits.org/) style.
 
+## [0.9.16] - 2026-09-26
+
+### Fixed
+
+- **Checklist checkboxes follow line spacing and font size.** Checkboxes stay
+  centered on the first text line for single-line, wrapped, nested, and empty
+  checklist items.
+
 ## [0.9.15] - 2026-09-07
 
 Preserves edits across startup and shutdown, makes folder changes recoverable,
