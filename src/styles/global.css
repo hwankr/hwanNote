@@ -1407,8 +1407,13 @@ body.tab-dragging .tab:not(.dragging):hover {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
-  margin-top: 2px;
+  /* Align with the first text line, even when the item wraps or has children. */
+  height: calc(1em * var(--editor-line-height, 1.55));
   user-select: none;
+}
+
+.note-editor ul[data-type="taskList"] li > label > input[type="checkbox"] {
+  margin-block: 0;
 }
 
 .note-editor ul[data-type="taskList"] li > div {
