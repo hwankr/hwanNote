@@ -58,6 +58,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Check Tauri JavaScript and Rust versions
+        run: npm run check:tauri-versions
+
       - name: Check TypeScript
         run: npm run typecheck
 

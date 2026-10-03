@@ -29,6 +29,8 @@ This project follows [Semantic Versioning](https://semver.org/) and commit messa
   switching to the default library.
 - Recover interrupted cloud copies with the autosave journal, keeping original
   note IDs and pin state without creating duplicate notes on retry.
+- Keep Tauri JavaScript and Rust package versions compatible, and check the
+  installed versions in platform verification and release workflows.
 
 ### Security
 
