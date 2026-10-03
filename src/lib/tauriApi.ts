@@ -5,6 +5,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 // -- Types (matching Rust serde output) --
 
 export interface AutoSaveResult {
+  contentDigest: string;
   filePath: string;
   noteId: string;
   createdAt: number;
@@ -12,6 +13,7 @@ export interface AutoSaveResult {
 }
 
 export interface LoadedNote {
+  contentDigest: string;
   noteId: string;
   title: string;
   isTitleManual: boolean;
@@ -173,10 +175,11 @@ export const hwanNote = {
       folderPath: string,
       isTitleManual: boolean,
       isPinned: boolean,
-      loadedFrom: NoteStorageSource
+      loadedFrom: NoteStorageSource,
+      expectedContentDigest?: string
     ) =>
       invoke<AutoSaveResult>("cmd_note_auto_save", {
-        payload: { noteId, title, content, folderPath, isTitleManual, isPinned, loadedFrom },
+        payload: { noteId, title, content, folderPath, isTitleManual, isPinned, loadedFrom, expectedContentDigest },
       }),
 
     loadAll: () => invoke<NoteLoadResult>("cmd_note_load_all"),
@@ -207,8 +210,8 @@ export const hwanNote = {
     saveTxt: (filePath: string, content: string) =>
       invoke<boolean>("cmd_note_save_txt", { filePath, content }),
 
-    delete: (noteId: string, loadedFrom: NoteStorageSource) =>
-      invoke<boolean>("cmd_note_delete", { noteId, loadedFrom }),
+    delete: (noteId: string, loadedFrom: NoteStorageSource, expectedContentDigest?: string) =>
+      invoke<boolean>("cmd_note_delete", { noteId, loadedFrom, expectedContentDigest }),
   },
 
   folder: {

@@ -41,7 +41,11 @@ export interface CalendarStore {
   loadError: string | null;
   sourcePath: string | null;
   backupPath: string | null;
+  storageTransitionInProgress: boolean;
 
+  beginStorageTransition: () => boolean;
+  endStorageTransition: () => void;
+  blockStorageAfterFailure: (error: unknown) => void;
   loadCalendarData: () => Promise<void>;
   recoverCalendarDataFromCloud: () => Promise<CalendarRecoveryResult>;
   saveCalendarData: () => Promise<CalendarSaveResult>;
@@ -180,7 +184,7 @@ async function executeSave(options: ExecuteSaveOptions = {}): Promise<CalendarSa
 
 function mutateAndSave(mutator: (data: CalendarData) => boolean) {
   const state = useCalendarStore.getState();
-  if (state.loadState !== "ready") {
+  if (state.loadState !== "ready" || state.storageTransitionInProgress) {
     return;
   }
   const next = structuredClone(state.data);
@@ -217,8 +221,39 @@ export const useCalendarStore: UseBoundStore<StoreApi<CalendarStore>> = create<C
   loadError: null,
   sourcePath: null,
   backupPath: null,
+  storageTransitionInProgress: false,
+
+  beginStorageTransition: () => {
+    if (useCalendarStore.getState().storageTransitionInProgress) {
+      return false;
+    }
+    set({ storageTransitionInProgress: true });
+    cancelPendingSave();
+    return true;
+  },
+
+  endStorageTransition: () => {
+    if (!useCalendarStore.getState().storageTransitionInProgress) {
+      return;
+    }
+    set({ storageTransitionInProgress: false });
+    if (hasUnsavedChanges && useCalendarStore.getState().loadState === "ready") {
+      scheduleSave();
+    }
+  },
+
+  blockStorageAfterFailure: (error) => {
+    ++loadRequestId;
+    cancelPendingSave();
+    set({
+      loaded: true,
+      loadState: "load_error",
+      loadError: error instanceof Error ? error.message : String(error),
+    });
+  },
 
   loadCalendarData: async () => {
+    const previousState = useCalendarStore.getState();
     const requestId = ++loadRequestId;
     cancelPendingSave();
     set({
@@ -241,7 +276,7 @@ export const useCalendarStore: UseBoundStore<StoreApi<CalendarStore>> = create<C
         }
         if (!cleared) {
           set({
-            data: createEmptyCalendarData(),
+            data: previousState.data,
             loaded: true,
             loadedFrom: result.loadedFrom,
             cloudUnavailable: result.cloudUnavailable,
@@ -268,7 +303,7 @@ export const useCalendarStore: UseBoundStore<StoreApi<CalendarStore>> = create<C
 
       if (result.status === "read_error") {
         set({
-          data: createEmptyCalendarData(),
+          data: previousState.data,
           loaded: true,
           loadedFrom: result.loadedFrom,
           cloudUnavailable: result.cloudUnavailable,
@@ -283,7 +318,7 @@ export const useCalendarStore: UseBoundStore<StoreApi<CalendarStore>> = create<C
       const parsed = parseCalendarData(result.data);
       if (!parsed.ok) {
         set({
-          data: createEmptyCalendarData(),
+          data: previousState.data,
           loaded: true,
           loadedFrom: result.loadedFrom,
           cloudUnavailable: result.cloudUnavailable,
@@ -314,7 +349,7 @@ export const useCalendarStore: UseBoundStore<StoreApi<CalendarStore>> = create<C
       }
       if (!cleared) {
         set({
-          data: parsed.data,
+          data: previousState.loadState === "ready" ? previousState.data : parsed.data,
           loaded: true,
           loadedFrom: result.loadedFrom,
           cloudUnavailable: result.cloudUnavailable,
@@ -342,16 +377,15 @@ export const useCalendarStore: UseBoundStore<StoreApi<CalendarStore>> = create<C
       }
       console.error("Failed to load calendar data:", error);
       set({
-        data: createEmptyCalendarData(),
+        data: previousState.data,
         loaded: true,
-        loadedFrom: "local",
-        cloudUnavailable: false,
+        loadedFrom: previousState.loadedFrom,
+        cloudUnavailable: previousState.cloudUnavailable,
         loadState: "load_error",
         loadError: error instanceof Error ? error.message : String(error),
-        sourcePath: null,
+        sourcePath: previousState.sourcePath,
         backupPath: null,
       });
-      hasUnsavedChanges = false;
     }
   },
 

@@ -38,6 +38,8 @@ static AUTOSAVE_OPERATION_COUNTER: AtomicU64 = AtomicU64::new(0);
 const TOGGLE_BLOCK_END: &str = ":::";
 const MANUAL_TITLE_META_PREFIX: &str = "<!-- hwan-note:manual-title:";
 const MANUAL_TITLE_META_SUFFIX: &str = " -->";
+const TEXT_FORMAT_MARKER: &str = "<!-- hwan-note:format:txt:v1 -->";
+const EMPTY_PARAGRAPH_MARKER: &str = "<!-- hwan-note:empty-paragraph:v1 -->";
 
 fn lock_note_index() -> MutexGuard<'static, ()> {
     NOTE_INDEX_LOCK
@@ -224,6 +226,8 @@ pub struct AutoSavePayload {
     pub is_title_manual: Option<bool>,
     #[serde(default)]
     pub is_pinned: Option<bool>,
+    #[serde(default)]
+    pub expected_content_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -233,6 +237,7 @@ pub struct AutoSaveResult {
     pub note_id: String,
     pub created_at: u64,
     pub updated_at: u64,
+    pub content_digest: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -248,6 +253,7 @@ pub struct LoadedNote {
     pub updated_at: u64,
     pub file_path: String,
     pub is_pinned: bool,
+    pub content_digest: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -899,15 +905,30 @@ fn embed_manual_title_metadata(markdown: &str, manual_title: Option<&str>) -> St
 
 pub fn derive_title(markdown: &str) -> String {
     let (_, normalized) = extract_manual_title_metadata(markdown);
-    let first_line = normalized
+    let plain_text = normalized
+        .strip_prefix(TEXT_FORMAT_MARKER)
+        .and_then(|value| {
+            value
+                .strip_prefix("\r\n")
+                .or_else(|| value.strip_prefix('\n'))
+        });
+    let first_line = plain_text
+        .unwrap_or(&normalized)
         .split('\n')
         .map(|line| line.trim())
-        .find(|line| !line.is_empty());
+        .find(|line| {
+            !line.is_empty()
+                && (plain_text.is_some()
+                    || (*line != TEXT_FORMAT_MARKER && *line != EMPTY_PARAGRAPH_MARKER))
+        });
 
     let first_line = match first_line {
         Some(line) => line,
         None => return "\u{c81c}\u{baa9} \u{c5c6}\u{c74c}".to_string(), // 제목 없음
     };
+    if plain_text.is_some() {
+        return first_line.to_string();
+    }
 
     if let Some(caps) = TOGGLE_BLOCK_RE.captures(first_line) {
         let summary = caps.get(2).map_or("", |m| m.as_str()).trim();
@@ -931,10 +952,21 @@ pub fn derive_title(markdown: &str) -> String {
 
 pub fn markdown_to_plain_text(markdown: &str) -> String {
     let (_, normalized) = extract_manual_title_metadata(markdown);
+    if let Some(text) = normalized.strip_prefix(TEXT_FORMAT_MARKER) {
+        return text
+            .strip_prefix("\r\n")
+            .or_else(|| text.strip_prefix('\n'))
+            .unwrap_or(text)
+            .to_string();
+    }
     normalized
         .split('\n')
         .map(|line| {
             let trimmed = line.trim();
+
+            if trimmed == EMPTY_PARAGRAPH_MARKER {
+                return String::new();
+            }
 
             if let Some(caps) = TOGGLE_BLOCK_RE.captures(trimmed) {
                 return caps.get(2).map_or("", |m| m.as_str()).trim().to_string();
@@ -3646,6 +3678,19 @@ fn validate_autosave_note_publish_target(
     }
 }
 
+fn verify_expected_note_digest(
+    existing: bool,
+    expected: Option<&str>,
+    actual: Option<&str>,
+) -> Result<(), String> {
+    if (existing && (expected.is_none() || actual.is_none() || expected != actual))
+        || (!existing && expected.is_some())
+    {
+        return Err("note_conflict: The note changed or was removed outside this editor. Reload it before saving or deleting.".to_string());
+    }
+    Ok(())
+}
+
 fn auto_save_markdown_note_with_faults(
     trusted_root: &TrustedLibraryRoot,
     payload: &AutoSavePayload,
@@ -3668,6 +3713,19 @@ fn auto_save_markdown_note_with_faults(
     };
 
     let _index_guard = lock_note_index();
+    // Keep the intent only to recognize an acknowledged-late retry after replay.
+    // Recovery below still validates the journal before any exception is allowed.
+    let replayed_intent = match read_optional_autosave_journal(&autosave_journal_path(trusted_root))
+    {
+        OptionalJournalState::Parsed(journal) => Some(*journal),
+        OptionalJournalState::Missing => {
+            match read_optional_autosave_journal(&autosave_journal_next_path(trusted_root)) {
+                OptionalJournalState::Parsed(journal) => Some(*journal),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
     recover_pending_note_save_unlocked(trusted_root)?;
     let index_snapshot = require_index_snapshot(trusted_root)?;
     let mut next_index = index_snapshot.index.clone();
@@ -3703,6 +3761,36 @@ fn auto_save_markdown_note_with_faults(
         .map(|path| read_existing_file_digest(trusted_root, path, "read_previous_note_digest"))
         .transpose()?
         .flatten();
+    let next_digest = sha256_hex(&note_bytes);
+    let already_committed = replayed_intent.as_ref().is_some_and(|intent| {
+        intent.phase != AutosaveTransactionPhase::Prepared
+            && intent.note_id == safe_id
+            && intent.previous_note_digest == payload.expected_content_digest
+            && intent.next_note_digest == next_digest
+            && previous_note_digest.as_deref() == Some(next_digest.as_str())
+            && intent.next_relative_path == relative_path(trusted_root.path(), &next_file_path)
+            && intent.next_index.entries.get(&safe_id) == existing_entry.as_ref()
+            && existing_entry.as_ref().is_some_and(|entry| {
+                entry.manual_title == manual_title && entry.is_pinned == payload.is_pinned
+            })
+    });
+    if already_committed {
+        let metadata = fs::metadata(&next_file_path).map_err(|error| error.to_string())?;
+        return Ok(AutoSaveResult {
+            file_path: next_file_path.to_string_lossy().to_string(),
+            note_id: safe_id,
+            created_at,
+            updated_at: system_time_to_millis(
+                metadata.modified().map_err(|error| error.to_string())?,
+            ),
+            content_digest: next_digest,
+        });
+    }
+    verify_expected_note_digest(
+        existing_entry.is_some(),
+        payload.expected_content_digest.as_deref(),
+        previous_note_digest.as_deref(),
+    )?;
     let previous_relative_path = existing_path
         .as_ref()
         .zip(previous_note_digest.as_ref())
@@ -3833,6 +3921,7 @@ fn auto_save_markdown_note_with_faults(
         note_id: safe_id,
         created_at,
         updated_at,
+        content_digest: sha256_hex(&note_bytes),
     })
 }
 
@@ -3877,6 +3966,7 @@ fn materialize_notes(index: &NoteIndex, scan: &LibraryScan) -> Vec<LoadedNote> {
             updated_at: scanned.updated_at,
             file_path: scanned.full_path.to_string_lossy().to_string(),
             is_pinned: entry.is_pinned.unwrap_or(false),
+            content_digest: sha256_hex(scanned.markdown.as_bytes()),
         });
     }
 
@@ -4143,6 +4233,7 @@ fn remove_note_from_index_if_path_unlocked(
 pub fn delete_note_file_and_index<F>(
     auto_save_dir: &Path,
     note_id: &str,
+    expected_content_digest: Option<&str>,
     delete_file: F,
 ) -> Result<bool, String>
 where
@@ -4156,6 +4247,11 @@ where
         Some(p) => p,
         None => return Ok(false),
     };
+
+    let actual_digest = read_existing_file_digest(&trusted_root, &file_path, "verify_note_delete")?;
+    if actual_digest.is_some() {
+        verify_expected_note_digest(true, expected_content_digest, actual_digest.as_deref())?;
+    }
 
     match fs::symlink_metadata(&file_path) {
         Ok(_) => {
@@ -4214,10 +4310,11 @@ pub fn read_text_file(file_path: &Path) -> Result<String, String> {
 }
 
 pub fn save_text_file(file_path: &Path, content: &str) -> Result<(), String> {
-    if let Some(parent) = file_path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    fs::write(file_path, to_platform_line_endings(content)).map_err(|e| e.to_string())
+    crate::atomic_file::write_file_atomically(
+        file_path,
+        to_platform_line_endings(content).as_bytes(),
+        "save_text_file",
+    )
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -4243,22 +4340,12 @@ fn copy_trusted_library_file(
     })?;
     validate_existing_trusted_file(src_root, src_path, "validate_migration_source")?;
     validate_note_destination_before_replace(dst_root, dst_path)?;
-    let mut dst_file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(dst_path)
-        .map_err(|error| {
-            format!(
-                "create_migration_destination failed for {}: {}",
-                dst_path.display(),
-                error
-            )
-        })?;
+    let (temp_path, mut dst_file) = unique_note_temp_file(dst_path)?;
 
     if let Err(error) = io::copy(&mut src_file, &mut dst_file).and_then(|_| dst_file.sync_all()) {
         drop(dst_file);
         return Err(cleanup_file_with_reason(
-            dst_path,
+            &temp_path,
             format!(
                 "copy_migration_file failed from {} to {}: {}",
                 src_path.display(),
@@ -4267,6 +4354,14 @@ fn copy_trusted_library_file(
             ),
         ));
     }
+    drop(dst_file);
+    if let Err(error) = move_file_without_replace(&temp_path, dst_path) {
+        return Err(cleanup_file_with_reason(
+            &temp_path,
+            format!("publish_migration_file: {error}"),
+        ));
+    }
+    sync_parent_directory(dst_path, "publish_migration_file")?;
     Ok(())
 }
 
@@ -4274,6 +4369,14 @@ fn copy_trusted_library_file(
 /// existing destination notes or replacing the destination index.
 /// Preserves relative directory structure and creates empty folders.
 pub fn migrate_notes(src_dir: &Path, dst_dir: &Path) -> Result<MigrationResult, String> {
+    migrate_notes_with_faults(src_dir, dst_dir, &NoopAutosaveFaultInjector)
+}
+
+fn migrate_notes_with_faults(
+    src_dir: &Path,
+    dst_dir: &Path,
+    faults: &impl AutosaveFaultInjector,
+) -> Result<MigrationResult, String> {
     let src_root = resolve_trusted_library_root(src_dir)
         .map_err(|error| error.display("validate_source_library_root"))?;
     let dst_root = resolve_trusted_library_root(dst_dir)
@@ -4301,7 +4404,7 @@ pub fn migrate_notes(src_dir: &Path, dst_dir: &Path) -> Result<MigrationResult, 
         recover_pending_note_save_unlocked(&dst_root)?;
     }
     let src_snapshot = require_index_snapshot(&src_root)?;
-    let dst_snapshot = require_index_snapshot(&dst_root)?;
+    let mut dst_snapshot = require_index_snapshot(&dst_root)?;
     let src_scan = scan_library_tree(&ProductionFileSystem, &src_root, skip_src_subtree, true);
     let dst_scan = scan_library_tree(&ProductionFileSystem, &dst_root, None, true);
 
@@ -4318,6 +4421,11 @@ pub fn migrate_notes(src_dir: &Path, dst_dir: &Path) -> Result<MigrationResult, 
     let (src_index, src_index_changed) = reconcile_index_with_scan(&src_snapshot.index, &src_scan);
     let (mut dst_index, mut dst_index_changed) =
         reconcile_index_with_scan(&dst_snapshot.index, &dst_scan);
+    if dst_index_changed {
+        write_index_from_snapshot(&dst_root, &dst_snapshot, &dst_index)
+            .map_err(index_write_failure_to_string)?;
+        dst_snapshot = require_index_snapshot(&dst_root)?;
+    }
 
     for folder in &src_scan.folders {
         let relative_folder = normalize_library_relative_path(dst_root.path(), folder)
@@ -4383,9 +4491,6 @@ pub fn migrate_notes(src_dir: &Path, dst_dir: &Path) -> Result<MigrationResult, 
             ensure_library_subdirectory(&dst_root, parent_relative)?;
         }
 
-        copy_trusted_library_file(&src_root, &src_file.full_path, &dst_root, &final_path)?;
-        files_copied += 1;
-
         let final_rel = relative_path(dst_root.path(), &final_path);
         let final_note_id = if existing_dst_ids.contains(src_note_id) {
             ensure_unique_note_id(&existing_dst_ids, &final_rel)
@@ -4402,15 +4507,23 @@ pub fn migrate_notes(src_dir: &Path, dst_dir: &Path) -> Result<MigrationResult, 
                 is_pinned: src_entry.is_pinned,
             },
         );
+        let bytes = read_trusted_file_bytes(&src_root, &src_file.full_path, "read_migration_note")?;
+        publish_migrated_note(
+            &dst_root,
+            &dst_snapshot,
+            &dst_index,
+            &final_note_id,
+            &final_path,
+            &bytes,
+            faults,
+        )?;
+        dst_snapshot = require_index_snapshot(&dst_root)?;
+        files_copied += 1;
         existing_dst_paths.insert(final_rel);
         existing_dst_ids.insert(final_note_id);
         dst_index_changed = true;
     }
 
-    if dst_index_changed {
-        write_index_from_snapshot(&dst_root, &dst_snapshot, &dst_index)
-            .map_err(index_write_failure_to_string)?;
-    }
     if src_index_changed {
         write_index_from_snapshot(&src_root, &src_snapshot, &src_index)
             .map_err(index_write_failure_to_string)?;
@@ -4420,6 +4533,60 @@ pub fn migrate_notes(src_dir: &Path, dst_dir: &Path) -> Result<MigrationResult, 
         files_copied,
         index_copied: dst_index_changed,
     })
+}
+
+/// The existing autosave journal binds copied bytes to the original note ID.
+/// A retry recovers this intent before scanning, so it never imports an orphan
+/// copy under a path-derived ID or creates a second suffixed copy.
+fn publish_migrated_note(
+    root: &TrustedLibraryRoot,
+    snapshot: &IndexSnapshot,
+    next_index: &NoteIndex,
+    note_id: &str,
+    destination: &Path,
+    bytes: &[u8],
+    faults: &impl AutosaveFaultInjector,
+) -> Result<(), String> {
+    let operation_id = next_autosave_operation_id();
+    let note_temp = note_temp_path_for_operation(destination, &operation_id)?;
+    let index_temp = index_temp_path_for_operation(root, &operation_id);
+    let mut journal = AutosaveTransactionJournal {
+        version: AUTOSAVE_TRANSACTION_VERSION,
+        operation_id,
+        phase: AutosaveTransactionPhase::Prepared,
+        note_id: note_id.to_string(),
+        previous_relative_path: None,
+        next_relative_path: relative_path(root.path(), destination),
+        note_temp_relative_path: relative_path(root.path(), &note_temp),
+        index_temp_relative_path: relative_path(root.path(), &index_temp),
+        expected_index_digest: snapshot.original_bytes.as_deref().map(sha256_hex),
+        next_index: next_index.clone(),
+        next_note_digest: sha256_hex(bytes),
+        previous_note_digest: None,
+    };
+    persist_autosave_journal(root, &journal, faults)?;
+    create_synced_temp_file_with_faults(
+        &note_temp,
+        bytes,
+        "stage_migration_note",
+        AutosaveFaultPoint::NoteTempCreate,
+        AutosaveFaultPoint::NoteTempWrite,
+        AutosaveFaultPoint::NoteTempSync,
+        faults,
+    )?;
+    let index_bytes = serde_json::to_vec_pretty(next_index).map_err(|error| error.to_string())?;
+    create_synced_temp_file_with_faults(
+        &index_temp,
+        &index_bytes,
+        "stage_migration_index",
+        AutosaveFaultPoint::IndexTempCreate,
+        AutosaveFaultPoint::IndexTempWrite,
+        AutosaveFaultPoint::IndexTempSync,
+        faults,
+    )?;
+    journal.phase = AutosaveTransactionPhase::Staged;
+    persist_autosave_journal(root, &journal, faults)?;
+    recover_pending_note_save_unlocked_with_faults(root, faults)
 }
 
 pub fn migrate_calendar_file(src_dir: &Path, dst_dir: &Path) -> Result<bool, String> {
@@ -4491,6 +4658,204 @@ pub fn title_from_filename(file_path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Legacy transaction fixtures model a client that loaded the current note.
+    // Conflict tests below call super directly with an explicitly stale token.
+    fn current_payload(root: &Path, payload: &AutoSavePayload) -> Result<AutoSavePayload, String> {
+        let root = TrustedLibraryRoot::open(root)?;
+        let _guard = lock_note_index();
+        recover_pending_note_save_unlocked(&root)?;
+        let mut payload = payload.clone();
+        if payload.expected_content_digest.is_none() {
+            if let Some(entry) = require_index_snapshot(&root)?
+                .index
+                .entries
+                .get(&payload.note_id)
+            {
+                let path = validated_library_file_path(&root, &entry.relative_path)?;
+                payload.expected_content_digest =
+                    read_existing_file_digest(&root, &path, "fixture_snapshot")?;
+            }
+        }
+        Ok(payload)
+    }
+
+    fn auto_save_markdown_note(
+        root: &Path,
+        payload: &AutoSavePayload,
+    ) -> Result<AutoSaveResult, String> {
+        super::auto_save_markdown_note(root, &current_payload(root, payload)?)
+    }
+
+    fn auto_save_markdown_note_with_faults(
+        root: &TrustedLibraryRoot,
+        payload: &AutoSavePayload,
+        faults: &impl AutosaveFaultInjector,
+    ) -> Result<AutoSaveResult, String> {
+        super::auto_save_markdown_note_with_faults(
+            root,
+            &current_payload(root.path(), payload)?,
+            faults,
+        )
+    }
+
+    fn delete_note_file_and_index<F>(
+        root: &Path,
+        note_id: &str,
+        delete_file: F,
+    ) -> Result<bool, String>
+    where
+        F: FnOnce(&Path) -> Result<(), String>,
+    {
+        let digest = resolve_note_file_path(root, note_id)?
+            .and_then(|path| fs::read(path).ok())
+            .map(|bytes| sha256_hex(&bytes));
+        super::delete_note_file_and_index(root, note_id, digest.as_deref(), delete_file)
+    }
+
+    #[test]
+    fn autosave_conflict_preserves_external_bytes_and_does_not_create_a_journal() {
+        let root = make_temp_dir("stale-note-content");
+        let mut payload = autosave_payload("stable-id", "Title", "Original", None);
+        let saved = super::auto_save_markdown_note(&root, &payload).unwrap();
+        let loaded = load_markdown_notes(&root).unwrap().remove(0);
+        assert_eq!(saved.content_digest, loaded.content_digest);
+        assert_eq!(
+            saved.content_digest,
+            sha256_hex(&fs::read(&saved.file_path).unwrap())
+        );
+        payload.expected_content_digest = Some(loaded.content_digest);
+        payload.content = "Stale editor change".to_string();
+        payload.is_pinned = Some(false);
+        fs::write(&saved.file_path, "External edit").unwrap();
+        let before_index = fs::read(root.join(INDEX_FILENAME)).unwrap();
+        let error = super::auto_save_markdown_note(&root, &payload).unwrap_err();
+        assert!(error.starts_with("note_conflict:"));
+        assert_eq!(
+            fs::read_to_string(&saved.file_path).unwrap(),
+            "External edit"
+        );
+        assert_eq!(fs::read(root.join(INDEX_FILENAME)).unwrap(), before_index);
+        assert!(!root.join(AUTOSAVE_JOURNAL_FILENAME).exists());
+        cleanup_temp_dir(&root);
+    }
+
+    #[test]
+    fn autosave_requires_the_loaded_digest_and_returns_the_next_digest() {
+        let root = make_temp_dir("note-version-token");
+        let mut payload = autosave_payload("stable-id", "Manual title", "First\nline", None);
+        let first = super::auto_save_markdown_note(&root, &payload).unwrap();
+        payload.content = "Second\nline".to_string();
+        assert!(super::auto_save_markdown_note(&root, &payload)
+            .unwrap_err()
+            .starts_with("note_conflict:"));
+        payload.expected_content_digest = Some(first.content_digest);
+        let second = super::auto_save_markdown_note(&root, &payload).unwrap();
+        assert_eq!(
+            second.content_digest,
+            sha256_hex(&fs::read(&second.file_path).unwrap())
+        );
+        assert_eq!(
+            load_markdown_notes(&root).unwrap()[0].content_digest,
+            second.content_digest
+        );
+        fs::remove_file(&second.file_path).unwrap();
+        payload.expected_content_digest = Some(second.content_digest);
+        assert!(super::auto_save_markdown_note(&root, &payload)
+            .unwrap_err()
+            .starts_with("note_conflict:"));
+        cleanup_temp_dir(&root);
+    }
+
+    #[test]
+    fn autosave_retry_recognizes_its_replayed_commit_without_weakening_conflicts() {
+        let root = make_temp_dir("retry-content-digest");
+        let mut payload = autosave_payload("stable-id", "Original", "Original", None);
+        let first = super::auto_save_markdown_note(&root, &payload).unwrap();
+        payload.expected_content_digest = Some(first.content_digest);
+        payload.content = "Changed bytes".to_string();
+        payload.title = "Renamed".to_string();
+        let trusted_root = TrustedLibraryRoot::open(&root).unwrap();
+        let faults = FailOnceAutosaveFaultInjector::fail_on(AutosaveFaultPoint::IndexPublish, 1);
+        assert!(
+            super::auto_save_markdown_note_with_faults(&trusted_root, &payload, &faults).is_err()
+        );
+        let recovered = super::auto_save_markdown_note(&root, &payload).unwrap();
+        assert_eq!(count_markdown_files_recursively(&root).unwrap(), 1);
+        assert_eq!(
+            recovered.content_digest,
+            sha256_hex(&fs::read(&recovered.file_path).unwrap())
+        );
+        // With no pending intent, the old token remains invalid.
+        payload.content = "A stale later edit".to_string();
+        assert!(super::auto_save_markdown_note(&root, &payload)
+            .unwrap_err()
+            .starts_with("note_conflict:"));
+        cleanup_temp_dir(&root);
+    }
+
+    #[test]
+    fn delete_rejects_a_stale_or_missing_digest_without_trashing_the_file() {
+        let root = make_temp_dir("delete-note-conflict");
+        let payload = autosave_payload("stable-id", "Title", "Original", None);
+        let saved = super::auto_save_markdown_note(&root, &payload).unwrap();
+        fs::write(&saved.file_path, "External edit").unwrap();
+        for expected in [None, Some(saved.content_digest.as_str())] {
+            let result = super::delete_note_file_and_index(&root, "stable-id", expected, |_| {
+                panic!("conflicting file must not be trashed")
+            });
+            assert!(result.unwrap_err().starts_with("note_conflict:"));
+        }
+        assert_eq!(
+            fs::read_to_string(&saved.file_path).unwrap(),
+            "External edit"
+        );
+        assert!(read_index(&root).unwrap().entries.contains_key("stable-id"));
+        cleanup_temp_dir(&root);
+    }
+
+    #[test]
+    fn migration_retry_recovers_the_original_id_after_note_publication() {
+        for point in [
+            AutosaveFaultPoint::NotePublishReported,
+            AutosaveFaultPoint::IndexPublish,
+            AutosaveFaultPoint::IndexPublishReported,
+        ] {
+            let src = make_temp_dir(&format!("migration-retry-src-{point:?}"));
+            let dst = make_temp_dir(&format!("migration-retry-dst-{point:?}"));
+            let payload = autosave_payload(
+                "source-stable-id",
+                "Manual title",
+                "Source bytes",
+                Some("folder"),
+            );
+            let original = super::auto_save_markdown_note(&src, &payload).unwrap();
+            let injector = FailOnceAutosaveFaultInjector::fail_on(point, 1);
+            assert!(migrate_notes_with_faults(&src, &dst, &injector).is_err());
+            migrate_notes(&src, &dst).unwrap();
+            let loaded = load_markdown_notes(&dst).unwrap();
+            assert_eq!(loaded.len(), 1);
+            assert_eq!(loaded[0].note_id, "source-stable-id");
+            assert_eq!(loaded[0].created_at, original.created_at);
+            assert_eq!(loaded[0].content_digest, original.content_digest);
+            assert!(loaded[0].is_pinned);
+            assert_eq!(loaded[0].title, "Manual title");
+            assert_eq!(count_markdown_files_recursively(&dst).unwrap(), 1);
+            assert_eq!(count_autosave_artifacts_recursively(&dst).unwrap(), 0);
+            cleanup_temp_dir(&src);
+            cleanup_temp_dir(&dst);
+        }
+    }
+
+    #[test]
+    fn internal_text_markers_are_hidden_from_titles_and_previews() {
+        let text = format!("{TEXT_FORMAT_MARKER}\n# literal\n- [x] text\n");
+        assert_eq!(derive_title(&text), "# literal");
+        assert_eq!(markdown_to_plain_text(&text), "# literal\n- [x] text\n");
+        let markdown = format!("{EMPTY_PARAGRAPH_MARKER}\n# Heading\n{EMPTY_PARAGRAPH_MARKER}");
+        assert_eq!(derive_title(&markdown), "Heading");
+        assert!(!markdown_to_plain_text(&markdown).contains(EMPTY_PARAGRAPH_MARKER));
+    }
 
     fn folder_fault(point: FolderFaultPoint) -> impl Fn(FolderFaultPoint) -> Result<(), String> {
         move |current| {
@@ -5152,6 +5517,7 @@ mod tests {
         folder_path: Option<&str>,
     ) -> AutoSavePayload {
         AutoSavePayload {
+            expected_content_digest: None,
             note_id: note_id.to_string(),
             title: title.to_string(),
             content: content.to_string(),
@@ -6287,6 +6653,7 @@ mod tests {
             auto_save_markdown_note(
                 &dir,
                 &AutoSavePayload {
+                    expected_content_digest: None,
                     note_id: "note-1".to_string(),
                     title: "Alpha".to_string(),
                     content: "# Alpha".to_string(),
@@ -6320,6 +6687,7 @@ mod tests {
             auto_save_markdown_note(
                 &dir,
                 &AutoSavePayload {
+                    expected_content_digest: None,
                     note_id: "note-1".to_string(),
                     title: "Alpha".to_string(),
                     content: "# Alpha".to_string(),
@@ -6331,6 +6699,7 @@ mod tests {
             auto_save_markdown_note(
                 &dir,
                 &AutoSavePayload {
+                    expected_content_digest: None,
                     note_id: "note-2".to_string(),
                     title: "Beta".to_string(),
                     content: "# Beta".to_string(),
@@ -6363,6 +6732,7 @@ mod tests {
             auto_save_markdown_note(
                 &dir,
                 &AutoSavePayload {
+                    expected_content_digest: None,
                     note_id: "note-1".to_string(),
                     title: "Project Launch".to_string(),
                     content: "Body first line\nSecond line".to_string(),
@@ -6404,6 +6774,7 @@ mod tests {
             auto_save_markdown_note(
                 &dir,
                 &AutoSavePayload {
+                    expected_content_digest: None,
                     note_id: "note-1".to_string(),
                     title: "Alpha".to_string(),
                     content: "# Alpha".to_string(),
@@ -6433,6 +6804,7 @@ mod tests {
             auto_save_markdown_note(
                 &dir,
                 &AutoSavePayload {
+                    expected_content_digest: None,
                     note_id: "note-1".to_string(),
                     title: "Alpha".to_string(),
                     content: "# Alpha".to_string(),
@@ -6464,6 +6836,7 @@ mod tests {
             auto_save_markdown_note(
                 &dir,
                 &AutoSavePayload {
+                    expected_content_digest: None,
                     note_id: "note-1".to_string(),
                     title: "Alpha".to_string(),
                     content: "# Alpha".to_string(),
@@ -6496,6 +6869,7 @@ mod tests {
             auto_save_markdown_note(
                 &dir,
                 &AutoSavePayload {
+                    expected_content_digest: None,
                     note_id: "note-1".to_string(),
                     title: "Alpha".to_string(),
                     content: "# Alpha".to_string(),
@@ -6509,17 +6883,8 @@ mod tests {
                 .ok_or_else(|| "missing note path".to_string())?;
             fs::remove_file(&path).map_err(|e| e.to_string())?;
 
-            auto_save_markdown_note(
-                &dir,
-                &AutoSavePayload {
-                    note_id: "note-1".to_string(),
-                    title: "Alpha".to_string(),
-                    content: "# Alpha recreated".to_string(),
-                    folder_path: Some("alpha".to_string()),
-                    is_title_manual: Some(true),
-                    is_pinned: Some(false),
-                },
-            )?;
+            // An external writer recreates the path while index cleanup waits.
+            fs::write(&path, "# Alpha recreated").map_err(|error| error.to_string())?;
 
             let result = remove_note_from_index_if_path(&dir, "note-1", &path);
             assert!(result.is_err());
@@ -6541,6 +6906,7 @@ mod tests {
             auto_save_markdown_note(
                 &dir,
                 &AutoSavePayload {
+                    expected_content_digest: None,
                     note_id: "note-1".to_string(),
                     title: "Alpha".to_string(),
                     content: "# Alpha".to_string(),
@@ -6574,6 +6940,7 @@ mod tests {
             auto_save_markdown_note(
                 &dir,
                 &AutoSavePayload {
+                    expected_content_digest: None,
                     note_id: "note-1".to_string(),
                     title: "Alpha".to_string(),
                     content: "# Alpha".to_string(),
@@ -6606,6 +6973,7 @@ mod tests {
             auto_save_markdown_note(
                 &dir,
                 &AutoSavePayload {
+                    expected_content_digest: None,
                     note_id: "note-1".to_string(),
                     title: "Alpha".to_string(),
                     content: "# Alpha".to_string(),
@@ -6640,6 +7008,7 @@ mod tests {
             auto_save_markdown_note(
                 &dir,
                 &AutoSavePayload {
+                    expected_content_digest: None,
                     note_id: "note-1".to_string(),
                     title: "Alpha".to_string(),
                     content: "# Alpha".to_string(),
@@ -6675,6 +7044,7 @@ mod tests {
             auto_save_markdown_note(
                 &dir,
                 &AutoSavePayload {
+                    expected_content_digest: None,
                     note_id: "note-1".to_string(),
                     title: "Alpha".to_string(),
                     content: "# Alpha".to_string(),
@@ -6690,6 +7060,7 @@ mod tests {
             auto_save_markdown_note(
                 &dir,
                 &AutoSavePayload {
+                    expected_content_digest: None,
                     note_id: "note-1".to_string(),
                     title: "Alpha".to_string(),
                     content: "# Alpha moved".to_string(),
@@ -6766,6 +7137,7 @@ mod tests {
             auto_save_markdown_note(
                 &dst,
                 &AutoSavePayload {
+                    expected_content_digest: None,
                     note_id: "cloud-note".to_string(),
                     title: "Shared".to_string(),
                     content: "# Cloud version".to_string(),
@@ -6777,6 +7149,7 @@ mod tests {
             auto_save_markdown_note(
                 &src,
                 &AutoSavePayload {
+                    expected_content_digest: None,
                     note_id: "local-note".to_string(),
                     title: "Shared".to_string(),
                     content: "# Local version".to_string(),
@@ -6822,6 +7195,7 @@ mod tests {
             auto_save_markdown_note(
                 &src,
                 &AutoSavePayload {
+                    expected_content_digest: None,
                     note_id: "local-note".to_string(),
                     title: "Local Root".to_string(),
                     content: "# Local root version".to_string(),
@@ -6833,6 +7207,7 @@ mod tests {
             auto_save_markdown_note(
                 &dst,
                 &AutoSavePayload {
+                    expected_content_digest: None,
                     note_id: "cloud-note".to_string(),
                     title: "Cloud Existing".to_string(),
                     content: "# Cloud version".to_string(),
@@ -6949,6 +7324,7 @@ mod tests {
             auto_save_markdown_note(
                 &dir,
                 &AutoSavePayload {
+                    expected_content_digest: None,
                     note_id: "nested-note".to_string(),
                     title: "Nested".to_string(),
                     content: "# Nested".to_string(),
@@ -7021,6 +7397,7 @@ mod tests {
             let saved = auto_save_markdown_note(
                 &dir,
                 &AutoSavePayload {
+                    expected_content_digest: None,
                     note_id: "linked-delete".to_string(),
                     title: "Linked Delete".to_string(),
                     content: "# Internal".to_string(),
@@ -7155,6 +7532,7 @@ mod tests {
             auto_save_markdown_note(
                 &dir,
                 &AutoSavePayload {
+                    expected_content_digest: None,
                     note_id: "formatted-note".to_string(),
                     title: "Heading".to_string(),
                     content: markdown.to_string(),
@@ -7183,6 +7561,7 @@ mod tests {
             auto_save_markdown_note(
                 &dir,
                 &AutoSavePayload {
+                    expected_content_digest: None,
                     note_id: "root-note".to_string(),
                     title: "Root".to_string(),
                     content: "# Root".to_string(),
@@ -7194,6 +7573,7 @@ mod tests {
             auto_save_markdown_note(
                 &dir,
                 &AutoSavePayload {
+                    expected_content_digest: None,
                     note_id: "nested-note".to_string(),
                     title: "Nested".to_string(),
                     content: "# Nested".to_string(),
@@ -7275,6 +7655,7 @@ mod tests {
             auto_save_markdown_note(
                 &dir,
                 &AutoSavePayload {
+                    expected_content_digest: None,
                     note_id: "stable-note".to_string(),
                     title: "Stable".to_string(),
                     content: "# Stable".to_string(),
@@ -7333,6 +7714,7 @@ mod tests {
             auto_save_markdown_note(
                 &dir,
                 &AutoSavePayload {
+                    expected_content_digest: None,
                     note_id: "stable-note".to_string(),
                     title: "Stable".to_string(),
                     content: "# Stable".to_string(),
@@ -7433,6 +7815,7 @@ mod tests {
             let save_error = auto_save_markdown_note(
                 &dir,
                 &AutoSavePayload {
+                    expected_content_digest: None,
                     note_id: "must-not-save".to_string(),
                     title: "Blocked".to_string(),
                     content: "# Blocked".to_string(),
@@ -7461,6 +7844,7 @@ mod tests {
             auto_save_markdown_note(
                 &dir,
                 &AutoSavePayload {
+                    expected_content_digest: None,
                     note_id: "survivor".to_string(),
                     title: "Survivor title".to_string(),
                     content: "# Survivor".to_string(),
@@ -7472,6 +7856,7 @@ mod tests {
             auto_save_markdown_note(
                 &dir,
                 &AutoSavePayload {
+                    expected_content_digest: None,
                     note_id: "deleted".to_string(),
                     title: "Deleted".to_string(),
                     content: "# Deleted".to_string(),
@@ -7606,6 +7991,7 @@ mod tests {
             let save_error = auto_save_markdown_note(
                 &dir,
                 &AutoSavePayload {
+                    expected_content_digest: None,
                     note_id: "escape-note".to_string(),
                     title: "Blocked".to_string(),
                     content: "# Blocked".to_string(),
@@ -7665,6 +8051,7 @@ mod tests {
             let save_error = auto_save_markdown_note(
                 &root,
                 &AutoSavePayload {
+                    expected_content_digest: None,
                     note_id: "blocked".to_string(),
                     title: "Blocked".to_string(),
                     content: "# Blocked".to_string(),
@@ -7804,6 +8191,7 @@ mod tests {
             let save_error = auto_save_markdown_note(
                 &dir,
                 &AutoSavePayload {
+                    expected_content_digest: None,
                     note_id: "blocked".to_string(),
                     title: "Blocked".to_string(),
                     content: "# Blocked".to_string(),
@@ -7861,6 +8249,7 @@ mod tests {
             let error = auto_save_markdown_note(
                 &dir,
                 &AutoSavePayload {
+                    expected_content_digest: None,
                     note_id: "linked-note".to_string(),
                     title: "Blocked".to_string(),
                     content: "# Blocked".to_string(),
@@ -7996,6 +8385,7 @@ mod tests {
             let save_error = auto_save_markdown_note(
                 &root_link,
                 &AutoSavePayload {
+                    expected_content_digest: None,
                     note_id: "blocked".to_string(),
                     title: "Blocked".to_string(),
                     content: "# Blocked".to_string(),

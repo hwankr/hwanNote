@@ -108,6 +108,7 @@ export function mergeRecoveredNoteTabs({
       isDirty: true,
       lastSavedAt: 0,
       sourceFilePath: undefined,
+      contentDigest: undefined,
       persistence: "transient",
       savedSnapshot: null
     };

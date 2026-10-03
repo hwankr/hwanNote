@@ -4,10 +4,30 @@ import MarkdownIt from "markdown-it";
 type MarkdownToken = ReturnType<MarkdownIt["parse"]>[number];
 type MarkdownMark = NonNullable<JSONContent["marks"]>[number];
 
+const EMPTY_PARAGRAPH_MARKER = "<!-- hwan-note:empty-paragraph:v1 -->";
+const PLAIN_TEXT_FORMAT_MARKER = "<!-- hwan-note:format:txt:v1 -->";
+
 const markdownParser = new MarkdownIt({
   html: false,
   linkify: false,
   typographer: false
+});
+
+// A reserved comment preserves editor-created empty paragraphs without enabling
+// arbitrary HTML. Ordinary blank lines still follow standard Markdown rules.
+markdownParser.block.ruler.before("paragraph", "hwan_empty_paragraph", (state, startLine, _endLine, silent) => {
+  if (state.sCount[startLine] - state.blkIndent >= 4) {
+    return false;
+  }
+  const start = state.bMarks[startLine] + state.tShift[startLine];
+  if (state.src.slice(start, state.eMarks[startLine]) !== EMPTY_PARAGRAPH_MARKER) {
+    return false;
+  }
+  if (!silent) {
+    state.push("hwan_empty_paragraph", "p", 0);
+    state.line = startLine + 1;
+  }
+  return true;
 });
 
 // Recognize only source markup; escaped text and entities must remain literal.
@@ -159,8 +179,8 @@ function parseInlineTokens(tokens: MarkdownToken[], parseHtmlBreaks = false): JS
   return content;
 }
 
-function parseInlineMarkdown(markdown: string, parseHtmlBreaks = false) {
-  const token = markdownParser.parseInline(markdown, {})[0];
+function parseInlineMarkdown(markdown: string, parseHtmlBreaks = false, env: Record<string, unknown> = {}) {
+  const token = markdownParser.parseInline(markdown, env)[0];
   return parseInlineTokens(token?.children ?? [], parseHtmlBreaks);
 }
 
@@ -204,7 +224,8 @@ function parseStandardMarkdown(markdown: string): JSONContent[] {
     close();
   };
 
-  const tokens = markdownParser.parse(markdown, {});
+  const env: Record<string, unknown> = {};
+  const tokens = markdownParser.parse(markdown, env);
   for (const token of tokens) {
     switch (token.type) {
       case "paragraph_open":
@@ -279,16 +300,34 @@ function parseStandardMarkdown(markdown: string): JSONContent[] {
         closeTableCell();
         break;
 
-      case "inline":
+      case "hwan_empty_paragraph":
+        appendChild(current(), { type: "paragraph" });
+        break;
+
+      case "inline": {
         current().content ??= [];
         const parseHtmlBreaks =
           current().type === "heading" ||
           stack[stack.length - 2]?.type === "tableHeader" ||
           stack[stack.length - 2]?.type === "tableCell";
-        current().content?.push(
-          ...parseInlineTokens(token.children ?? [], parseHtmlBreaks)
-        );
+        const item = stack[stack.length - 2];
+        const list = stack[stack.length - 3];
+        // Check source markup before markdown-it resolves escapes, entities,
+        // emphasis or code. A literal \[x\] must never become a checkbox.
+        const taskMarker = current().type === "paragraph" &&
+          item?.type === "listItem" && item.content?.[0] === current() &&
+          list?.type === "bulletList"
+          ? /^\[([ xX])\](?:[ \t]+|$)/.exec(token.content)
+          : null;
+        if (taskMarker) {
+          item.type = "taskItem";
+          item.attrs = { checked: taskMarker[1].toLowerCase() === "x" };
+          current().content?.push(...parseInlineMarkdown(token.content.slice(taskMarker[0].length), parseHtmlBreaks, env));
+        } else {
+          current().content?.push(...parseInlineTokens(token.children ?? [], parseHtmlBreaks));
+        }
         break;
+      }
 
       case "fence":
       case "code_block": {
@@ -327,45 +366,6 @@ function parseStandardMarkdown(markdown: string): JSONContent[] {
   return ensureRequiredBlockContent(normalizeTaskStructure(root)).content ?? [];
 }
 
-function stripTaskMarker(item: JSONContent) {
-  if (item.type !== "listItem" || item.content?.[0]?.type !== "paragraph") {
-    return null;
-  }
-
-  const paragraph = item.content[0];
-  const firstTextIndex = paragraph.content?.findIndex((node) => node.type === "text") ?? -1;
-  if (firstTextIndex < 0 || !paragraph.content) {
-    return null;
-  }
-
-  const firstText = paragraph.content[firstTextIndex];
-  const match = /^\[([ xX])\](?:[ \t]+|$)/.exec(firstText.text ?? "");
-  if (!match) {
-    return null;
-  }
-
-  const nextParagraphContent = [...paragraph.content];
-  const remainingText = (firstText.text ?? "").slice(match[0].length);
-  if (remainingText) {
-    nextParagraphContent[firstTextIndex] = { ...firstText, text: remainingText };
-  } else {
-    nextParagraphContent.splice(firstTextIndex, 1);
-  }
-
-  return {
-    checked: match[1].toLowerCase() === "x",
-    item: {
-      ...item,
-      type: "taskItem",
-      attrs: { checked: match[1].toLowerCase() === "x" },
-      content: [
-        { ...paragraph, content: nextParagraphContent },
-        ...(item.content.slice(1) ?? [])
-      ]
-    } satisfies JSONContent
-  };
-}
-
 function normalizeTaskStructure(node: JSONContent): JSONContent {
   const normalizeChildren = (children: JSONContent[]): JSONContent[] =>
     children.flatMap((child) => {
@@ -376,14 +376,12 @@ function normalizeTaskStructure(node: JSONContent): JSONContent {
 
       const groups: Array<{ task: boolean; items: JSONContent[] }> = [];
       normalizedChild.content.forEach((item) => {
-        const parsedTask = stripTaskMarker(item);
-        const task = parsedTask !== null;
-        const normalizedItem = parsedTask?.item ?? item;
+        const task = item.type === "taskItem";
         const previous = groups[groups.length - 1];
         if (previous?.task === task) {
-          previous.items.push(normalizedItem);
+          previous.items.push(item);
         } else {
-          groups.push({ task, items: [normalizedItem] });
+          groups.push({ task, items: [item] });
         }
       });
 
@@ -662,7 +660,11 @@ function serializeList(node: JSONContent) {
           ? serializeBlock(first)
           : "";
       const firstLines = firstValue.split("\n");
-      const continuation = " ".repeat(marker.length + 1);
+      // The checkbox is inline text in Markdown, not part of the list marker.
+      // Indenting task children by all six characters turns later paragraphs
+      // into indented code blocks instead of content within the task item.
+      const childIndent = node.type === "taskList" ? 2 : marker.length + 1;
+      const continuation = " ".repeat(childIndent);
       const lines = [
         firstLines[0] ? `${marker} ${firstLines[0]}` : marker,
         ...firstLines.slice(1).map((line) => `${continuation}${line}`)
@@ -673,7 +675,6 @@ function serializeList(node: JSONContent) {
         if (!serialized) {
           continue;
         }
-        const childIndent = marker.length + 1;
         if (["bulletList", "orderedList", "taskList"].includes(child.type ?? "")) {
           lines.push(indent(serialized, childIndent));
         } else {
@@ -726,7 +727,9 @@ function serializeToggle(node: JSONContent) {
 function serializeBlock(node: JSONContent): string {
   switch (node.type) {
     case "paragraph":
-      return escapeParagraphOpening(serializeInline(node.content ?? []));
+      return node.content?.length
+        ? escapeParagraphOpening(serializeInline(node.content))
+        : EMPTY_PARAGRAPH_MARKER;
     case "heading": {
       const level = Math.max(1, Math.min(6, Number(node.attrs?.level) || 1));
       return `${"#".repeat(level)} ${serializeInline(node.content ?? [], "<br>")}`.trimEnd();
@@ -775,6 +778,29 @@ export function plainTextToTiptapDocument(text: string): JSONContent {
       ...(line ? { content: [{ type: "text", text: line }] } : {})
     }))
   };
+}
+
+export interface StoredNoteDocument {
+  fileFormat: "md" | "txt";
+  content: JSONContent;
+  plainText: string;
+}
+
+/** Library-only format metadata; external TXT files remain plain text. */
+export function serializePlainTextNote(text: string) {
+  return `${PLAIN_TEXT_FORMAT_MARKER}\n${text.replace(/\r\n?/g, "\n")}`;
+}
+
+/** Rust removes its manual-title metadata before returning the stored body. */
+export function parseStoredNoteDocument(raw: string): StoredNoteDocument {
+  const normalized = raw.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
+  const prefix = `${PLAIN_TEXT_FORMAT_MARKER}\n`;
+  if (normalized.startsWith(prefix)) {
+    const plainText = normalized.slice(prefix.length);
+    return { fileFormat: "txt", content: plainTextToTiptapDocument(plainText), plainText };
+  }
+  const content = markdownToTiptapDocument(normalized);
+  return { fileFormat: "md", content, plainText: tiptapDocumentToPlainText(content) };
 }
 
 export function tiptapDocumentToPlainText(document: JSONContent) {

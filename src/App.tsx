@@ -44,10 +44,10 @@ import { mergeReloadedNoteTabs } from "./lib/noteReload";
 import { canRunNoteLibraryMutation } from "./lib/noteMutationGuard";
 import {
   hasRichTextFormatting,
-  markdownToTiptapDocument,
+  parseStoredNoteDocument,
   plainTextToTiptapDocument,
-  tiptapDocumentToMarkdown,
-  tiptapDocumentToPlainText
+  serializePlainTextNote,
+  tiptapDocumentToMarkdown
 } from "./lib/markdown";
 import {
   readTabSessionFromStorage,
@@ -98,7 +98,7 @@ type NoteLoadRecoveryState = Pick<
   "loadState" | "issues" | "indexSourcePath" | "indexBackupPath"
 >;
 
-function toNoteLoadRecoveryState(result: NoteLoadResult): NoteLoadRecoveryState {
+function toNoteLoadRecoveryState(result: NoteLoadRecoveryState): NoteLoadRecoveryState {
   return {
     loadState: result.loadState,
     issues: result.issues,
@@ -130,7 +130,7 @@ function toStoredNoteDocument(
   fallbackTitle: string
 ) {
   if (tab.fileFormat === "txt" && !tab.sourceFilePath) {
-    return `${tab.plainText.trimEnd()}\n`;
+    return serializePlainTextNote(tab.plainText);
   }
   return toMarkdownDocument(tab.title, tab.content, fallbackTitle);
 }
@@ -332,6 +332,8 @@ export default function App() {
   });
   const [isMaximized, setIsMaximized] = useState(false);
   const exitUiLockedRef = useRef(false);
+  const storageTransitionRef = useRef(false);
+  const conflictReloadPendingRef = useRef(false);
   const editorWorkspaceRef = useRef<HTMLElement | null>(null);
   const [splitDropTarget, setSplitDropTarget] = useState<PaneId | null>(null);
   const splitResizeRef = useRef<{
@@ -362,7 +364,7 @@ export default function App() {
   const tRef = useRef(t);
   tRef.current = t;
 
-  const updateNoteLoadRecovery = useCallback((result: NoteLoadResult | null) => {
+  const updateNoteLoadRecovery = useCallback((result: NoteLoadRecoveryState | null) => {
     const recoveryState = result ? toNoteLoadRecoveryState(result) : null;
     noteLoadRecoveryRef.current = recoveryState;
     setNoteLoadRecovery(recoveryState);
@@ -773,10 +775,10 @@ export default function App() {
       const folderPath = normalizeFolderPath(note.folderPath);
       const persistence: NotePersistence = "library";
       const lastSavedAt = note.updatedAt;
-      const content = markdownToTiptapDocument(note.markdown);
-      const plainText = tiptapDocumentToPlainText(content);
+      const { content, plainText, fileFormat } = parseStoredNoteDocument(note.markdown);
       return {
         id: note.noteId,
+        contentDigest: note.contentDigest,
         revision: 0,
         title: note.title,
         isTitleManual: note.isTitleManual,
@@ -788,7 +790,7 @@ export default function App() {
         createdAt: note.createdAt,
         updatedAt: note.updatedAt,
         lastSavedAt,
-        fileFormat: "md",
+        fileFormat,
         persistence,
         savedSnapshot: createSavedSnapshot({
           revision: 0,
@@ -797,7 +799,7 @@ export default function App() {
           content,
           plainText,
           folderPath,
-          fileFormat: "md",
+          fileFormat,
           updatedAt: note.updatedAt,
           lastSavedAt
         })
@@ -978,7 +980,7 @@ export default function App() {
     const recoverySource = noteStorageSourceRef.current;
     if (
       (recoverySource !== "local_fallback" && !noteRecoveryPendingRef.current) ||
-      recoveryInFlightRef.current
+      recoveryInFlightRef.current || storageTransitionRef.current
     ) {
       return false;
     }
@@ -1132,6 +1134,13 @@ export default function App() {
     return null;
   }, []);
 
+  const activateImportedTab = useCallback((tabId: string) => {
+    setPrimaryTabId(tabId);
+    setFocusedPane("primary");
+    setActiveView("notes");
+    setActiveTab(tabId);
+  }, [setActiveTab]);
+
   const ingestImportedTextFile = useCallback((title: string, content: string, filePath: string) => {
     addImportedTab(
       title,
@@ -1139,7 +1148,9 @@ export default function App() {
       content.replace(/\r?\n/g, "\n"),
       filePath
     );
-  }, [addImportedTab]);
+    const importedId = useNoteStore.getState().activeTabId;
+    if (importedId) activateImportedTab(importedId);
+  }, [activateImportedTab, addImportedTab]);
 
   const ingestExternalTxtIntent = useCallback(async (filePath: string) => {
     const noteApi = hwanNote.note;
@@ -1150,6 +1161,7 @@ export default function App() {
     const existingTabId = findExistingTxtTabIdByPath(filePath);
     if (existingTabId) {
       openNote(existingTabId);
+      activateImportedTab(existingTabId);
       return;
     }
 
@@ -1165,6 +1177,7 @@ export default function App() {
       const existingAfterRead = findExistingTxtTabIdByPath(imported.filePath);
       if (existingAfterRead) {
         openNote(existingAfterRead);
+        activateImportedTab(existingAfterRead);
         return;
       }
 
@@ -1174,7 +1187,7 @@ export default function App() {
     } finally {
       inFlightIntentKeysRef.current.delete(dedupeKey);
     }
-  }, [findExistingTxtTabIdByPath, ingestImportedTextFile, openNote]);
+  }, [activateImportedTab, findExistingTxtTabIdByPath, ingestImportedTextFile, openNote]);
 
   const ingestExternalTxtIntents = useCallback(async (filePaths: string[]) => {
     const merged = new Set<string>();
@@ -1773,25 +1786,55 @@ export default function App() {
     try {
       const markdown = toStoredNoteDocument(tab, t("common.untitled"));
 
-      await noteApi.autoSave(
+      const result = await noteApi.autoSave(
         tab.id,
         tab.title,
         markdown,
         normalizeFolderPath(tab.folderPath),
         tab.isTitleManual,
         tab.isPinned,
-        noteStorageSourceRef.current
+        noteStorageSourceRef.current,
+        tab.contentDigest
       );
 
       return markTabSaved(tab.id, {
         savedSnapshot: createCompletedSavedSnapshot(),
+        contentDigest: result.contentDigest,
         persistence: "library"
       });
     } catch (error) {
       console.error("Save failed:", error);
+      if (String(error).includes("note_conflict:")) {
+        flushTitleDraft(tab.id);
+        const latest = getTabById(tab.id);
+        if (latest) {
+          const recoveryId = useNoteStore.getState().recoverConflictedTab(
+            tab.id, t("notes.conflictCopyTitle", { title: latest.title })
+          );
+          if (recoveryId) {
+            setPrimaryTabId(recoveryId);
+            setFocusedPane("primary");
+            const savedCopy = await saveTabRef.current?.(recoveryId);
+            await message(t(savedCopy ? "notes.conflictCopySaved" : "notes.conflictCopyUnsaved"), {
+              title: t("notes.conflictTitle"), kind: "warning"
+            });
+            if (!conflictReloadPendingRef.current) {
+              conflictReloadPendingRef.current = true;
+              // Reload only after this task has left the save queue; awaiting
+              // it here would wait for our own completion forever.
+              void saveQueueRef.current.waitForIdle().then(async () => {
+                conflictReloadPendingRef.current = false;
+                await loadLibraryState();
+              }).catch((reloadError) => {
+                console.error("Failed to reload externally changed notes:", reloadError);
+              });
+            }
+          }
+        }
+      }
       return false;
     }
-  }, [clearAutoSaveTimer, flushTitleDraft, getTabById, markTabSaved, t]);
+  }, [clearAutoSaveTimer, flushTitleDraft, getTabById, loadLibraryState, markTabSaved, t]);
 
   const handleSaveTab = useCallback((tabId: string) => {
     return saveQueueRef.current.run(tabId, () => performSaveTab(tabId));
@@ -1951,6 +1994,7 @@ export default function App() {
   }, [t]);
 
   const handleRequestCloseWindow = useCallback(async () => {
+    if (storageTransitionRef.current) return;
     await runGuardedFlow(async () => {
       const state = useNoteStore.getState();
       const didResolve = await resolveDirtyTabs(state.openTabIds, { closeResolvedTabs: false });
@@ -2044,7 +2088,7 @@ export default function App() {
       }
 
       try {
-        await hwanNote.note.delete(id, loadedFrom);
+        await hwanNote.note.delete(id, loadedFrom, getTabById(id)?.contentDigest);
         if (isNoteLibraryMutationAllowed(loadedFrom)) {
           removeNote(id);
           useCalendarStore.getState().removeNoteLinks(id);
@@ -2072,19 +2116,64 @@ export default function App() {
     });
   }, [notifyCalendarSaveBlocked, t]);
 
-  const prepareLocalStorageTransition = useCallback(async (currentStatus: AutoSaveDirInfo["status"] | null) => {
-    const didResolve = await resolveOpenTabsBeforeReload();
-    if (!didResolve) {
-      return false;
-    }
+  const runStorageTransition = useCallback(async (
+    action: () => Promise<void>,
+    recoveringUnavailablePath = false,
+    preserveBlockedDrafts = false
+  ) => {
+    if (storageTransitionRef.current || guardedFlowRef.current || recoveryInFlightRef.current) return;
+    const calendar = useCalendarStore.getState();
+    if (!calendar.beginStorageTransition()) return;
+    storageTransitionRef.current = true;
+    const bodyWasInert = document.body.inert;
+    let completed = false;
+    let storageReplacementStarted = false;
+    try {
+      const latestInfo = await refreshLocalAutoSaveDir();
+      const preservingDrafts = preserveBlockedDrafts && Boolean(noteLoadRecoveryRef.current);
+      if (!preservingDrafts && !(await resolveOpenTabsBeforeReload())) return;
 
-    const calendarLoadState = useCalendarStore.getState().loadState;
-    if (currentStatus === "unavailable" && calendarLoadState !== "ready") {
-      return true;
+      // Resolve interactive save prompts first, then keep both editors locked
+      // through the final flush, directory switch and replacement snapshots.
+      exitUiLockedRef.current = true;
+      document.body.inert = true;
+      if (!preservingDrafts && !(await drainNoteSaveQueue())) return;
+      const unavailable = recoveringUnavailablePath || latestInfo?.status === "unavailable" || Boolean(noteLoadRecoveryRef.current);
+      if (!(unavailable && useCalendarStore.getState().loadState !== "ready")) {
+        if (!(await flushCalendarBeforeStorageChange())) return;
+      }
+      storageReplacementStarted = true;
+      await action();
+      completed = true;
+    } catch (error) {
+      console.error("Failed to change storage:", error);
+      if (storageReplacementStarted) {
+        // The configuration may already point at the new root. Never let the
+        // old snapshots write there until an authoritative reload succeeds.
+        noteWritesSuspendedRef.current = true;
+        clearAutoSaveTimer();
+        updateNoteLoadRecovery({
+          loadState: "incomplete",
+          issues: [{ kind: "scan", operation: "reload_storage", path: "", reason: String(error) }],
+          indexSourcePath: null,
+          indexBackupPath: null,
+        });
+        useCalendarStore.getState().blockStorageAfterFailure(error);
+      }
+      await message(t("settings.storageChangeFailed"), {
+        title: t("settings.storageChangeFailedTitle"), kind: "error"
+      });
+    } finally {
+      exitUiLockedRef.current = false;
+      document.body.inert = bodyWasInert;
+      storageTransitionRef.current = false;
+      const currentCalendar = useCalendarStore.getState();
+      currentCalendar.endStorageTransition();
+      if (completed && !noteLoadRecoveryRef.current && currentCalendar.loadState === "ready") {
+        currentCalendar.cleanOrphanNoteLinks(true);
+      }
     }
-
-    return flushCalendarBeforeStorageChange();
-  }, [flushCalendarBeforeStorageChange, resolveOpenTabsBeforeReload]);
+  }, [clearAutoSaveTimer, drainNoteSaveQueue, flushCalendarBeforeStorageChange, refreshLocalAutoSaveDir, resolveOpenTabsBeforeReload, t, updateNoteLoadRecovery]);
 
   const reloadCurrentStorage = useCallback(async () => {
     const loaded = await loadLibraryState();
@@ -2106,13 +2195,13 @@ export default function App() {
 
     setNoteLoadRetrying(true);
     try {
-      await reloadCurrentStorage();
+      await runStorageTransition(reloadCurrentStorage, autoSaveDirInfo?.status === "unavailable", true);
     } catch (error) {
       console.error("Failed to retry note library recovery:", error);
     } finally {
       setNoteLoadRetrying(false);
     }
-  }, [noteLoadRetrying, reloadCurrentStorage]);
+  }, [autoSaveDirInfo, noteLoadRetrying, reloadCurrentStorage, runStorageTransition]);
 
   const handleBrowseAutoSaveDir = useCallback(async () => {
     const settingsApi = hwanNote.settings;
@@ -2121,41 +2210,25 @@ export default function App() {
     const selected = await settingsApi.browseAutoSaveDir();
     if (!selected) return;
 
-    const latestInfo = await refreshLocalAutoSaveDir().catch(() => autoSaveDirInfo);
-    const prepared = await prepareLocalStorageTransition(latestInfo?.status ?? null);
-    if (!prepared) {
-      return;
-    }
-
-    try {
+    await runStorageTransition(async () => {
       const result = await settingsApi.setAutoSaveDir(selected);
       setAutoSaveDirInfo(result);
       setAutoSaveDirRecoveryPending(false);
       await reloadCurrentStorage();
-    } catch (error) {
-      console.error("Failed to set auto-save directory:", error);
-    }
-  }, [autoSaveDirInfo, prepareLocalStorageTransition, refreshLocalAutoSaveDir, reloadCurrentStorage]);
+    });
+  }, [reloadCurrentStorage, runStorageTransition]);
 
   const handleResetAutoSaveDir = useCallback(async () => {
     const settingsApi = hwanNote.settings;
     if (!settingsApi) return;
 
-    const latestInfo = await refreshLocalAutoSaveDir().catch(() => autoSaveDirInfo);
-    const prepared = await prepareLocalStorageTransition(latestInfo?.status ?? null);
-    if (!prepared) {
-      return;
-    }
-
-    try {
+    await runStorageTransition(async () => {
       const result = await settingsApi.setAutoSaveDir(null);
       setAutoSaveDirInfo(result);
       setAutoSaveDirRecoveryPending(false);
       await reloadCurrentStorage();
-    } catch (error) {
-      console.error("Failed to reset auto-save directory:", error);
-    }
-  }, [autoSaveDirInfo, prepareLocalStorageTransition, refreshLocalAutoSaveDir, reloadCurrentStorage]);
+    });
+  }, [reloadCurrentStorage, runStorageTransition]);
 
   const handleRetryAutoSaveDir = useCallback(async () => {
     const wasUnavailable =
@@ -2168,27 +2241,18 @@ export default function App() {
       }
 
       setAutoSaveDirRecoveryPending(true);
-      const prepared = await prepareLocalStorageTransition(wasUnavailable ? "unavailable" : refreshed.status);
-      if (!prepared) {
-        return;
-      }
-
-      await reloadCurrentStorage();
-      setAutoSaveDirRecoveryPending(false);
-      await refreshCloudSyncState().catch(() => { /* keep local-path recovery independent */ });
+      await runStorageTransition(async () => {
+        await reloadCurrentStorage();
+        setAutoSaveDirRecoveryPending(false);
+        await refreshCloudSyncState();
+      }, wasUnavailable);
     } catch (error) {
       console.error("Failed to retry the auto-save directory:", error);
     }
-  }, [autoSaveDirInfo?.status, autoSaveDirRecoveryPending, prepareLocalStorageTransition, refreshCloudSyncState, refreshLocalAutoSaveDir, reloadCurrentStorage]);
+  }, [autoSaveDirInfo?.status, autoSaveDirRecoveryPending, runStorageTransition, refreshCloudSyncState, refreshLocalAutoSaveDir, reloadCurrentStorage]);
 
   const handleCloudSyncChange = useCallback(async (provider: string | null, options?: { copyLocalNotes: boolean }) => {
-    const latestInfo = await refreshLocalAutoSaveDir().catch(() => autoSaveDirInfo);
-    const prepared = await prepareLocalStorageTransition(latestInfo?.status ?? null);
-    if (!prepared) {
-      return;
-    }
-
-    try {
+    await runStorageTransition(async () => {
       if (provider) {
         await hwanNote.cloud.enable(provider, options?.copyLocalNotes ?? false);
       } else {
@@ -2197,28 +2261,19 @@ export default function App() {
       await refreshLocalAutoSaveDir();
       await reloadCurrentStorage();
       await refreshCloudSyncState();
-    } catch (error) {
-      console.error("Failed to change cloud sync:", error);
-    }
-  }, [autoSaveDirInfo, prepareLocalStorageTransition, refreshCloudSyncState, refreshLocalAutoSaveDir, reloadCurrentStorage]);
+    });
+  }, [runStorageTransition, refreshCloudSyncState, refreshLocalAutoSaveDir, reloadCurrentStorage]);
 
   const handleCloudSyncSourceChange = useCallback(async (source: CloudSyncSource) => {
-    const latestInfo = await refreshLocalAutoSaveDir().catch(() => autoSaveDirInfo);
-    const prepared = await prepareLocalStorageTransition(latestInfo?.status ?? null);
-    if (!prepared) {
-      return;
-    }
-
-    try {
+    await runStorageTransition(async () => {
       await hwanNote.cloud.setActiveSource(source);
       await reloadCurrentStorage();
       await refreshCloudSyncState();
-    } catch (error) {
-      console.error("Failed to switch library source:", error);
-    }
-  }, [autoSaveDirInfo, prepareLocalStorageTransition, refreshCloudSyncState, refreshLocalAutoSaveDir, reloadCurrentStorage]);
+    });
+  }, [runStorageTransition, refreshCloudSyncState, reloadCurrentStorage]);
 
   const handleInstallUpdate = useCallback(async () => {
+    if (storageTransitionRef.current) return;
     const isReadyToInstall = await runGuardedFlow(async () => {
       const state = useNoteStore.getState();
       const didResolve = await resolveDirtyTabs(state.openTabIds, { closeResolvedTabs: false });
@@ -2259,14 +2314,27 @@ export default function App() {
       return;
     }
 
-    allowImmediateCloseRef.current = true;
+    const calendar = useCalendarStore.getState();
+    if (!calendar.beginStorageTransition()) return;
+    const bodyWasInert = document.body.inert;
+    exitUiLockedRef.current = true;
+    document.body.inert = true;
     try {
+      // Edits made while the first save/drain was pending must also be saved.
+      if (!(await flushCalendarBeforeStorageChange()) || !(await drainNoteSaveQueue())) return;
+      allowImmediateCloseRef.current = true;
       await hwanNote.updater.install();
     } catch (error) {
-      allowImmediateCloseRef.current = false;
       console.error("Failed to install update:", error);
+    } finally {
+      // A successful installer normally terminates the process. Any return,
+      // including an IPC rejection, must restore normal close protection.
+      allowImmediateCloseRef.current = false;
+      exitUiLockedRef.current = false;
+      document.body.inert = bodyWasInert;
+      useCalendarStore.getState().endStorageTransition();
     }
-  }, [drainNoteSaveQueue, notifyCalendarSaveBlocked, resolveDirtyTabs, runGuardedFlow, t]);
+  }, [drainNoteSaveQueue, flushCalendarBeforeStorageChange, notifyCalendarSaveBlocked, resolveDirtyTabs, runGuardedFlow, t]);
 
   useEffect(() => {
     void refreshLocalAutoSaveDir().catch((error) => {
@@ -2349,9 +2417,10 @@ export default function App() {
 
     let disposed = false;
     const checkForRecovery = async () => {
+      if (storageTransitionRef.current) return;
       try {
         const status = await hwanNote.cloud.status();
-        if (disposed) {
+        if (disposed || storageTransitionRef.current) {
           return;
         }
 

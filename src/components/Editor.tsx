@@ -1,14 +1,13 @@
 ﻿import { hwanShell } from "../lib/tauriApi";
 import Bold from "@tiptap/extension-bold";
 import Placeholder from "@tiptap/extension-placeholder";
-import Table from "@tiptap/extension-table";
-import TableCell from "@tiptap/extension-table-cell";
-import TableHeader from "@tiptap/extension-table-header";
+import { Table } from "@tiptap/extension-table";
 import TableRow from "@tiptap/extension-table-row";
+import { MarkdownTableCell, MarkdownTableHeader } from "../extensions/markdownTable";
 import { TaskItemExtended } from "../extensions/taskItemExtended";
 import TaskList from "@tiptap/extension-task-list";
 import Italic from "@tiptap/extension-italic";
-import History from "@tiptap/extension-history";
+import { UndoRedo } from "@tiptap/extensions";
 import StarterKit from "@tiptap/starter-kit";
 import { getMarkRange, type JSONContent } from "@tiptap/core";
 import { Editor as TiptapEditor, EditorContent, useEditor } from "@tiptap/react";
@@ -30,14 +29,18 @@ interface EditorProps {
   onFocus?: () => void;
 }
 
-function collectPlainText(editor: TiptapEditor) {
-  return editor.state.doc.textBetween(0, editor.state.doc.content.size, "\n");
+export function collectPlainText(editor: TiptapEditor) {
+  return editor.state.doc.textBetween(0, editor.state.doc.content.size, "\n", (node) =>
+    node.type.name === "hardBreak" ? "\n" : ""
+  );
 }
 
 function collectCursor(editor: TiptapEditor, existingPlainText?: string) {
   const plainText = existingPlainText ?? collectPlainText(editor);
   const cursorPos = editor.state.selection.from;
-  const textBeforeCursor = editor.state.doc.textBetween(0, cursorPos, "\n", "\0");
+  const textBeforeCursor = editor.state.doc.textBetween(0, cursorPos, "\n", (node) =>
+    node.type.name === "hardBreak" ? "\n" : "\0"
+  );
   const lines = textBeforeCursor.split("\n");
   const line = lines.length;
   const lastLine = lines[lines.length - 1] ?? "";
@@ -62,7 +65,7 @@ const ItalicWithoutShortcut = Italic.extend({
   }
 });
 
-const HistoryWithInputRuleUndo = History.extend({
+const HistoryWithInputRuleUndo = UndoRedo.extend({
   addKeyboardShortcuts() {
     return {
       "Mod-z": () =>
@@ -130,7 +133,10 @@ export default function Editor({
           levels: [1, 2, 3, 4, 5, 6]
         },
         italic: false,
-        history: false
+        undoRedo: false,
+        link: false,
+        underline: false,
+        trailingNode: false
       }),
       HistoryWithInputRuleUndo,
       BoldWithoutShortcut,
@@ -151,8 +157,8 @@ export default function Editor({
         resizable: true
       }),
       TableRow,
-      TableHeader,
-      TableCell,
+      MarkdownTableHeader,
+      MarkdownTableCell,
       Placeholder.configure({
         placeholder: placeholderText
       }),
@@ -166,6 +172,7 @@ export default function Editor({
       }
     },
     content,
+    shouldRerenderOnTransaction: true,
     autofocus: initialAutofocusRef.current ? "end" : false,
     editorProps: {
       attributes: {
@@ -225,7 +232,7 @@ export default function Editor({
     }
 
     if (JSON.stringify(editor.getJSON()) !== JSON.stringify(content)) {
-      editor.commands.setContent(content, false);
+      editor.commands.setContent(content, { emitUpdate: false });
       const cursor = collectCursor(editor);
       onCursorChangeRef.current(cursor.line, cursor.column, cursor.chars);
     }

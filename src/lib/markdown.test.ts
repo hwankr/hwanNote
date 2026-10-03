@@ -1,7 +1,6 @@
 import { getSchema, type JSONContent } from "@tiptap/core";
-import Table from "@tiptap/extension-table";
-import TableCell from "@tiptap/extension-table-cell";
-import TableHeader from "@tiptap/extension-table-header";
+import { Table } from "@tiptap/extension-table";
+import { MarkdownTableCell, MarkdownTableHeader } from "../extensions/markdownTable";
 import TableRow from "@tiptap/extension-table-row";
 import TaskList from "@tiptap/extension-task-list";
 import StarterKit from "@tiptap/starter-kit";
@@ -12,18 +11,20 @@ import { ToggleBlock, ToggleContent, ToggleSummary } from "../extensions/toggleB
 import {
   hasRichTextFormatting,
   markdownToTiptapDocument,
+  parseStoredNoteDocument,
   plainTextToTiptapDocument,
+  serializePlainTextNote,
   tiptapDocumentToMarkdown,
   tiptapDocumentToPlainText
 } from "./markdown";
 
 const editorSchema = getSchema([
-  StarterKit.configure({ heading: { levels: [1, 2, 3, 4, 5, 6] } }),
+  StarterKit.configure({ heading: { levels: [1, 2, 3, 4, 5, 6] }, link: false, underline: false, trailingNode: false }),
   LinkWithTitle,
   Table,
   TableRow,
-  TableHeader,
-  TableCell,
+  MarkdownTableHeader,
+  MarkdownTableCell,
   TaskList,
   TaskItemExtended.configure({ nested: true }),
   ToggleBlock,
@@ -518,5 +519,114 @@ describe("Tiptap JSON and Markdown round trips", () => {
     expectSchemaValid(document);
     expect(walk(document).filter((node) => node.type === "heading").map((node) => node.attrs?.level)).toEqual([4, 5, 6]);
     expect(tiptapDocumentToMarkdown(document)).toBe(markdown);
+  });
+
+  it("preserves leading, repeated, trailing, and empty-only paragraphs", () => {
+    const paragraph = (text?: string): JSONContent => ({
+      type: "paragraph",
+      ...(text ? { content: [{ type: "text", text }] } : {})
+    });
+    expectDocumentRoundTrip({ type: "doc", content: [paragraph()] });
+    expectDocumentRoundTrip({
+      type: "doc",
+      content: [paragraph(), paragraph("alpha"), paragraph(), paragraph(), paragraph("beta"), paragraph()]
+    });
+  });
+
+  it("preserves empty paragraphs inside quotes, lists, and toggles", () => {
+    const paragraphs: JSONContent[] = [
+      { type: "paragraph", content: [{ type: "text", text: "alpha" }] },
+      { type: "paragraph" },
+      { type: "paragraph", content: [{ type: "text", text: "beta" }] },
+      { type: "paragraph" }
+    ];
+    expectDocumentRoundTrip({
+      type: "doc",
+      content: [
+        { type: "blockquote", content: paragraphs },
+        { type: "bulletList", content: [{ type: "listItem", content: paragraphs }] },
+        { type: "taskList", content: [{ type: "taskItem", attrs: { checked: false }, content: paragraphs }] },
+        {
+          type: "toggleBlock",
+          attrs: { open: false },
+          content: [
+            { type: "toggleSummary", content: [{ type: "text", text: "Details" }] },
+            { type: "toggleContent", content: paragraphs }
+          ]
+        }
+      ]
+    });
+  });
+
+  it("keeps literal empty-paragraph markers and ordinary Markdown blank lines literal", () => {
+    const marker = "<!-- hwan-note:empty-paragraph:v1 -->";
+    expectDocumentRoundTrip(plainTextToTiptapDocument(marker));
+    const code = markdownToTiptapDocument(`\`\`\`\n${marker}\n\`\`\``);
+    expect(code.content?.[0]?.content?.[0]?.text).toBe(marker);
+    expect(markdownToTiptapDocument("alpha\n\n\n\nbeta").content).toHaveLength(2);
+  });
+
+  it.each(["[x] literal", "[X] literal", "[ ] literal"])(
+    "keeps the literal bullet text %j after saving and reopening",
+    (text) => {
+      expectDocumentRoundTrip({
+        type: "doc",
+        content: [{
+          type: "bulletList",
+          content: [{ type: "listItem", content: [{ type: "paragraph", content: [{ type: "text", text }] }] }]
+        }]
+      });
+    }
+  );
+
+  it.each(["\\[x\\] literal", "&#91;x&#93; literal", "`[x] literal`", "**[x] literal**"])(
+    "does not turn escaped or formatted task-like text %j into a checkbox",
+    (source) => {
+      const document = markdownToTiptapDocument(`- ${source}`);
+      expect(document.content?.[0]?.type).toBe("bulletList");
+      expect(walk(document).some((node) => node.type === "taskItem")).toBe(false);
+      expectDocumentRoundTrip(document);
+    }
+  );
+
+  it("keeps Markdown reference links when reading actual task markers", () => {
+    const document = markdownToTiptapDocument("- [x] [Docs][docs]\n\n[docs]: https://example.com/docs");
+    expect(document.content?.[0]?.type).toBe("taskList");
+    expect(walk(document).find((node) => node.text === "Docs")?.marks?.[0]?.attrs?.href)
+      .toBe("https://example.com/docs");
+  });
+});
+
+describe("stored plain text documents", () => {
+  it.each([
+    "",
+    "# literal\n---\n**literal**\n- [x] literal",
+    "\nalpha\n\nbeta  \n\n",
+    "<!-- hwan-note:format:txt:v1 -->\n<!-- hwan-note:empty-paragraph:v1 -->",
+    "<!-- hwan-note:manual-title:6162 -->\n<script>alert(1)</script>",
+    "한글 😀\n\uFEFFliteral BOM"
+  ])("round-trips the exact literal content %j", (plainText) => {
+    const parsed = parseStoredNoteDocument(serializePlainTextNote(plainText));
+    expect(parsed).toEqual({ fileFormat: "txt", plainText, content: plainTextToTiptapDocument(plainText) });
+    expectSchemaValid(parsed.content);
+    expect(hasRichTextFormatting(parsed.content)).toBe(false);
+  });
+
+  it("accepts Windows line endings and a file BOM without trimming the text body", () => {
+    const parsed = parseStoredNoteDocument(`\uFEFF${serializePlainTextNote("alpha\n\n").replace(/\n/g, "\r\n")}`);
+    expect(parsed.fileFormat).toBe("txt");
+    expect(parsed.plainText).toBe("alpha\n\n");
+  });
+
+  it("leaves ordinary Markdown and unknown format markers on the Markdown path", () => {
+    expect(parseStoredNoteDocument("# Heading").fileFormat).toBe("md");
+    expect(parseStoredNoteDocument("# Heading").content.content?.[0]?.type).toBe("heading");
+    for (const marker of [
+      "<!-- hwan-note:format:txt:v2 -->",
+      "\\<!-- hwan-note:format:txt:v1 -->",
+      "<!-- hwan-note:format:txt:v1 --> extra"
+    ]) {
+      expect(parseStoredNoteDocument(`${marker}\n# Heading`).fileFormat).toBe("md");
+    }
   });
 });

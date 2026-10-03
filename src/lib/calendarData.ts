@@ -255,7 +255,7 @@ function validateCalendarSchema(
   if (version >= 3 && !Array.isArray(value.inbox)) {
     return invalidSchema(`calendar.json version ${version} must contain an inbox array.`);
   }
-  return null;
+  return validateCalendarEntries(value, version === CALENDAR_DATA_VERSION);
 }
 
 function validateLegacyCalendarSchema(value: Record<string, unknown>): CalendarParseError | null {
@@ -264,6 +264,78 @@ function validateLegacyCalendarSchema(value: Record<string, unknown>): CalendarP
   }
   if ("noteLinks" in value && !isPlainObject(value.noteLinks)) {
     return invalidSchema("Legacy calendar.json noteLinks must be an object.");
+  }
+  return validateCalendarEntries(value);
+}
+
+function validateCalendarEntries(value: Record<string, unknown>, currentSchema = false): CalendarParseError | null {
+  for (const [dateKey, day] of Object.entries(readNestedRecord(value, "todos"))) {
+    if (!isDateKey(dateKey)) {
+      return invalidSchema(`calendar.json contains an invalid todo date: ${dateKey}.`);
+    }
+    if (!isPlainObject(day) || !Array.isArray(day.items)) {
+      return invalidSchema(`calendar.json todos.${dateKey} must contain an items array.`);
+    }
+    const error = validateTodoItems(day.items, `todos.${dateKey}.items`, currentSchema);
+    if (error) return error;
+  }
+
+  if (Array.isArray(value.inbox)) {
+    const error = validateTodoItems(value.inbox, "inbox", currentSchema, true);
+    if (error) return error;
+  }
+
+  for (const [dateKey, links] of Object.entries(readNestedRecord(value, "noteLinks"))) {
+    if (!isDateKey(dateKey) || !Array.isArray(links) ||
+        links.some((link) => typeof link !== "string" || !link.trim())) {
+      return invalidSchema(`calendar.json noteLinks.${dateKey} must contain valid note IDs for a valid date.`);
+    }
+  }
+  return null;
+}
+
+function validateTodoItems(items: unknown[], location: string, currentSchema: boolean, inbox = false): CalendarParseError | null {
+  const ids = new Set<string>();
+  for (const [index, item] of items.entries()) {
+    const path = `${location}[${index}]`;
+    if (!isPlainObject(item) || typeof item.id !== "string" || !item.id.trim() ||
+        typeof item.text !== "string") {
+      return invalidSchema(`calendar.json ${path} must contain a nonempty ID and text string.`);
+    }
+    if (ids.has(item.id)) {
+      return invalidSchema(`calendar.json ${path} contains a duplicate todo ID.`);
+    }
+    ids.add(item.id);
+
+    // Older calendars can omit fields introduced later; present values must not
+    // be silently discarded or converted into different task metadata.
+    for (const key of ["done", "showSpan"] as const) {
+      if (key in item && typeof item[key] !== "boolean") {
+        return invalidSchema(`calendar.json ${path}.${key} must be a boolean.`);
+      }
+    }
+    for (const key of ["createdAt", "updatedAt", "completedAt"] as const) {
+      if (key in item && !(key === "completedAt" && item[key] === null) &&
+          (typeof item[key] !== "number" || !Number.isFinite(item[key]))) {
+        return invalidSchema(`calendar.json ${path}.${key} must be a finite timestamp.`);
+      }
+    }
+    if ("dueDateKey" in item && item.dueDateKey !== null &&
+        (typeof item.dueDateKey !== "string" || !isDateKey(item.dueDateKey))) {
+      return invalidSchema(`calendar.json ${path}.dueDateKey must be a valid date or null.`);
+    }
+    if ("kind" in item && !isTodoKind(item.kind)) {
+      return invalidSchema(`calendar.json ${path}.kind is not a supported todo kind.`);
+    }
+    if (currentSchema && (item.kind === "event" || item.kind === "deadline")) {
+      if (inbox) {
+        return invalidSchema(`calendar.json ${path} must be a task because inbox items have no source date.`);
+      }
+      if (item.done === true || ("dueDateKey" in item && item.dueDateKey !== null) ||
+          ("completedAt" in item && item.completedAt !== null) || "showSpan" in item) {
+        return invalidSchema(`calendar.json ${path} contains task-only state that cannot be retained by ${item.kind} items.`);
+      }
+    }
   }
   return null;
 }

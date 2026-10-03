@@ -44,6 +44,7 @@ function createLibraryTab(id = TAB_ID, plainText = "saved"): NoteTab {
   const now = 1_000;
   const tab: NoteTab = {
     id,
+    contentDigest: "loaded-digest",
     revision: 0,
     title: "Manual title",
     isTitleManual: true,
@@ -84,6 +85,7 @@ describe("note save revisions", () => {
     store.updateTabContent(TAB_ID, documentWithText("B"), "B");
     const savedCurrentRevision = store.markTabSaved(TAB_ID, {
       savedSnapshot: snapshotOf(savingA, 2_000),
+      contentDigest: "saved-A-digest",
       persistence: "library"
     });
 
@@ -93,6 +95,7 @@ describe("note save revisions", () => {
     expect(current.content).toEqual(documentWithText("B"));
     expect(current.revision).toBe(2);
     expect(current.isDirty).toBe(true);
+    expect(current.contentDigest).toBe("saved-A-digest");
     expect(current.lastSavedAt).toBe(2_000);
     expect(current.savedSnapshot).toMatchObject({
       revision: 1,
@@ -129,6 +132,7 @@ describe("note save revisions", () => {
     store.updateTabContent(TAB_ID, documentWithText("B"), "B");
     store.markTabSaved(TAB_ID, {
       savedSnapshot: snapshotOf(savingA, 2_000),
+      contentDigest: "saved-A-digest",
       persistence: "library"
     });
 
@@ -139,6 +143,17 @@ describe("note save revisions", () => {
     expect(current.revision).toBe(3);
     expect(current.isDirty).toBe(false);
     expect(current.savedSnapshot?.revision).toBe(1);
+    expect(current.contentDigest).toBe("saved-A-digest");
+  });
+
+  it("retains the known disk digest when a save result does not supply one", () => {
+    const store = useNoteStore.getState();
+    store.markTabSaved(TAB_ID, {
+      savedSnapshot: snapshotOf(store.notesById[TAB_ID], 2_000),
+      persistence: "library"
+    });
+
+    expect(useNoteStore.getState().notesById[TAB_ID].contentDigest).toBe("loaded-digest");
   });
 
   it("increments only the changed tab for every dirty-producing mutation", () => {
@@ -170,5 +185,90 @@ describe("note save revisions", () => {
     const current = useNoteStore.getState().notesById[TAB_ID];
     expect(current.revision).toBe(0);
     expect(current.savedSnapshot?.revision).toBe(0);
+  });
+});
+
+describe("note conflict recovery", () => {
+  it("preserves the latest draft in an active new tab and restores the original snapshot", () => {
+    const saved = createLibraryTab();
+    saved.sourceFilePath = "C:\\notes\\original.md";
+    saved.savedSnapshot = snapshotOf(saved);
+    const other = createLibraryTab("other-note", "unrelated");
+    hydrate([saved, other]);
+    const store = useNoteStore.getState();
+
+    store.updateTabContent(TAB_ID, documentWithText("saving revision"), "saving revision");
+    store.updateTabContent(TAB_ID, documentWithText("newer unsaved edit"), "newer unsaved edit");
+    store.setTabTitle(TAB_ID, "Latest title");
+    store.moveTabToFolder(TAB_ID, "new-folder");
+    store.toggleFileFormat(TAB_ID);
+    store.togglePinTab(TAB_ID);
+    const latest = useNoteStore.getState().notesById[TAB_ID];
+
+    const recoveryId = store.recoverConflictedTab(TAB_ID, "Latest title (conflict copy)");
+    const state = useNoteStore.getState();
+    expect(recoveryId).toBeTruthy();
+    expect(recoveryId).not.toBe(TAB_ID);
+    const copy = state.notesById[recoveryId!];
+    expect(copy).toMatchObject({
+      id: recoveryId,
+      title: "Latest title (conflict copy)",
+      isTitleManual: true,
+      content: documentWithText("newer unsaved edit"),
+      plainText: "newer unsaved edit",
+      folderPath: "new-folder",
+      fileFormat: "txt",
+      isPinned: true,
+      revision: 0,
+      persistence: "transient",
+      savedSnapshot: null,
+      lastSavedAt: 0,
+      isDirty: true,
+      contentDigest: undefined,
+      sourceFilePath: undefined
+    });
+    expect(copy.content).toEqual(latest.content);
+    expect(state.notesById[TAB_ID]).toMatchObject({
+      ...saved.savedSnapshot,
+      revision: latest.revision + 1,
+      isDirty: false,
+      persistence: "library",
+      contentDigest: "loaded-digest",
+      savedSnapshot: saved.savedSnapshot
+    });
+    expect(state.notesById[other.id]).toBe(other);
+    expect(state.openTabIds).toEqual([TAB_ID, other.id, recoveryId]);
+    expect(state.activeTabId).toBe(recoveryId);
+    expect(state.activeOpenTab).toBe(copy);
+    expect(state.noteIds).toEqual([TAB_ID, other.id]);
+    expect(state.allNotes.some((tab) => tab.id === recoveryId)).toBe(false);
+  });
+
+  it("removes an unsaved original while preserving its draft under the new identity", () => {
+    const draft = createLibraryTab();
+    draft.persistence = "transient";
+    draft.savedSnapshot = null;
+    draft.isDirty = true;
+    hydrate([draft]);
+
+    const recoveryId = useNoteStore.getState().recoverConflictedTab(TAB_ID, "Recovered draft");
+    const state = useNoteStore.getState();
+    expect(state.notesById[TAB_ID]).toBeUndefined();
+    expect(state.openTabIds).toEqual([recoveryId]);
+    expect(state.activeTabId).toBe(recoveryId);
+    expect(state.notesById[recoveryId!]).toMatchObject({
+      content: draft.content,
+      plainText: draft.plainText,
+      contentDigest: undefined,
+      savedSnapshot: null,
+      persistence: "transient",
+      isDirty: true
+    });
+  });
+
+  it("does nothing when the conflicted tab is already gone", () => {
+    const before = useNoteStore.getState();
+    expect(before.recoverConflictedTab("missing", "Recovered")).toBeNull();
+    expect(useNoteStore.getState()).toBe(before);
   });
 });

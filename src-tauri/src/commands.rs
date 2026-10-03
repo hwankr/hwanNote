@@ -225,6 +225,7 @@ pub struct NoteAutoSavePayload {
     #[serde(default)]
     is_pinned: Option<bool>,
     loaded_from: String,
+    expected_content_digest: Option<String>,
 }
 
 // ── Helpers ──
@@ -284,9 +285,9 @@ fn resolve_storage_dir(
     emit_missing_event: bool,
 ) -> Result<(PathBuf, ResolvedStorageSource), String> {
     let documents = dirs::document_dir().unwrap_or_else(|| PathBuf::from("."));
-    let active_source = config_manager::get_cloud_sync_source(app);
+    let active_source = config_manager::get_cloud_sync_source(app)?;
     let cloud_dir = if active_source == LibrarySource::Cloud {
-        config_manager::get_cloud_notes_dir(app)
+        config_manager::get_cloud_notes_dir(app)?
     } else {
         None
     };
@@ -345,7 +346,7 @@ fn get_calendar_local_dir(app: &AppHandle, documents: &Path) -> Result<PathBuf, 
     let state = config_manager::get_local_auto_save_dir_state(
         app,
         &file_manager::get_auto_save_dir(documents),
-    );
+    )?;
     match state {
         LocalAutoSaveDirState::Unset(path) | LocalAutoSaveDirState::Available(path) => Ok(path),
         LocalAutoSaveDirState::Unavailable(path) => {
@@ -359,7 +360,7 @@ fn resolve_loaded_storage_dir(
     loaded_from: ResolvedStorageSource,
 ) -> Result<PathBuf, String> {
     let documents = dirs::document_dir().unwrap_or_else(|| PathBuf::from("."));
-    let cloud_dir = config_manager::get_cloud_notes_dir(app);
+    let cloud_dir = config_manager::get_cloud_notes_dir(app)?;
     select_loaded_storage_dir(
         || get_calendar_local_dir(app, &documents),
         cloud_dir,
@@ -441,7 +442,7 @@ fn resolve_note_library_mutation_dir(
     let loaded_from = parse_resolved_storage_source(loaded_from)?;
     let (_, current_source) = resolve_calendar_dir(app)?;
     let documents = dirs::document_dir().unwrap_or_else(|| PathBuf::from("."));
-    let cloud_dir = config_manager::get_cloud_notes_dir(app);
+    let cloud_dir = config_manager::get_cloud_notes_dir(app)?;
 
     select_note_library_mutation_dir(
         || get_calendar_local_dir(app, &documents),
@@ -1053,6 +1054,7 @@ pub fn cmd_note_auto_save(
         folder_path: payload.folder_path,
         is_title_manual: payload.is_title_manual,
         is_pinned: payload.is_pinned,
+        expected_content_digest: payload.expected_content_digest,
     };
 
     file_manager::auto_save_markdown_note(&target_dir, &file_payload)
@@ -1117,12 +1119,16 @@ pub async fn cmd_note_delete(
     app: AppHandle,
     note_id: String,
     loaded_from: String,
+    expected_content_digest: Option<String>,
 ) -> Result<bool, String> {
     let target_dir = resolve_note_library_mutation_dir(&app, &loaded_from, "Note deletion")?;
     tauri::async_runtime::spawn_blocking(move || {
-        file_manager::delete_note_file_and_index(&target_dir, &note_id, |path| {
-            trash::delete(path).map_err(|e| e.to_string())
-        })
+        file_manager::delete_note_file_and_index(
+            &target_dir,
+            &note_id,
+            expected_content_digest.as_deref(),
+            |path| trash::delete(path).map_err(|e| e.to_string()),
+        )
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1477,20 +1483,20 @@ pub fn cmd_settings_set_autosave_dir(
     let state = config_manager::get_local_auto_save_dir_state(
         &app,
         &file_manager::get_auto_save_dir(&documents),
-    );
+    )?;
 
     Ok(build_auto_save_dir_info(state))
 }
 
 #[tauri::command]
-pub fn cmd_settings_get_autosave_dir(app: AppHandle) -> AutoSaveDirInfo {
+pub fn cmd_settings_get_autosave_dir(app: AppHandle) -> Result<AutoSaveDirInfo, String> {
     let documents = dirs::document_dir().unwrap_or_else(|| PathBuf::from("."));
     let state = config_manager::get_local_auto_save_dir_state(
         &app,
         &file_manager::get_auto_save_dir(&documents),
-    );
+    )?;
 
-    build_auto_save_dir_info(state)
+    Ok(build_auto_save_dir_info(state))
 }
 
 // ── Updater commands ──
@@ -1641,10 +1647,10 @@ pub async fn cmd_updater_download(app: AppHandle) {
 }
 
 #[tauri::command]
-pub fn cmd_updater_install(app: AppHandle) {
+pub fn cmd_updater_install(app: AppHandle) -> Result<(), String> {
     let window = match app.get_webview_window("main") {
         Some(w) => w,
-        None => return,
+        None => return Err("The main window is unavailable.".to_string()),
     };
 
     let downloaded = app.state::<DownloadedUpdate>().0.lock().unwrap().take();
@@ -1659,7 +1665,7 @@ pub fn cmd_updater_install(app: AppHandle) {
                 error: Some("No downloaded update is ready to install.".to_string()),
             },
         );
-        return;
+        return Err("No downloaded update is ready to install.".to_string());
     };
 
     let DownloadedUpdatePayload { update, bytes } = downloaded;
@@ -1680,12 +1686,13 @@ pub fn cmd_updater_install(app: AppHandle) {
                 error: Some(error.to_string()),
             },
         );
-        #[cfg(not(target_os = "windows"))]
-        return;
+        return Err(error.to_string());
     }
 
     #[cfg(not(target_os = "windows"))]
     app.restart();
+    #[cfg(target_os = "windows")]
+    Ok(())
 }
 
 // ── Shell commands ──
@@ -1787,15 +1794,15 @@ pub async fn cmd_cloud_sync_disable(app: AppHandle) -> Result<CloudSyncResult, S
 }
 
 #[tauri::command]
-pub fn cmd_cloud_sync_status(app: AppHandle) -> CloudSyncStatus {
-    let provider = config_manager::get_cloud_sync_provider(&app);
+pub fn cmd_cloud_sync_status(app: AppHandle) -> Result<CloudSyncStatus, String> {
+    let provider = config_manager::get_cloud_sync_provider(&app)?;
     let enabled = provider.is_some();
-    let active_source = config_manager::get_cloud_sync_source(&app);
+    let active_source = config_manager::get_cloud_sync_source(&app)?;
     let resolved_source = resolve_storage_dir(&app, false)
         .ok()
         .map(|(_, source)| source);
     let cloud_unavailable = active_source == LibrarySource::Cloud
-        && config_manager::get_cloud_notes_dir(&app).is_none_or(|path| !path.is_dir());
+        && config_manager::get_cloud_notes_dir(&app)?.is_none_or(|path| !path.is_dir());
 
     let sync_folder = if enabled {
         let providers = config_manager::detect_cloud_providers();
@@ -1807,7 +1814,7 @@ pub fn cmd_cloud_sync_status(app: AppHandle) -> CloudSyncStatus {
         None
     };
 
-    CloudSyncStatus {
+    Ok(CloudSyncStatus {
         enabled,
         provider,
         sync_folder,
@@ -1815,7 +1822,7 @@ pub fn cmd_cloud_sync_status(app: AppHandle) -> CloudSyncStatus {
         resolved_source: resolved_source
             .map(|source| resolved_storage_source_to_str(source).to_string()),
         cloud_unavailable,
-    }
+    })
 }
 
 #[tauri::command]
@@ -1827,7 +1834,7 @@ pub fn cmd_cloud_sync_set_active_source(
     let next_source = match normalized.as_str() {
         "local" => LibrarySource::Local,
         "cloud" => {
-            if config_manager::get_cloud_sync_provider(&app).is_none() {
+            if config_manager::get_cloud_sync_provider(&app)?.is_none() {
                 return Err("Cloud sync is not enabled.".to_string());
             }
             LibrarySource::Cloud
@@ -1836,7 +1843,7 @@ pub fn cmd_cloud_sync_set_active_source(
     };
 
     config_manager::set_cloud_sync_source(&app, next_source)?;
-    Ok(cmd_cloud_sync_status(app))
+    cmd_cloud_sync_status(app)
 }
 
 #[cfg(test)]
@@ -1891,6 +1898,7 @@ mod tests {
 
     fn note_payload(content: &str) -> AutoSavePayload {
         AutoSavePayload {
+            expected_content_digest: None,
             note_id: "shared-note".to_string(),
             title: "Shared note".to_string(),
             content: content.to_string(),
@@ -2313,11 +2321,13 @@ mod tests {
             "Note deletion",
         )
         .unwrap();
-        let deleted =
-            file_manager::delete_note_file_and_index(&target_dir, "shared-note", |path| {
-                fs::remove_file(path).map_err(|error| error.to_string())
-            })
-            .unwrap();
+        let deleted = file_manager::delete_note_file_and_index(
+            &target_dir,
+            "shared-note",
+            Some(&file_manager::load_markdown_notes(&target_dir).unwrap()[0].content_digest),
+            |path| fs::remove_file(path).map_err(|error| error.to_string()),
+        )
+        .unwrap();
 
         assert!(deleted);
         assert!(file_manager::load_markdown_notes(&local_dir)

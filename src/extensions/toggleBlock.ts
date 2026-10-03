@@ -213,8 +213,16 @@ export const ToggleBlock = Node.create({
     return {
       insertToggleBlock:
         (title = "Toggle") =>
-        ({ commands }) =>
-          commands.insertContent({
+        ({ commands, state }) => {
+          // Markdown table cells cannot preserve nested block structures.
+          // Refuse this insertion instead of silently flattening it on save.
+          const { $from } = state.selection;
+          for (let depth = $from.depth; depth > 0; depth -= 1) {
+            if ($from.node(depth).type.name === "table") {
+              return false;
+            }
+          }
+          return commands.insertContent({
             type: this.name,
             attrs: { open: true },
             content: [
@@ -227,7 +235,8 @@ export const ToggleBlock = Node.create({
                 content: [{ type: "paragraph" }]
               }
             ]
-          })
+          });
+        }
     };
   },
 

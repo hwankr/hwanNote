@@ -40,8 +40,9 @@ function createTab(overrides: Partial<NoteTab> = {}): NoteTab {
 
 describe("mergeRecoveredNoteTabs", () => {
   it("uses the authoritative tabs without a recovery copy when user-visible state is unchanged", () => {
-    const reloaded = createTab();
+    const reloaded = createTab({ contentDigest: "reloaded-digest" });
     const current = createTab({
+      contentDigest: "previous-digest",
       revision: 7,
       isDirty: true,
       updatedAt: 9_000,
@@ -63,11 +64,13 @@ describe("mergeRecoveredNoteTabs", () => {
       recoveredCount: 0
     });
     expect(createId).not.toHaveBeenCalled();
+    expect(result.tabs[0].contentDigest).toBe("reloaded-digest");
   });
 
   it("keeps the cloud note and creates an active unsaved copy for a same-ID conflict", () => {
-    const reloaded = createTab({ plainText: "cloud", content: documentWithText("cloud") });
+    const reloaded = createTab({ plainText: "cloud", content: documentWithText("cloud"), contentDigest: "cloud-digest" });
     const current = createTab({
+      contentDigest: "local-digest",
       title: "Local title",
       plainText: "local edit",
       content: documentWithText("local edit"),
@@ -114,18 +117,21 @@ describe("mergeRecoveredNoteTabs", () => {
       lastSavedAt: 0,
       persistence: "transient",
       savedSnapshot: null,
-      sourceFilePath: undefined
+      sourceFilePath: undefined,
+      contentDigest: undefined
     });
     expect(result.session).toEqual({
       openTabIds: [reloaded.id, "recovery-1"],
       activeTabId: "recovery-1"
     });
     expect(recoveryTitle).toHaveBeenCalledWith("Local title");
+    expect(result.tabs[0].contentDigest).toBe("cloud-digest");
+    expect(current.contentDigest).toBe("local-digest");
   });
 
   it("recovers a local-only library note whose ID is absent from the cloud", () => {
     const reloaded = createTab({ id: "cloud-note" });
-    const localOnly = createTab({ id: "local-only", plainText: "not in cloud", content: documentWithText("not in cloud") });
+    const localOnly = createTab({ id: "local-only", plainText: "not in cloud", content: documentWithText("not in cloud"), contentDigest: "local-only-digest" });
 
     const result = mergeRecoveredNoteTabs({
       reloadedLibraryTabs: [reloaded],
@@ -137,6 +143,7 @@ describe("mergeRecoveredNoteTabs", () => {
 
     expect(result.tabs.map((tab) => tab.id)).toEqual(["cloud-note", "recovered-local-only"]);
     expect(result.tabs[1].plainText).toBe("not in cloud");
+    expect(result.tabs[1].contentDigest).toBeUndefined();
     expect(result.session).toEqual({
       openTabIds: ["recovered-local-only"],
       activeTabId: "recovered-local-only"

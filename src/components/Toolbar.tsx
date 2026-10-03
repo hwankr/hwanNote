@@ -255,6 +255,7 @@ export default function Toolbar({
   };
 
   const isToggleBlockActive = editor?.isActive("toggleBlock") ?? false;
+  const isTableActive = editor?.isActive("table") ?? false;
 
   return (
     <div className="toolbar">
@@ -296,6 +297,7 @@ export default function Toolbar({
         <select
           className="toolbar-select"
           aria-label={t("toolbar.headingAria")}
+          disabled={isTableActive}
           defaultValue="paragraph"
           onChange={(event) => setHeading(event.target.value)}
         >
@@ -309,6 +311,7 @@ export default function Toolbar({
           className="toolbar-select"
           key={listMenuKey}
           aria-label={t("toolbar.listAria")}
+          disabled={isTableActive}
           defaultValue=""
           onChange={(event) => {
             setList(event.target.value);
@@ -348,6 +351,7 @@ export default function Toolbar({
           className={isToggleBlockActive ? "is-active" : undefined}
           aria-label={t("toolbar.listToggle")}
           title={t("toolbar.listToggle")}
+          disabled={isTableActive}
           onClick={insertToggleBlock}
         >
           {ToggleIcon}
@@ -370,6 +374,7 @@ export default function Toolbar({
           ref={tableButtonRef}
           aria-label={t("toolbar.table")}
           title={t("toolbar.table")}
+          disabled={isTableActive}
           onMouseDown={(e) => {
             e.preventDefault();
             e.stopPropagation();

@@ -468,6 +468,29 @@ describe("useCalendarStore orphan note link cleanup", () => {
 });
 
 describe("useCalendarStore corruption handling", () => {
+  it("backs up the unmodified file and blocks saves when a nested task is malformed", async () => {
+    const raw = JSON.stringify({
+      ...createTodoData(),
+      inbox: [{ text: "recoverable text with a missing ID" }],
+    });
+    calendarLoad.mockResolvedValue({
+      status: "ok",
+      data: raw,
+      loadedFrom: "local",
+      cloudUnavailable: false,
+      sourcePath: "C:\\data\\calendar.json",
+    });
+    calendarBackup.mockResolvedValue("C:\\data\\calendar.json.bak");
+
+    await storeState().loadCalendarData();
+
+    expect(storeState()).toMatchObject({ loadState: "corrupt", backupPath: "C:\\data\\calendar.json.bak" });
+    expect(calendarBackup).toHaveBeenCalledWith(raw, "local");
+    expect(calendarConfirmLoaded).not.toHaveBeenCalled();
+    await expect(storeState().saveCalendarData()).resolves.toBe("blocked");
+    expect(calendarSave).not.toHaveBeenCalled();
+  });
+
   it("treats a missing calendar file as a new ready calendar", async () => {
     calendarLoad.mockResolvedValue({
       status: "missing",
@@ -830,5 +853,186 @@ describe("useCalendarStore corruption handling", () => {
       loadState: "corrupt",
       backupPath: "C:\\data\\calendar.json.bak",
     });
+  });
+});
+
+describe("useCalendarStore storage transitions", () => {
+  async function loadExistingCalendar() {
+    calendarLoad.mockResolvedValue({
+      status: "ok",
+      data: serializeCalendarData(createTodoData()),
+      loadedFrom: "local",
+      cloudUnavailable: false,
+      sourcePath: "C:\\data\\calendar.json",
+    });
+    calendarSave.mockResolvedValue(undefined);
+    await storeState().loadCalendarData();
+  }
+
+  it("locks mutations through flush and reload, then allows edits to the new source", async () => {
+    await loadExistingCalendar();
+    storeState().createTodo("2026-08-12", "before transition");
+    const beforeTransition = storeState().data;
+
+    expect(storeState().beginStorageTransition()).toBe(true);
+    expect(storeState().beginStorageTransition()).toBe(false);
+    storeState().createTodo("2026-08-12", "must not be accepted");
+    storeState().deleteTodo("2026-08-11", "todo-1");
+    storeState().createInboxTodo("must not be accepted");
+    storeState().addNoteLink("2026-08-11", "note-1");
+    expect(storeState().data).toBe(beforeTransition);
+
+    await vi.advanceTimersByTimeAsync(1_750);
+    expect(calendarSave).not.toHaveBeenCalled();
+    await expect(storeState().saveCalendarData()).resolves.toBe("saved");
+    expect(calendarSave).toHaveBeenCalledWith(serializeCalendarData(beforeTransition), "local");
+
+    calendarLoad.mockResolvedValue({
+      status: "ok",
+      data: serializeCalendarData(createEmptyCalendarData()),
+      loadedFrom: "cloud",
+      cloudUnavailable: false,
+      sourcePath: "C:\\cloud\\calendar.json",
+    });
+    await storeState().loadCalendarData();
+    storeState().createTodo("2026-08-12", "still locked after reload");
+    expect(storeState().data.todos).toEqual({});
+
+    storeState().endStorageTransition();
+    storeState().createTodo("2026-08-12", "new source edit");
+    await vi.advanceTimersByTimeAsync(1_750);
+    expect(calendarSave).toHaveBeenLastCalledWith(serializeCalendarData(storeState().data), "cloud");
+    expect(storeState().data.todos["2026-08-12"].items[0].text).toBe("new source edit");
+  });
+
+  it("waits for an in-flight save and flushes the newest pre-transition edits", async () => {
+    await loadExistingCalendar();
+    const activeSave = deferred<void>();
+    calendarSave.mockReturnValueOnce(activeSave.promise);
+    storeState().createTodo("2026-08-12", "first edit");
+    await vi.advanceTimersByTimeAsync(1_750);
+    storeState().createTodo("2026-08-12", "latest edit");
+    const latestData = storeState().data;
+
+    expect(storeState().beginStorageTransition()).toBe(true);
+    let flushed = false;
+    const flush = storeState().saveCalendarData().then((result) => {
+      flushed = true;
+      return result;
+    });
+    await Promise.resolve();
+    expect(flushed).toBe(false);
+    activeSave.resolve(undefined);
+    await vi.advanceTimersByTimeAsync(25);
+
+    await expect(flush).resolves.toBe("saved");
+    expect(calendarSave).toHaveBeenLastCalledWith(serializeCalendarData(latestData), "local");
+    storeState().endStorageTransition();
+  });
+
+  it("resumes autosave if a transition is canceled before existing edits are flushed", async () => {
+    await loadExistingCalendar();
+    storeState().createTodo("2026-08-12", "keep this edit");
+    const snapshot = storeState().data;
+    expect(storeState().beginStorageTransition()).toBe(true);
+    await vi.advanceTimersByTimeAsync(1_750);
+    expect(calendarSave).not.toHaveBeenCalled();
+
+    storeState().endStorageTransition();
+    await vi.advanceTimersByTimeAsync(1_750);
+    expect(calendarSave).toHaveBeenCalledWith(serializeCalendarData(snapshot), "local");
+    expect(storeState().storageTransitionInProgress).toBe(false);
+  });
+
+  it("blocks old data after a storage failure until the new calendar is loaded successfully", async () => {
+    await loadExistingCalendar();
+    storeState().createTodo("2026-08-12", "preserve old root data");
+    const previousData = storeState().data;
+    expect(storeState().beginStorageTransition()).toBe(true);
+    await storeState().saveCalendarData();
+    calendarSave.mockClear();
+
+    storeState().blockStorageAfterFailure(new Error("new root note scan failed"));
+    storeState().endStorageTransition();
+    expect(storeState()).toMatchObject({ loaded: true, loadState: "load_error", loadError: "new root note scan failed" });
+    expect(storeState().data).toBe(previousData);
+    storeState().createTodo("2026-08-12", "must not write old data to new root");
+    await vi.advanceTimersByTimeAsync(1_750);
+    await expect(storeState().saveCalendarData()).resolves.toBe("blocked");
+    expect(calendarSave).not.toHaveBeenCalled();
+
+    calendarLoad.mockResolvedValue({
+      status: "ok",
+      data: serializeCalendarData(createEmptyCalendarData()),
+      loadedFrom: "cloud",
+      cloudUnavailable: false,
+      sourcePath: "C:\\cloud\\calendar.json",
+    });
+    await storeState().loadCalendarData();
+    expect(storeState().loadState).toBe("ready");
+    storeState().createTodo("2026-08-12", "new root edit");
+    await vi.advanceTimersByTimeAsync(1_750);
+    expect(calendarSave).toHaveBeenCalledTimes(1);
+    expect(calendarSave).toHaveBeenCalledWith(serializeCalendarData(storeState().data), "cloud");
+    expect(storeState().data.todos["2026-08-12"].items.map((item) => item.text)).toEqual(["new root edit"]);
+  });
+
+  it("invalidates an older pending reload when storage failure is reported", async () => {
+    await loadExistingCalendar();
+    const previousData = storeState().data;
+    const staleLoad = deferred<unknown>();
+    calendarLoad.mockReturnValueOnce(staleLoad.promise);
+    const loading = storeState().loadCalendarData();
+    storeState().blockStorageAfterFailure("new storage is unverified");
+    staleLoad.resolve({
+      status: "ok",
+      data: serializeCalendarData(createEmptyCalendarData()),
+      loadedFrom: "local",
+      cloudUnavailable: false,
+      sourcePath: "C:\\data\\calendar.json",
+    });
+    await loading;
+
+    expect(storeState().data).toBe(previousData);
+    expect(storeState().loadState).toBe("load_error");
+    await expect(storeState().saveCalendarData()).resolves.toBe("blocked");
+    expect(calendarSave).not.toHaveBeenCalled();
+  });
+
+  it.each(["read failure", "corrupt file", "confirmation failure"])("retains the previous data and blocks writes after a transition reload %s", async (failure) => {
+    await loadExistingCalendar();
+    const previousData = storeState().data;
+    expect(storeState().beginStorageTransition()).toBe(true);
+    await storeState().saveCalendarData();
+    calendarSave.mockClear();
+    if (failure === "read failure") {
+      calendarLoad.mockRejectedValue(new Error("new storage unavailable"));
+    } else if (failure === "corrupt file") {
+      calendarLoad.mockResolvedValue({
+        status: "ok",
+        data: "{",
+        loadedFrom: "cloud",
+        cloudUnavailable: false,
+        sourcePath: "C:\\cloud\\calendar.json",
+      });
+      calendarBackup.mockResolvedValue("C:\\cloud\\calendar.json.bak");
+    } else {
+      calendarLoad.mockResolvedValue({
+        status: "missing",
+        data: "",
+        loadedFrom: "cloud",
+        cloudUnavailable: false,
+        sourcePath: "C:\\cloud\\calendar.json",
+      });
+      calendarConfirmLoaded.mockRejectedValue(new Error("snapshot changed before confirmation"));
+    }
+
+    await storeState().loadCalendarData();
+    storeState().endStorageTransition();
+    expect(storeState().data).toBe(previousData);
+    expect(storeState().loadState).toBe(failure === "read failure" ? "load_error" : "corrupt");
+    storeState().createTodo("2026-08-12", "must not overwrite failed source");
+    await expect(storeState().saveCalendarData()).resolves.toBe("blocked");
+    expect(calendarSave).not.toHaveBeenCalled();
   });
 });

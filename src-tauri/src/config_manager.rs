@@ -1,8 +1,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
+
+static CONFIG_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -55,28 +58,36 @@ impl LocalAutoSaveDirState {
     }
 }
 
-fn get_config_path(app: &AppHandle) -> PathBuf {
+fn get_config_path(app: &AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_config_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join("config.json")
+        .map(|path| path.join("config.json"))
+        .map_err(|error| format!("config_unavailable: {error}"))
 }
 
-fn read_config(app: &AppHandle) -> AppConfig {
-    let config_path = get_config_path(app);
-    match fs::read_to_string(&config_path) {
-        Ok(raw) => serde_json::from_str::<AppConfig>(&raw).unwrap_or_default(),
-        Err(_) => AppConfig::default(),
+fn read_config_path(config_path: &Path) -> Result<AppConfig, String> {
+    match fs::read_to_string(config_path) {
+        Ok(raw) => serde_json::from_str::<AppConfig>(&raw)
+            .map_err(|error| format!("config_invalid: {}: {error}", config_path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(AppConfig::default()),
+        Err(error) => Err(format!(
+            "config_unavailable: {}: {error}",
+            config_path.display()
+        )),
     }
 }
 
+fn read_config(app: &AppHandle) -> Result<AppConfig, String> {
+    read_config_path(&get_config_path(app)?)
+}
+
 fn write_config(app: &AppHandle, config: &AppConfig) -> Result<(), String> {
-    let config_path = get_config_path(app);
+    let config_path = get_config_path(app)?;
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let json = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
-    fs::write(&config_path, json).map_err(|e| e.to_string())
+    crate::atomic_file::write_file_atomically(&config_path, json.as_bytes(), "write_config")
 }
 
 fn normalize_path_for_compare(path: &str) -> String {
@@ -161,9 +172,9 @@ fn classify_custom_auto_save_dir(config: &AppConfig) -> CustomAutoSaveDirState {
     }
 }
 
-pub fn get_custom_auto_save_dir_state(app: &AppHandle) -> CustomAutoSaveDirState {
-    let config = read_config(app);
-    classify_custom_auto_save_dir(&config)
+pub fn get_custom_auto_save_dir_state(app: &AppHandle) -> Result<CustomAutoSaveDirState, String> {
+    let config = read_config(app)?;
+    Ok(classify_custom_auto_save_dir(&config))
 }
 
 pub fn set_custom_auto_save_dir(app: &AppHandle, dir: Option<&str>) -> Result<(), String> {
@@ -176,18 +187,24 @@ pub fn set_custom_auto_save_dir(app: &AppHandle, dir: Option<&str>) -> Result<()
             return Err("Path must be an existing directory".to_string());
         }
     }
-    let mut config = read_config(app);
+    let _guard = CONFIG_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut config = read_config(app)?;
     config.auto_save_dir = dir.map(String::from);
     write_config(app, &config)
 }
 
-pub fn get_cloud_sync_provider(app: &AppHandle) -> Option<String> {
-    let config = read_config(app);
-    config.cloud_sync_provider.filter(|p| !p.is_empty())
+pub fn get_cloud_sync_provider(app: &AppHandle) -> Result<Option<String>, String> {
+    let config = read_config(app)?;
+    Ok(config.cloud_sync_provider.filter(|p| !p.is_empty()))
 }
 
 pub fn set_cloud_sync_provider(app: &AppHandle, provider: Option<&str>) -> Result<(), String> {
-    let mut config = read_config(app);
+    let _guard = CONFIG_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut config = read_config(app)?;
     if let Some(existing_dir) = config.auto_save_dir.clone() {
         let matches_previous_cloud_path = config
             .cloud_sync_provider
@@ -207,8 +224,14 @@ pub fn set_cloud_sync_provider(app: &AppHandle, provider: Option<&str>) -> Resul
     write_config(app, &config)
 }
 
-pub fn get_local_auto_save_dir_state(app: &AppHandle, default_dir: &Path) -> LocalAutoSaveDirState {
-    classify_local_auto_save_dir(get_custom_auto_save_dir_state(app), default_dir)
+pub fn get_local_auto_save_dir_state(
+    app: &AppHandle,
+    default_dir: &Path,
+) -> Result<LocalAutoSaveDirState, String> {
+    Ok(classify_local_auto_save_dir(
+        get_custom_auto_save_dir_state(app)?,
+        default_dir,
+    ))
 }
 
 fn classify_local_auto_save_dir(
@@ -222,28 +245,31 @@ fn classify_local_auto_save_dir(
     }
 }
 
-pub fn get_cloud_sync_source(app: &AppHandle) -> LibrarySource {
-    let config = read_config(app);
+pub fn get_cloud_sync_source(app: &AppHandle) -> Result<LibrarySource, String> {
+    let config = read_config(app)?;
     if config
         .cloud_sync_provider
         .as_ref()
         .is_some_and(|provider| !provider.is_empty())
     {
-        config.cloud_sync_source.unwrap_or(LibrarySource::Cloud)
+        Ok(config.cloud_sync_source.unwrap_or(LibrarySource::Cloud))
     } else {
-        LibrarySource::Local
+        Ok(LibrarySource::Local)
     }
 }
 
 pub fn set_cloud_sync_source(app: &AppHandle, source: LibrarySource) -> Result<(), String> {
-    let mut config = read_config(app);
+    let _guard = CONFIG_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut config = read_config(app)?;
     config.cloud_sync_source = Some(source);
     write_config(app, &config)
 }
 
-pub fn get_cloud_notes_dir(app: &AppHandle) -> Option<PathBuf> {
-    let provider = get_cloud_sync_provider(app)?;
-    get_cloud_notes_dir_for_provider(&provider)
+pub fn get_cloud_notes_dir(app: &AppHandle) -> Result<Option<PathBuf>, String> {
+    Ok(get_cloud_sync_provider(app)?
+        .and_then(|provider| get_cloud_notes_dir_for_provider(&provider)))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -339,7 +365,7 @@ pub fn detect_cloud_providers() -> Vec<CloudProviderInfo> {
 /// Tauri stores config at `%APPDATA%/com.hwankr.hwannote/config.json`.
 #[cfg(windows)]
 pub fn migrate_legacy_electron_config(app: &AppHandle) -> Result<(), String> {
-    let tauri_config_path = get_config_path(app);
+    let tauri_config_path = get_config_path(app)?;
 
     // If Tauri config already exists, skip migration
     if tauri_config_path.exists() {
@@ -372,7 +398,10 @@ pub fn migrate_legacy_electron_config(_app: &AppHandle) -> Result<(), String> {
 
 #[cfg(windows)]
 pub fn migrate_legacy_cloud_sync_config(app: &AppHandle) -> Result<(), String> {
-    let mut config = read_config(app);
+    let _guard = CONFIG_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut config = read_config(app)?;
     if config
         .cloud_sync_provider
         .as_deref()
@@ -402,6 +431,37 @@ pub fn migrate_legacy_cloud_sync_config(_app: &AppHandle) -> Result<(), String> 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn corrupt_or_unreadable_config_does_not_become_default_storage() {
+        let root = std::env::temp_dir().join(format!(
+            "hwan-config-error-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("config.json");
+        assert!(super::read_config_path(&path)
+            .unwrap()
+            .auto_save_dir
+            .is_none());
+        for raw in ["", "{", r#"{"autoSaveDir":42}"#] {
+            std::fs::write(&path, raw).unwrap();
+            assert!(super::read_config_path(&path)
+                .unwrap_err()
+                .starts_with("config_invalid:"));
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+        }
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(super::read_config_path(&path)
+            .unwrap_err()
+            .starts_with("config_unavailable:"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     use super::{
         classify_custom_auto_save_dir, classify_legacy_cloud_sync_dir,
         classify_local_auto_save_dir, AppConfig, CloudProviderInfo, CustomAutoSaveDirState,

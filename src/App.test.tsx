@@ -9,6 +9,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   autoSave: vi.fn(),
+  beginStorageTransition: vi.fn(),
+  endStorageTransition: vi.fn(),
+  blockStorageAfterFailure: vi.fn(),
+  calendarTransitionActive: false,
   browseAutoSaveDir: vi.fn(),
   calendarData: { version: 1 },
   calendarLoadState: "ready" as "idle" | "loading" | "ready" | "corrupt" | "load_error",
@@ -88,7 +92,13 @@ vi.mock("./stores/calendarStore", () => ({
     getState: () => ({
       backupPath: null,
       data: mocks.calendarData,
-      cleanOrphanNoteLinks: mocks.cleanOrphanNoteLinks,
+      beginStorageTransition: mocks.beginStorageTransition,
+      endStorageTransition: mocks.endStorageTransition,
+      blockStorageAfterFailure: mocks.blockStorageAfterFailure,
+      storageTransitionInProgress: mocks.calendarTransitionActive,
+      cleanOrphanNoteLinks: (authoritative: boolean) => {
+        if (!mocks.calendarTransitionActive) mocks.cleanOrphanNoteLinks(authoritative);
+      },
       loadCalendarData: mocks.loadCalendarData,
       loadError: null,
       loadState: mocks.calendarLoadState,
@@ -249,7 +259,19 @@ import { I18nProvider, useI18n } from "./i18n/context";
 import { useNoteStore } from "./stores/noteStore";
 
 const NOTE_ID = "library-note";
+const LOADED_DIGEST = "loaded-content-digest";
+const SAVED_DIGEST = "saved-content-digest";
 const AUTO_SAVE_DELAY_MS = 1_750;
+
+function createSaveResult(noteId = NOTE_ID, contentDigest = SAVED_DIGEST) {
+  return {
+    filePath: `C:/notes/${noteId}.md`,
+    noteId,
+    createdAt: 1_000,
+    updatedAt: 2_000,
+    contentDigest,
+  };
+}
 
 function createLoadResult(
   loadedFrom: "local" | "cloud" | "local_fallback",
@@ -259,6 +281,7 @@ function createLoadResult(
     title: string;
     createdAt: number;
     updatedAt: number;
+    contentDigest: string;
     isPinned: boolean;
   }> = {},
   folders: string[] = [],
@@ -276,6 +299,7 @@ function createLoadResult(
         updatedAt: noteOverrides.updatedAt ?? (loadedFrom === "cloud" ? 3_000 : 1_000),
         filePath: `C:/notes/${noteOverrides.noteId ?? NOTE_ID}.md`,
         isPinned: noteOverrides.isPinned ?? false,
+        contentDigest: noteOverrides.contentDigest ?? LOADED_DIGEST,
       },
     ],
     folders,
@@ -414,12 +438,7 @@ describe("App locale changes", () => {
       sidebarVisible: false,
     });
 
-    mocks.autoSave.mockReset().mockResolvedValue({
-      filePath: "C:/notes/library-note.md",
-      noteId: NOTE_ID,
-      createdAt: 1_000,
-      updatedAt: 2_000,
-    });
+    mocks.autoSave.mockReset().mockResolvedValue(createSaveResult());
     mocks.loadAll.mockReset().mockResolvedValue(createLoadResult("local"));
     mocks.loadSession.mockReset().mockResolvedValue({
       openTabIds: [NOTE_ID],
@@ -428,7 +447,21 @@ describe("App locale changes", () => {
     mocks.importTxt.mockReset().mockResolvedValue(null);
     mocks.saveTxt.mockReset().mockResolvedValue(true);
     mocks.dialogMessage.mockReset().mockResolvedValue("Yes");
-    mocks.saveCalendarData.mockReset().mockResolvedValue("saved");
+    mocks.saveCalendarData.mockReset().mockImplementation(async () =>
+      mocks.calendarLoadState === "ready" ? "saved" : "blocked"
+    );
+    mocks.calendarTransitionActive = false;
+    mocks.beginStorageTransition.mockReset().mockImplementation(() => {
+      if (mocks.calendarTransitionActive) return false;
+      mocks.calendarTransitionActive = true;
+      return true;
+    });
+    mocks.endStorageTransition.mockReset().mockImplementation(() => {
+      mocks.calendarTransitionActive = false;
+    });
+    mocks.blockStorageAfterFailure.mockReset().mockImplementation(() => {
+      mocks.calendarLoadState = "load_error";
+    });
     mocks.saveSession.mockReset().mockResolvedValue(undefined);
     mocks.setActiveSource.mockReset().mockResolvedValue(undefined);
     mocks.getAutoSaveDir.mockReset().mockResolvedValue({
@@ -544,6 +577,24 @@ describe("App locale changes", () => {
     expect(useNoteStore.getState().activeTabId).toBe(importedId);
   });
 
+  it("activates an imported text file in the editor without editing the previous library note", async () => {
+    await renderApp(root);
+    mocks.importTxt.mockResolvedValueOnce([{ title: "Imported", content: "external body", filePath: "C:/import.txt" }]);
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="import-txt"]').click();
+    });
+    await flushReactWork();
+    const importedId = useNoteStore.getState().activeTabId!;
+    expect(importedId).not.toBe(NOTE_ID);
+    expect(useNoteStore.getState().notesById[importedId]).toMatchObject({ plainText: "external body", persistence: "external", sourceFilePath: "C:/import.txt" });
+
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="edit-note"]').click();
+    });
+    expect(useNoteStore.getState().notesById[importedId]).toMatchObject({ plainText: "dirty draft", isDirty: true });
+    expect(useNoteStore.getState().notesById[NOTE_ID]).toMatchObject({ plainText: "disk copy", isDirty: false });
+  });
+
   it("preserves a user-created empty tab while replacing the initial placeholder", async () => {
     const initialLoad = createDeferred<ReturnType<typeof createLoadResult>>();
     mocks.loadAll.mockReturnValue(initialLoad.promise);
@@ -621,8 +672,8 @@ describe("App locale changes", () => {
 
   it("drains edits made during the exit calendar save and retries a newer revision before exiting", async () => {
     const calendarSave = createDeferred<"saved">();
-    const firstSave = createDeferred<void>();
-    const latestSave = createDeferred<void>();
+    const firstSave = createDeferred<ReturnType<typeof createSaveResult>>();
+    const latestSave = createDeferred<ReturnType<typeof createSaveResult>>();
     mocks.saveCalendarData.mockReturnValueOnce(calendarSave.promise);
     mocks.autoSave.mockReturnValueOnce(firstSave.promise).mockReturnValueOnce(latestSave.promise);
     await renderApp(root);
@@ -637,12 +688,12 @@ describe("App locale changes", () => {
     expect(mocks.windowExit).not.toHaveBeenCalled();
     await act(async () => {
       requiredElement<HTMLButtonElement>(container, '[data-testid="edit-concurrently"]').click();
-      firstSave.resolve();
+      firstSave.resolve(createSaveResult());
     });
     await flushUntil(() => mocks.autoSave.mock.calls.length === 2, "the latest exit note save");
     expect(mocks.autoSave.mock.calls[1][2]).toContain("concurrent edit");
     expect(mocks.windowExit).not.toHaveBeenCalled();
-    await act(async () => { latestSave.resolve(); await closing; });
+    await act(async () => { latestSave.resolve(createSaveResult()); await closing; });
     expect(mocks.windowExit).toHaveBeenCalledOnce();
     expect(useNoteStore.getState().notesById[NOTE_ID]).toMatchObject({ isDirty: false, plainText: "concurrent edit" });
   });
@@ -699,7 +750,7 @@ describe("App locale changes", () => {
 
   it.each(["saved", "blocked"] as const)("resaves calendar edits under the exit lock and handles a %s result", async (result) => {
     const firstCalendarSave = createDeferred<"saved">();
-    const noteSave = createDeferred<void>();
+    const noteSave = createDeferred<ReturnType<typeof createSaveResult>>();
     const latestCalendarSave = createDeferred<"saved" | "blocked">();
     mocks.saveCalendarData.mockReturnValueOnce(firstCalendarSave.promise).mockReturnValueOnce(latestCalendarSave.promise);
     mocks.autoSave.mockReturnValueOnce(noteSave.promise);
@@ -715,7 +766,7 @@ describe("App locale changes", () => {
     await flushUntil(() => mocks.autoSave.mock.calls.length === 1, "the note drain");
     await act(async () => {
       mocks.calendarData = { version: 2 };
-      noteSave.resolve();
+      noteSave.resolve(createSaveResult());
     });
     await flushUntil(() => mocks.saveCalendarData.mock.calls.length === 2, "the latest calendar save");
     expect(document.body.inert).toBe(true);
@@ -751,7 +802,7 @@ describe("App locale changes", () => {
   });
 
   it("settles an in-flight save before discarding a newer edit on tab close", async () => {
-    const inFlightSave = createDeferred<void>();
+    const inFlightSave = createDeferred<ReturnType<typeof createSaveResult>>();
     mocks.autoSave.mockReturnValueOnce(inFlightSave.promise);
     await renderApp(root);
     await act(async () => {
@@ -764,7 +815,7 @@ describe("App locale changes", () => {
       requiredElement<HTMLButtonElement>(container, `[data-testid="close-${NOTE_ID}"]`).click();
     });
     expect(mocks.dialogMessage).not.toHaveBeenCalled();
-    await act(async () => { inFlightSave.resolve(); });
+    await act(async () => { inFlightSave.resolve(createSaveResult()); });
     await flushReactWork();
     expect(mocks.dialogMessage).toHaveBeenCalledOnce();
     expect(useNoteStore.getState().notesById[NOTE_ID]).toMatchObject({ plainText: "dirty draft", isDirty: false });
@@ -894,6 +945,7 @@ describe("App locale changes", () => {
       true,
       false,
       "local",
+      LOADED_DIGEST,
     );
   });
 
@@ -1071,6 +1123,7 @@ describe("App locale changes", () => {
       true,
       false,
       "cloud",
+      LOADED_DIGEST,
     );
   });
 
@@ -1265,6 +1318,7 @@ describe("App locale changes", () => {
       true,
       false,
       "cloud",
+      LOADED_DIGEST,
     );
     expect(mocks.recoverCalendarDataFromCloud).not.toHaveBeenCalled();
   });
@@ -1353,6 +1407,7 @@ describe("App locale changes", () => {
       true,
       false,
       "local",
+      LOADED_DIGEST,
     );
     expect(useNoteStore.getState().notesById[NOTE_ID]).toMatchObject({
       plainText: "dirty draft",
@@ -1360,7 +1415,205 @@ describe("App locale changes", () => {
     });
   });
 
-  it("recovers an edit made while a source-transition reload is in flight", async () => {
+  it("holds calendar and editor locks through storage flush, source change, and reload", async () => {
+    const calendarSave = createDeferred<"saved">();
+    const sourceSwitch = createDeferred<void>();
+    const noteReload = createDeferred<ReturnType<typeof createLoadResult>>();
+    const calendarReload = createDeferred<void>();
+    await renderApp(root);
+    mocks.calendarData = { version: 2 };
+    const unsavedCalendar = mocks.calendarData;
+    const savedCalendars: Array<typeof mocks.calendarData> = [];
+    mocks.saveCalendarData.mockImplementationOnce(() => {
+      savedCalendars.push(mocks.calendarData);
+      return calendarSave.promise;
+    });
+    mocks.setActiveSource.mockReturnValueOnce(sourceSwitch.promise);
+    mocks.loadAll.mockReturnValueOnce(noteReload.promise);
+    mocks.loadCalendarData.mockReturnValueOnce(calendarReload.promise);
+    mocks.cleanOrphanNoteLinks.mockClear();
+
+    const expectLocked = () => {
+      expect(document.body.inert).toBe(true);
+      expect(mocks.calendarTransitionActive).toBe(true);
+      expect(mocks.endStorageTransition).not.toHaveBeenCalled();
+    };
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="switch-cloud-source"]').click();
+    });
+    await flushUntil(() => mocks.saveCalendarData.mock.calls.length === 1, "calendar flush under transition lock");
+    expectLocked();
+    expect(savedCalendars).toEqual([unsavedCalendar]);
+    expect(mocks.setActiveSource).not.toHaveBeenCalled();
+    expect(mocks.loadAll).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="edit-note"]').click();
+      requiredElement<HTMLButtonElement>(container, '[data-testid="switch-cloud-source"]').click();
+      calendarSave.resolve("saved");
+    });
+    await flushUntil(() => mocks.setActiveSource.mock.calls.length === 1, "source switch after flushed calendar");
+    expectLocked();
+    expect(mocks.beginStorageTransition).toHaveBeenCalledOnce();
+    expect(useNoteStore.getState().notesById[NOTE_ID].plainText).toBe("disk copy");
+
+    await act(async () => { sourceSwitch.resolve(); });
+    await flushUntil(() => mocks.loadAll.mock.calls.length === 2, "note reload");
+    expectLocked();
+    await act(async () => { noteReload.resolve(createLoadResult("cloud", "cloud snapshot")); });
+    await flushUntil(() => mocks.loadCalendarData.mock.calls.length === 2, "calendar reload");
+    expectLocked();
+    expect(mocks.cleanOrphanNoteLinks).not.toHaveBeenCalled();
+
+    await act(async () => { calendarReload.resolve(); });
+    await flushReactWork();
+    expect(document.body.inert).toBe(false);
+    expect(mocks.calendarTransitionActive).toBe(false);
+    expect(mocks.endStorageTransition).toHaveBeenCalledOnce();
+    expect(mocks.cleanOrphanNoteLinks).toHaveBeenCalledOnce();
+    expect(mocks.endStorageTransition.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.cleanOrphanNoteLinks.mock.invocationCallOrder[0],
+    );
+  });
+
+  it.each(["blocked", "error"])("keeps unsaved calendar data and unlocks when the transition flush is %s", async (failure) => {
+    consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await renderApp(root);
+    mocks.calendarData = { version: 2 };
+    const unsavedCalendar = mocks.calendarData;
+    if (failure === "blocked") mocks.saveCalendarData.mockResolvedValueOnce("blocked");
+    else mocks.saveCalendarData.mockRejectedValueOnce(new Error("calendar unavailable"));
+
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="switch-cloud-source"]').click();
+    });
+    await flushUntil(() => mocks.endStorageTransition.mock.calls.length === 1, "failed calendar flush unlock");
+    expect(mocks.calendarData).toBe(unsavedCalendar);
+    expect(mocks.setActiveSource).not.toHaveBeenCalled();
+    expect(mocks.loadAll).toHaveBeenCalledTimes(1);
+    expect(mocks.loadCalendarData).toHaveBeenCalledTimes(1);
+    expect(mocks.blockStorageAfterFailure).not.toHaveBeenCalled();
+    expect(document.body.inert).toBe(false);
+    expect(mocks.calendarTransitionActive).toBe(false);
+    expect(mocks.dialogMessage).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ kind: "error" }));
+  });
+
+  it("restores both editor locks and keeps existing data when the storage command fails", async () => {
+    consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await renderApp(root);
+    mocks.setActiveSource.mockRejectedValueOnce(new Error("source switch failed"));
+    const calendarBefore = mocks.calendarData;
+
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="switch-cloud-source"]').click();
+    });
+    await flushUntil(() => mocks.endStorageTransition.mock.calls.length === 1, "storage command failure unlock");
+    expect(document.body.inert).toBe(false);
+    expect(mocks.calendarTransitionActive).toBe(false);
+    expect(mocks.calendarData).toBe(calendarBefore);
+    expect(mocks.loadAll).toHaveBeenCalledTimes(1);
+    expect(mocks.dialogMessage).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ kind: "error" }));
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="edit-note"]').click();
+    });
+    expect(useNoteStore.getState().notesById[NOTE_ID]).toMatchObject({ plainText: "dirty draft", isDirty: true });
+  });
+
+  it("blocks old calendar and note writes after source selection succeeds but the library reload fails, then recovers on retry", async () => {
+    consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await renderApp(root);
+    const calendarBefore = mocks.calendarData;
+    const reloadFailure = new Error("new storage scan failed");
+    mocks.loadAll.mockRejectedValueOnce(reloadFailure);
+
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="switch-cloud-source"]').click();
+    });
+    await flushUntil(() => mocks.blockStorageAfterFailure.mock.calls.length === 1, "blocking writes to the unverified source");
+    await flushReactWork();
+    expect(mocks.setActiveSource).toHaveBeenCalledWith("cloud");
+    expect(mocks.blockStorageAfterFailure).toHaveBeenCalledWith(reloadFailure);
+    expect(mocks.loadAll).toHaveBeenCalledTimes(2);
+    expect(mocks.loadCalendarData).toHaveBeenCalledTimes(1);
+    expect(mocks.calendarData).toBe(calendarBefore);
+    expect(mocks.calendarLoadState).toBe("load_error");
+    expect(mocks.calendarTransitionActive).toBe(false);
+    expect(document.body.inert).toBe(false);
+    expect(container.querySelector(".note-recovery-panel")).not.toBeNull();
+
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="edit-note"]').click();
+      await vi.advanceTimersByTimeAsync(AUTO_SAVE_DELAY_MS);
+    });
+    expect(mocks.autoSave).not.toHaveBeenCalled();
+    expect(useNoteStore.getState().notesById[NOTE_ID]).toMatchObject({ plainText: "dirty draft", isDirty: true });
+
+    mocks.loadAll.mockResolvedValueOnce(createLoadResult("cloud", "new root document"));
+    mocks.loadCalendarData.mockImplementationOnce(async () => {
+      mocks.calendarData = { version: 3 };
+      mocks.calendarLoadState = "ready";
+    });
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, ".note-recovery-actions button").click();
+    });
+    await flushUntil(() => mocks.loadCalendarData.mock.calls.length === 2, "verified calendar recovery");
+    await flushReactWork();
+    expect(mocks.saveCalendarData).toHaveBeenCalledTimes(1);
+    expect(mocks.calendarLoadState).toBe("ready");
+    expect(mocks.calendarTransitionActive).toBe(false);
+    expect(container.querySelector(".note-recovery-panel")).toBeNull();
+    expect(useNoteStore.getState().notesById[NOTE_ID]).toMatchObject({ plainText: "new root document", isDirty: false });
+    expect(Object.values(useNoteStore.getState().notesById).some((tab) => tab.plainText === "dirty draft")).toBe(true);
+
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, `[data-testid="select-${NOTE_ID}"]`).click();
+    });
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="edit-concurrently"]').click();
+      await vi.advanceTimersByTimeAsync(AUTO_SAVE_DELAY_MS);
+    });
+    await flushUntil(() => mocks.autoSave.mock.calls.length === 1, "writes resume only after verified recovery");
+    expect(mocks.autoSave.mock.calls[0][6]).toBe("cloud");
+    expect(mocks.autoSave.mock.calls[0][2]).toContain("concurrent edit");
+  });
+
+  it("saves a stale-digest conflict under a new ID and reloads the preserved external original", async () => {
+    consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await renderApp(root);
+    mocks.autoSave.mockRejectedValueOnce(new Error("note_conflict: original changed on disk"));
+    mocks.autoSave.mockImplementation(async (noteId: string) => createSaveResult(noteId));
+    mocks.loadAll.mockImplementation(async () => {
+      const recoveryCall = mocks.autoSave.mock.calls[1];
+      const original = createLoadResult("local", "external original", { contentDigest: "external-digest" });
+      const recovery = createLoadResult("local", "dirty draft", {
+        noteId: recoveryCall[0] as string,
+        title: recoveryCall[1] as string,
+        contentDigest: SAVED_DIGEST,
+      });
+      return { ...original, notes: [...original.notes, ...recovery.notes] };
+    });
+
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="edit-note"]').click();
+      await vi.advanceTimersByTimeAsync(AUTO_SAVE_DELAY_MS);
+    });
+    await flushUntil(() => mocks.loadAll.mock.calls.length === 2, "reload after the original save queue settles");
+    await flushReactWork();
+
+    expect(mocks.autoSave).toHaveBeenCalledTimes(2);
+    expect(mocks.autoSave.mock.calls[0][0]).toBe(NOTE_ID);
+    expect(mocks.autoSave.mock.calls[0][7]).toBe(LOADED_DIGEST);
+    const recoveryId = mocks.autoSave.mock.calls[1][0] as string;
+    expect(recoveryId).not.toBe(NOTE_ID);
+    expect(mocks.autoSave.mock.calls[1][2]).toContain("dirty draft");
+    expect(mocks.autoSave.mock.calls[1][7]).toBeUndefined();
+    expect(useNoteStore.getState().notesById[NOTE_ID]).toMatchObject({ plainText: "external original", contentDigest: "external-digest", isDirty: false });
+    expect(useNoteStore.getState().notesById[recoveryId]).toMatchObject({ plainText: "dirty draft", contentDigest: SAVED_DIGEST, isDirty: false });
+    expect(useNoteStore.getState().activeTabId).toBe(recoveryId);
+    expect(mocks.dialogMessage).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ kind: "warning" }));
+  });
+
+  it("blocks editor input and recovers programmatic changes while a source-transition reload is in flight", async () => {
     const cloudReload = createDeferred<ReturnType<typeof createLoadResult>>();
     await renderApp(root);
     mocks.loadAll.mockReturnValueOnce(cloudReload.promise);
@@ -1381,11 +1634,17 @@ describe("App locale changes", () => {
       true,
       false,
       "local",
+      LOADED_DIGEST,
     );
     expect(mocks.setActiveSource).toHaveBeenCalledWith("cloud");
 
     await act(async () => {
       requiredElement<HTMLButtonElement>(container, '[data-testid="edit-concurrently"]').click();
+      expect(useNoteStore.getState().notesById[NOTE_ID].plainText).toBe("dirty draft");
+      // Non-UI updates must still be preserved if an integration changes the store.
+      useNoteStore.getState().updateTabContent(NOTE_ID, {
+        type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "concurrent edit" }] }],
+      }, "concurrent edit");
     });
     expect(useNoteStore.getState().notesById[NOTE_ID]).toMatchObject({
       plainText: "concurrent edit",
@@ -1423,7 +1682,7 @@ describe("App locale changes", () => {
     expect(reloadedState.openTabIds).toEqual(expect.arrayContaining([NOTE_ID, recoveredTab.id]));
   });
 
-  it("fails closed when a new edit cannot be saved after the source switch starts", async () => {
+  it("fails closed when a programmatic edit cannot be saved after the source switch starts", async () => {
     const sourceSwitch = createDeferred<void>();
     const saveFailure = new Error("second save failed");
     consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -1434,6 +1693,7 @@ describe("App locale changes", () => {
         noteId: NOTE_ID,
         createdAt: 1_000,
         updatedAt: 2_000,
+        contentDigest: SAVED_DIGEST,
       })
       .mockRejectedValueOnce(saveFailure);
 
@@ -1454,6 +1714,11 @@ describe("App locale changes", () => {
     });
     await act(async () => {
       requiredElement<HTMLButtonElement>(container, '[data-testid="edit-concurrently"]').click();
+      expect(useNoteStore.getState().notesById[NOTE_ID].plainText).toBe("dirty draft");
+      // Non-UI updates must still be preserved if an integration changes the store.
+      useNoteStore.getState().updateTabContent(NOTE_ID, {
+        type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "concurrent edit" }] }],
+      }, "concurrent edit");
     });
     expect(useNoteStore.getState().notesById[NOTE_ID]).toMatchObject({
       plainText: "concurrent edit",
@@ -1478,6 +1743,7 @@ describe("App locale changes", () => {
       true,
       false,
       "local",
+      SAVED_DIGEST,
     );
     expect(stateAfterFailedReload.openTabIds).toEqual([NOTE_ID]);
     expect(stateAfterFailedReload.activeTabId).toBe(NOTE_ID);
@@ -1614,12 +1880,14 @@ describe("App locale changes", () => {
       noteId: string;
       createdAt: number;
       updatedAt: number;
+      contentDigest: string;
     }>();
     const followUpNoteSave = createDeferred<{
       filePath: string;
       noteId: string;
       createdAt: number;
       updatedAt: number;
+      contentDigest: string;
     }>();
     mocks.saveCalendarData.mockReturnValueOnce(calendarSave.promise);
     mocks.autoSave
@@ -1657,6 +1925,7 @@ describe("App locale changes", () => {
       true,
       false,
       "local",
+      LOADED_DIGEST,
     );
 
     await act(async () => {
@@ -1673,6 +1942,7 @@ describe("App locale changes", () => {
         noteId: NOTE_ID,
         createdAt: 1_000,
         updatedAt: 2_000,
+        contentDigest: SAVED_DIGEST,
       });
       await firstNoteSave.promise;
     });
@@ -1688,6 +1958,7 @@ describe("App locale changes", () => {
       true,
       false,
       "local",
+      SAVED_DIGEST,
     );
 
     await act(async () => {
@@ -1696,6 +1967,7 @@ describe("App locale changes", () => {
         noteId: NOTE_ID,
         createdAt: 1_000,
         updatedAt: 3_000,
+        contentDigest: SAVED_DIGEST,
       });
       await followUpNoteSave.promise;
     });
@@ -1722,6 +1994,7 @@ describe("App locale changes", () => {
       noteId: string;
       createdAt: number;
       updatedAt: number;
+      contentDigest: string;
     }>();
     mocks.autoSave.mockReturnValueOnce(inFlightNoteSave.promise);
     mocks.dialogMessage.mockResolvedValueOnce("No");
@@ -1747,6 +2020,7 @@ describe("App locale changes", () => {
         noteId: NOTE_ID,
         createdAt: 1_000,
         updatedAt: 2_000,
+        contentDigest: SAVED_DIGEST,
       });
       await inFlightNoteSave.promise;
     });
@@ -1828,7 +2102,7 @@ describe("App locale changes", () => {
     );
   });
 
-  it("releases the close guard only after saves finish and restores it when installation fails", async () => {
+  it.each(["failure", "success"])("locks editing during installation and restores close protection after %s returns", async (outcome) => {
     const calendarSave = createDeferred<"saved" | "blocked">();
     const installation = createDeferred<void>();
     consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -1858,6 +2132,13 @@ describe("App locale changes", () => {
       await calendarSave.promise;
     });
     await flushUntil(() => mocks.updaterInstall.mock.calls.length === 1, "the update installation");
+    expect(mocks.saveCalendarData).toHaveBeenCalledTimes(2);
+    expect(document.body.inert).toBe(true);
+    expect(mocks.calendarTransitionActive).toBe(true);
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="edit-note"]').click();
+    });
+    expect(useNoteStore.getState().notesById[NOTE_ID].plainText).toBe("disk copy");
 
     const preventDuringInstall = vi.fn();
     await act(async () => {
@@ -1867,10 +2148,14 @@ describe("App locale changes", () => {
 
     mocks.saveCalendarData.mockResolvedValueOnce("blocked");
     await act(async () => {
-      installation.reject(new Error("install failed"));
+      if (outcome === "failure") installation.reject(new Error("install failed"));
+      else installation.resolve();
       await installation.promise.catch(() => undefined);
     });
     await flushReactWork();
+    expect(document.body.inert).toBe(false);
+    expect(mocks.calendarTransitionActive).toBe(false);
+    expect(mocks.endStorageTransition).toHaveBeenCalledOnce();
 
     const preventAfterFailure = vi.fn();
     await act(async () => {

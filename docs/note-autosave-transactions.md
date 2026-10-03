@@ -19,6 +19,30 @@ temps, and journal have also been removed successfully.
 
 ## Transaction phases
 
+### External edits and save retries
+
+Library loads and successful saves return a SHA-256 `contentDigest` of the exact
+file bytes, including metadata and platform line endings. Subsequent saves and
+deletes must supply that value as `expectedContentDigest`. A mismatched, missing,
+or externally deleted source fails with `note_conflict` before publication.
+The editor retains the current draft under a new ID as a conflict copy, leaving
+the external original untouched. A new unsaved note supplies no digest.
+
+Recovery may recognize a late retry only when a validated pending journal proves
+the same old digest, note ID, next payload, path, and index were just committed.
+This avoids treating a replayed successful save as an unrelated external edit.
+The check does not provide a distributed filesystem lock; a cloud client writing
+concurrently after the final validation remains outside the transaction boundary.
+
+Cloud migration now publishes each copied note and its original identity through
+the same journal before proceeding to the next note. A retry replays the pending
+note before scanning and skips already copied IDs. TXT and configuration files
+use synchronized same-directory temporary files and atomic single-file replacement.
+Configuration parse or read failures are surfaced instead of selecting a default
+storage location.
+
+### Journal state
+
 | Journal phase | Durable state | Recovery action |
 | --- | --- | --- |
 | `prepared` | Intent exists; note/index temps may be absent or incomplete; no final path may have been changed | Remove recorded partial temps and journal, preserving the previous note/index |

@@ -5,6 +5,36 @@ All notable user-facing changes to HwanNote are documented here.
 This project follows [Semantic Versioning](https://semver.org/) and commit messages use the
 [Conventional Commits](https://www.conventionalcommits.org/) style.
 
+## [0.9.17] - 2026-10-03
+
+### Fixed
+
+- Preserve external note edits by checking the loaded file digest before saving
+  or deleting. Conflicting edits are retained in a separate copy.
+- Lock editing throughout library switches and the final update installation
+  step. Failed or returning installers restore normal save-before-close checks.
+- Keep writes blocked if reloading a changed library fails, until a successful
+  retry restores an authoritative view of its notes and calendar.
+- Preserve Shift+Enter in TXT files, literal checklist markers, empty paragraphs,
+  and nested checklist paragraphs when saving and reopening notes.
+- Remember a library note's Text format without interpreting its contents as
+  Markdown, including trailing whitespace and line breaks.
+- Focus the imported TXT note so subsequent edits apply to the file just opened.
+- Restrict table cells to supported text formatting so nested blocks cannot
+  silently lose their structure when saved as Markdown.
+- Validate individual calendar items and preserve the original file for recovery
+  when nested data is damaged. Failed reloads retain the previous calendar view.
+- Save external TXT files and configuration through synchronized temporary files
+  and atomic replacement. Invalid configuration blocks access instead of silently
+  switching to the default library.
+- Recover interrupted cloud copies with the autosave journal, keeping original
+  note IDs and pin state without creating duplicate notes on retry.
+
+### Security
+
+- Update the editor to Tiptap 3 and refresh Markdown, Vite, Vitest, and transitive
+  dependencies to address the dependency audit findings.
+
 ## [0.9.16] - 2026-09-26
 
 ### Fixed

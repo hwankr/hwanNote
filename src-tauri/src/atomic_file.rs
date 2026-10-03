@@ -1,6 +1,73 @@
 use std::fs;
 use std::io;
+use std::io::Write;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// Replace a document only after all replacement bytes have reached its temp file.
+pub(crate) fn write_file_atomically(
+    destination: &Path,
+    bytes: &[u8],
+    operation: &str,
+) -> Result<(), String> {
+    write_file_atomically_with_hook(destination, bytes, operation, |_| Ok(()))
+}
+
+fn write_file_atomically_with_hook(
+    destination: &Path,
+    bytes: &[u8],
+    operation: &str,
+    before_publish: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<(), String> {
+    let parent = destination
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).map_err(|error| format!("{operation}: {error}"))?;
+    let destination = parent.join(
+        destination
+            .file_name()
+            .ok_or("A destination filename is required")?,
+    );
+    validate_existing_destination(&destination, operation)?;
+    let (temp, mut file) = loop {
+        let sequence = WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let temp = parent.join(format!(".hwan-write-{}-{sequence}.tmp", std::process::id()));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+        {
+            Ok(file) => break (temp, file),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("{operation}: {error}")),
+        }
+    };
+    let result = file
+        .write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|error| format!("{operation}: {error}"));
+    drop(file);
+    let result = result
+        .and_then(|()| before_publish(&temp))
+        .and_then(|()| publish_temp_file(&temp, &destination, operation));
+    if let Err(error) = result {
+        match fs::remove_file(&temp) {
+            Ok(()) => {}
+            Err(cleanup) if cleanup.kind() == io::ErrorKind::NotFound => {}
+            Err(cleanup) => {
+                return Err(format!(
+                    "{error}; failed to clean {}: {cleanup}",
+                    temp.display()
+                ))
+            }
+        }
+        return Err(error);
+    }
+    Ok(())
+}
 
 /// Move an entry without ever replacing a destination created by another writer.
 /// This also supports filesystems without hard links, such as removable FAT media.
@@ -235,6 +302,24 @@ mod tests {
     use std::fs::{self, OpenOptions};
     use std::io::Write;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn interrupted_atomic_write_preserves_existing_document_and_cleans_temp() {
+        let root = make_temp_dir("interrupted-write");
+        let destination = root.join("document.txt");
+        fs::write(&destination, "original").unwrap();
+        let result =
+            super::write_file_atomically_with_hook(&destination, b"replacement", "test", |temp| {
+                assert_eq!(fs::read(temp).unwrap(), b"replacement");
+                Err("injected publication failure".to_string())
+            });
+        assert!(result.is_err());
+        assert_eq!(fs::read(&destination).unwrap(), b"original");
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        super::write_file_atomically(&destination, b"replacement", "test").unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"replacement");
+        cleanup_temp_dir(&root);
+    }
 
     fn now_millis() -> u128 {
         std::time::SystemTime::now()

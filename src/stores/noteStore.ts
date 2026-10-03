@@ -22,6 +22,7 @@ export interface SavedNoteSnapshot {
 }
 
 export interface NoteTab {
+  contentDigest?: string;
   id: string;
   revision: number;
   title: string;
@@ -46,6 +47,7 @@ export interface PersistedTabSession {
 }
 
 export interface SaveTabOptions {
+  contentDigest?: string;
   savedSnapshot: SavedNoteSnapshot;
   persistence?: NotePersistence;
   sourceFilePath?: string;
@@ -82,6 +84,7 @@ interface NoteStore {
   updateTabContent: (id: string, content: JSONContent, plainText: string) => void;
   updateActiveContent: (content: JSONContent, plainText: string) => void;
   markTabSaved: (id: string, options: SaveTabOptions) => boolean;
+  recoverConflictedTab: (id: string, title: string) => string | null;
   discardTabChanges: (id: string) => DiscardTabResult;
   toggleFileFormat: (id: string) => void;
   toggleSidebar: () => void;
@@ -802,6 +805,7 @@ export const useNoteStore = create<NoteStore>((set, get) => {
         const nextTab: NoteTab = {
           ...target,
           persistence: nextPersistence,
+          contentDigest: options.contentDigest ?? target.contentDigest,
           sourceFilePath: nextSourceFilePath,
           isDirty: !savedCurrentRevision,
           lastSavedAt: nextSavedSnapshot.lastSavedAt,
@@ -828,6 +832,40 @@ export const useNoteStore = create<NoteStore>((set, get) => {
       });
 
       return savedCurrentRevision;
+    },
+    recoverConflictedTab: (id, title) => {
+      const target = get().notesById[id];
+      if (!target) return null;
+      const recoveryId = createId();
+      const recoveryTab: NoteTab = {
+        ...target,
+        id: recoveryId,
+        title,
+        isTitleManual: true,
+        revision: 0,
+        contentDigest: undefined,
+        sourceFilePath: undefined,
+        persistence: "transient",
+        savedSnapshot: null,
+        lastSavedAt: 0,
+        isDirty: true,
+      };
+      // Keep the unsaved document before reverting the original tab. The disk
+      // version can then be reloaded without ever overwriting external edits.
+      set((state) => {
+        const notesById = { ...state.notesById, [recoveryId]: recoveryTab };
+        const snapshot = target.savedSnapshot;
+        if (snapshot) {
+          notesById[id] = { ...target, ...snapshot, revision: target.revision + 1, isDirty: false };
+        } else {
+          delete notesById[id];
+        }
+        const openTabIds = [...state.openTabIds.filter((openId) => openId !== recoveryId), recoveryId];
+        return buildStateSlice(notesById, state.noteIds, openTabIds, recoveryId);
+      });
+      const state = get();
+      persistSession(state.openTabIds, state.activeTabId);
+      return recoveryId;
     },
     discardTabChanges: (id) => {
       let result: DiscardTabResult = "none";
