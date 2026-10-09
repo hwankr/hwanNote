@@ -16,6 +16,7 @@ export interface MergeReloadedNoteTabsResult {
   session: PersistedTabSession;
   preservedDirtyTabIds: string[];
   recoveredCount: number;
+  recoveryIdBySourceId: Map<string, string>;
 }
 
 function dedupeIds(ids: readonly string[]): string[] {
@@ -60,7 +61,8 @@ export function mergeReloadedNoteTabs({
       tabs,
       session: { openTabIds, activeTabId },
       preservedDirtyTabIds: dirtyLibraryTabs.map((tab) => tab.id),
-      recoveredCount: 0
+      recoveredCount: 0,
+      recoveryIdBySourceId: new Map()
     };
   }
 
@@ -85,6 +87,7 @@ export function mergeReloadedNoteTabs({
     preservedDirtyTabIds: preservedMissingLibraryTabs
       .filter((tab) => tab.isDirty)
       .map((tab) => tab.id),
-    recoveredCount: recovered.recoveredCount
+    recoveredCount: recovered.recoveredCount,
+    recoveryIdBySourceId: recovered.recoveryIdBySourceId
   };
 }

@@ -5,6 +5,32 @@ All notable user-facing changes to HwanNote are documented here.
 This project follows [Semantic Versioning](https://semver.org/) and commit messages use the
 [Conventional Commits](https://www.conventionalcommits.org/) style.
 
+## [Unreleased]
+
+## [0.9.18] - 2026-10-09
+
+### Fixed
+
+- Keep the current editor, cursor, and undo history when save conflicts or cloud
+  recovery move an in-progress draft into a recovery copy. Background conflicts
+  no longer switch away from the note being edited, including split panes.
+- Show automatic storage and recovery notifications inline without taking
+  keyboard focus away from typing.
+- Avoid replacing equivalent editor documents just because JSON property order
+  or default attribute representation differs.
+- Keep Tab and Shift+Tab inside the editor when a list item cannot be indented
+  or there is no indentation to remove.
+- Ignore application shortcuts and confirmation keys while an IME is composing
+  text, including the legacy composing key code used by Windows.
+- Refresh the focused editor's IME anchor after Windows window geometry changes,
+  waiting until composition ends and preserving selection and scroll position.
+
+### Validation note
+
+- Automated tests cover composition handling, document and selection preservation,
+  undo/redo, and focus recovery. The reported Korean preedit display delay still
+  needs verification on the affected dual-monitor Windows setup.
+
 ## [0.9.17] - 2026-10-03
 
 ### Fixed

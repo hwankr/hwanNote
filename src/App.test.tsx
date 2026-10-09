@@ -1610,7 +1610,9 @@ describe("App locale changes", () => {
     expect(useNoteStore.getState().notesById[NOTE_ID]).toMatchObject({ plainText: "external original", contentDigest: "external-digest", isDirty: false });
     expect(useNoteStore.getState().notesById[recoveryId]).toMatchObject({ plainText: "dirty draft", contentDigest: SAVED_DIGEST, isDirty: false });
     expect(useNoteStore.getState().activeTabId).toBe(recoveryId);
-    expect(mocks.dialogMessage).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ kind: "warning" }));
+    expect(mocks.dialogMessage).not.toHaveBeenCalled();
+    expect(requiredElement<HTMLElement>(container, ".library-notice").textContent)
+      .toContain("별도의 충돌 사본으로 저장했습니다");
   });
 
   it("blocks editor input and recovers programmatic changes while a source-transition reload is in flight", async () => {
@@ -1820,10 +1822,9 @@ describe("App locale changes", () => {
     expect(mocks.recoverCalendarDataFromCloud.mock.invocationCallOrder[0]).toBeLessThan(
       mocks.cleanOrphanNoteLinks.mock.invocationCallOrder[1],
     );
-    expect(mocks.dialogMessage).toHaveBeenCalledWith(
-      expect.stringContaining("C:/notes/calendar.json.local-recovery.bak"),
-      expect.objectContaining({ kind: "info" }),
-    );
+    expect(mocks.dialogMessage).not.toHaveBeenCalled();
+    expect(requiredElement<HTMLElement>(container, ".library-notice").textContent)
+      .toContain("C:/notes/calendar.json.local-recovery.bak");
   });
 
   it("does not apply cloud notes when calendar preservation blocks recovery", async () => {
@@ -1867,10 +1868,9 @@ describe("App locale changes", () => {
       plainText: "local fallback",
     });
     expect(mocks.cleanOrphanNoteLinks).toHaveBeenCalledTimes(1);
-    expect(mocks.dialogMessage).toHaveBeenCalledWith(
-      expect.stringContaining("C:/notes/calendar.json.local-recovery.bak"),
-      expect.objectContaining({ kind: "error" }),
-    );
+    expect(mocks.dialogMessage).not.toHaveBeenCalled();
+    expect(requiredElement<HTMLElement>(container, ".library-notice").textContent)
+      .toContain("C:/notes/calendar.json.local-recovery.bak");
   });
 
   it("waits for calendar and pending note saves before installing an update", async () => {

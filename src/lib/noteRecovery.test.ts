@@ -61,7 +61,8 @@ describe("mergeRecoveredNoteTabs", () => {
     expect(result).toEqual({
       tabs: [reloaded],
       session: { openTabIds: [reloaded.id], activeTabId: reloaded.id },
-      recoveredCount: 0
+      recoveredCount: 0,
+      recoveryIdBySourceId: new Map()
     });
     expect(createId).not.toHaveBeenCalled();
     expect(result.tabs[0].contentDigest).toBe("reloaded-digest");
@@ -103,6 +104,7 @@ describe("mergeRecoveredNoteTabs", () => {
     });
 
     expect(result.recoveredCount).toBe(1);
+    expect(result.recoveryIdBySourceId.get(current.id)).toBe("recovery-1");
     expect(result.tabs[0]).toBe(reloaded);
     expect(result.tabs[1]).toMatchObject({
       id: "recovery-1",

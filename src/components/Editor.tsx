@@ -9,7 +9,7 @@ import TaskList from "@tiptap/extension-task-list";
 import Italic from "@tiptap/extension-italic";
 import { UndoRedo } from "@tiptap/extensions";
 import StarterKit from "@tiptap/starter-kit";
-import { getMarkRange, type JSONContent } from "@tiptap/core";
+import { createDocument, getMarkRange, type JSONContent } from "@tiptap/core";
 import { Editor as TiptapEditor, EditorContent, useEditor } from "@tiptap/react";
 import { type MouseEvent as ReactMouseEvent, useCallback, useEffect, useRef, useState } from "react";
 import { TabIndent } from "../extensions/tabIndent";
@@ -231,8 +231,11 @@ export default function Editor({
       return;
     }
 
-    if (JSON.stringify(editor.getJSON()) !== JSON.stringify(content)) {
-      editor.commands.setContent(content, { emitUpdate: false });
+    // Reloaded JSON can omit default attributes or use a different property
+    // order. Replacing an equivalent document resets the user's selection.
+    const incomingDocument = createDocument(content, editor.schema);
+    if (!editor.state.doc.eq(incomingDocument)) {
+      editor.commands.setContent(incomingDocument, { emitUpdate: false });
       const cursor = collectCursor(editor);
       onCursorChangeRef.current(cursor.line, cursor.column, cursor.chars);
     }

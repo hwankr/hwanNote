@@ -587,6 +587,36 @@ body.tab-dragging .tab:not(.dragging):hover {
   overflow: hidden;
 }
 
+.library-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--bg-active);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.library-notice > div {
+  display: grid;
+  flex: 1;
+  gap: 4px;
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.library-notice button {
+  flex-shrink: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
 .storage-unavailable-banner {
   display: flex;
   align-items: center;

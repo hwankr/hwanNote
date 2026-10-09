@@ -12,6 +12,7 @@ export interface MergeRecoveredNoteTabsResult {
   tabs: NoteTab[];
   session: PersistedTabSession;
   recoveredCount: number;
+  recoveryIdBySourceId: Map<string, string>;
 }
 
 function deepEqual(left: unknown, right: unknown): boolean {
@@ -133,6 +134,7 @@ export function mergeRecoveredNoteTabs({
   return {
     tabs,
     session: { openTabIds, activeTabId },
-    recoveredCount: recoveryTabs.length
+    recoveredCount: recoveryTabs.length,
+    recoveryIdBySourceId
   };
 }

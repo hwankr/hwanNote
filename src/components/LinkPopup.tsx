@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useI18n } from "../i18n/context";
+import { isImeComposing } from "../lib/ime";
 
 interface LinkPopupProps {
   anchor: { x: number; y: number };
@@ -40,7 +41,7 @@ export default function LinkPopup({
     };
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (!isImeComposing(e) && e.key === "Escape") onClose();
     };
 
     const close = () => onClose();
@@ -81,6 +82,7 @@ export default function LinkPopup({
           placeholder="https://"
           onChange={(e) => setUrl(e.target.value)}
           onKeyDown={(e) => {
+            if (isImeComposing(e.nativeEvent)) return;
             if (e.key === "Enter") {
               e.preventDefault();
               handleConfirm();
@@ -96,6 +98,7 @@ export default function LinkPopup({
           placeholder={t("toolbar.linkDisplayNamePlaceholder")}
           onChange={(e) => setDisplayName(e.target.value)}
           onKeyDown={(e) => {
+            if (isImeComposing(e.nativeEvent)) return;
             if (e.key === "Enter") {
               e.preventDefault();
               handleConfirm();

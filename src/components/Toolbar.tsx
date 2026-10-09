@@ -2,6 +2,7 @@ import { getMarkRange } from "@tiptap/core";
 import { Editor as TiptapEditor } from "@tiptap/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useI18n } from "../i18n/context";
+import { isImeComposing } from "../lib/ime";
 import { restoreEditorFocus } from "./Editor";
 import LinkPopup from "./LinkPopup";
 import TableSizePopup from "./TableSizePopup";
@@ -274,6 +275,9 @@ export default function Toolbar({
           }}
           onBlur={commitTitle}
           onKeyDown={(event) => {
+            if (isImeComposing(event.nativeEvent)) {
+              return;
+            }
             if (event.key === "Enter") {
               event.preventDefault();
               commitTitle();

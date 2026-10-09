@@ -18,11 +18,13 @@ export const TabIndent = Extension.create<TabIndentOptions>({
       Tab: ({ editor }) => {
         const { $from } = editor.state.selection;
 
-        // Let lists handle their own indentation
+        // Handle list indentation here so a failed sink (for example, the
+        // first item) cannot fall through to the browser's focus navigation.
         for (let depth = $from.depth; depth > 0; depth--) {
           const nodeName = $from.node(depth).type.name;
           if (nodeName === "listItem" || nodeName === "taskItem") {
-            return false;
+            editor.commands.sinkListItem(nodeName);
+            return true;
           }
         }
 
@@ -72,18 +74,20 @@ export const TabIndent = Extension.create<TabIndentOptions>({
       },
 
       "Shift-Tab": ({ editor }) => {
-        if (!editor.state.selection.empty) {
-          return false;
-        }
-
         const { $from } = editor.state.selection;
 
-        // Let lists handle their own outdent
+        // Keep list outdenting available for selected items as well as a
+        // cursor, and consume the key even when there is nothing to lift.
         for (let depth = $from.depth; depth > 0; depth--) {
           const nodeName = $from.node(depth).type.name;
           if (nodeName === "listItem" || nodeName === "taskItem") {
-            return false;
+            editor.commands.liftListItem(nodeName);
+            return true;
           }
+        }
+
+        if (!editor.state.selection.empty) {
+          return true;
         }
 
         // Find how many spaces to remove before cursor
@@ -105,7 +109,7 @@ export const TabIndent = Extension.create<TabIndentOptions>({
         }
 
         if (spacesToRemove === 0) {
-          return false;
+          return true;
         }
 
         const { tr } = editor.state;

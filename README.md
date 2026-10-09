@@ -2,7 +2,7 @@
 
 # HwanNote
 
-![Version](https://img.shields.io/badge/version-0.9.17-2f7d32) ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-blue) ![Tauri](https://img.shields.io/badge/Tauri-v2-24C8D8) ![React](https://img.shields.io/badge/React-18-61DAFB) ![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white) ![License](https://img.shields.io/badge/License-MIT-green)
+![Version](https://img.shields.io/badge/version-0.9.18-2f7d32) ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-blue) ![Tauri](https://img.shields.io/badge/Tauri-v2-24C8D8) ![React](https://img.shields.io/badge/React-18-61DAFB) ![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white) ![License](https://img.shields.io/badge/License-MIT-green)
 
 > Windows 11 메모장 감성을 바탕으로 만든 데스크톱 마크다운 메모 앱
 
@@ -10,7 +10,7 @@ HwanNote는 Tauri v2 + React 18 + TypeScript 기반의 로컬 우선 메모 앱�
 
 ## 현재 상태
 
-- 최신 버전: `v0.9.17`
+- 최신 버전: `v0.9.18`
 - 기본 저장소: `문서/HwanNote/Notes`
 - 지원 언어: 한국어, English
 - 기본 대상 플랫폼: Windows 10/11 (64-bit)
@@ -78,6 +78,11 @@ HwanNote는 Tauri v2 + React 18 + TypeScript 기반의 로컬 우선 메모 앱�
 
 ## 최근 반영된 내용
 
+- `v0.9.18`
+  - 저장 충돌·클라우드 복구 중 편집기, 커서와 실행 취소 기록 유지
+  - 자동 복구 알림 및 Tab·Shift+Tab에 의한 입력 포커스 이탈 방지
+  - 한글 조합 중 Enter·Escape와 전역 단축키 처리 보호
+  - Windows 창 이동·배율 변경 뒤 IME 위치 갱신 보완(실제 듀얼 모니터 표시 효과는 미확인)
 - `v0.9.17`
   - 외부에서 수정된 메모 덮어쓰기 방지 및 충돌 사본 보존
   - 저장 위치 전환 중 일정 편집 보호, 업데이트 실패 후 종료 저장 보호 복구

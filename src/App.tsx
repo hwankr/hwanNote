@@ -42,6 +42,8 @@ import { KeyedDebouncer, KeyedSerialTaskQueue } from "./lib/keyedTasks";
 import { mergeRecoveredNoteTabs } from "./lib/noteRecovery";
 import { mergeReloadedNoteTabs } from "./lib/noteReload";
 import { canRunNoteLibraryMutation } from "./lib/noteMutationGuard";
+import { installWindowsImeRecovery } from "./lib/windowsImeRecovery";
+import { isImeComposing } from "./lib/ime";
 import {
   hasRichTextFormatting,
   parseStoredNoteDocument,
@@ -304,10 +306,12 @@ export default function App() {
   const addImportedTab = useNoteStore((state) => state.addImportedTab);
 
   const [activeView, setActiveView] = useState<AppView>("notes");
+  useEffect(() => installWindowsImeRecovery(), []);
   const [noteStorageSource, setNoteStorageSource] = useState<NoteStorageSource>("local");
   const [noteRecoveryPending, setNoteRecoveryPending] = useState(false);
   const [noteLoadRecovery, setNoteLoadRecovery] = useState<NoteLoadRecoveryState | null>(null);
   const [noteLoadRetrying, setNoteLoadRetrying] = useState(false);
+  const [libraryNotice, setLibraryNotice] = useState<{ title: string; detail: string } | null>(null);
 
   const [isSplit, setIsSplit] = useState(false);
   const [splitRatio, setSplitRatio] = useState(() => {
@@ -326,6 +330,7 @@ export default function App() {
   const [secondaryTabId, setSecondaryTabId] = useState<string | null>(null);
   const [focusedPane, setFocusedPane] = useState<PaneId>("primary");
   const [paneEditors, setPaneEditors] = useState<PaneEditors>({ primary: null, secondary: null });
+  const [editorKeys, setEditorKeys] = useState<Record<string, string>>({});
   const [paneCursors, setPaneCursors] = useState<PaneCursors>({
     primary: { line: 1, column: 1, chars: 0 },
     secondary: { line: 1, column: 1, chars: 0 }
@@ -363,6 +368,23 @@ export default function App() {
   const noteRecoveryPendingRef = useRef(false);
   const tRef = useRef(t);
   tRef.current = t;
+
+  const preserveRecoveredEditors = useCallback((recoveryIds: ReadonlyMap<string, string>) => {
+    if (recoveryIds.size === 0) return;
+    // A recovery copy is the document the user is already editing. Transfer
+    // its React key so saving/reconnecting cannot destroy its DOM or selection.
+    // Give the disk original a different key for a later explicit tab switch.
+    setEditorKeys((previous) => {
+      const next = { ...previous };
+      recoveryIds.forEach((recoveryId, sourceId) => {
+        next[recoveryId] = previous[sourceId] ?? sourceId;
+        next[sourceId] = recoveryId;
+      });
+      return next;
+    });
+    setPrimaryTabId((id) => id ? (recoveryIds.get(id) ?? id) : id);
+    setSecondaryTabId((id) => id ? (recoveryIds.get(id) ?? id) : id);
+  }, []);
 
   const updateNoteLoadRecovery = useCallback((result: NoteLoadRecoveryState | null) => {
     const recoveryState = result ? toNoteLoadRecoveryState(result) : null;
@@ -865,6 +887,7 @@ export default function App() {
             )
         });
         hydrateTabs(merged.tabs, merged.session);
+        preserveRecoveredEditors(merged.recoveryIdBySourceId);
         return merged;
       }
 
@@ -908,9 +931,10 @@ export default function App() {
           )
       });
       hydrateTabs(merged.tabs, merged.session);
+      preserveRecoveredEditors(merged.recoveryIdBySourceId);
       return merged;
     },
-    [flushTitleDraft, hydrateTabs, mapLoadedNoteToTab]
+    [flushTitleDraft, hydrateTabs, mapLoadedNoteToTab, preserveRecoveredEditors]
   );
 
   const loadLibraryState = useCallback(async () => {
@@ -956,13 +980,10 @@ export default function App() {
       recoveryFailureNotifiedRef.current = false;
 
       if (merged.recoveredCount > 0) {
-        void message(
-          tRef.current("settings.cloudSyncRecoveredWithCopies", { count: merged.recoveredCount }),
-          {
-            title: tRef.current("settings.cloudSyncRecoveredTitle"),
-            kind: "info"
-          }
-        ).catch(() => { /* ignore notification failures */ });
+        setLibraryNotice({
+          detail: tRef.current("settings.cloudSyncRecoveredWithCopies", { count: merged.recoveredCount }),
+          title: tRef.current("settings.cloudSyncRecoveredTitle")
+        });
       }
 
       return result;
@@ -1047,6 +1068,7 @@ export default function App() {
 
       setPersistedFolders(normalizePersistedFolders(result.folders));
       hydrateTabs(recovery.tabs, recovery.session);
+      preserveRecoveredEditors(recovery.recoveryIdBySourceId);
       hydratedNoteStorageSourceRef.current = result.loadedFrom;
 
       useCalendarStore.getState().cleanOrphanNoteLinks(true);
@@ -1063,10 +1085,7 @@ export default function App() {
             path: calendarRecoveryCopyPath,
           })}`
         : noteDetail;
-      void message(detail, {
-        title: tRef.current("settings.cloudSyncRecoveredTitle"),
-        kind: "info"
-      }).catch(() => { /* ignore notification failures */ });
+      setLibraryNotice({ detail, title: tRef.current("settings.cloudSyncRecoveredTitle") });
       return true;
     } catch (error) {
       console.error("Failed to recover the cloud library safely:", error);
@@ -1079,16 +1098,13 @@ export default function App() {
               path: calendarRecoveryCopyPath,
             })
           : tRef.current("settings.cloudSyncRecoveryFailed");
-        void message(detail, {
-          title: tRef.current("settings.cloudSyncRecoveryFailedTitle"),
-          kind: "error"
-        }).catch(() => { /* ignore notification failures */ });
+        setLibraryNotice({ detail, title: tRef.current("settings.cloudSyncRecoveryFailedTitle") });
       }
       return false;
     } finally {
       recoveryInFlightRef.current = false;
     }
-  }, [clearAutoSaveTimer, hydrateTabs, mapLoadedNoteToTab, updateNoteLoadRecovery]);
+  }, [clearAutoSaveTimer, hydrateTabs, mapLoadedNoteToTab, preserveRecoveredEditors, updateNoteLoadRecovery]);
 
   const refreshLocalAutoSaveDir = useCallback(async () => {
     const settingsApi = hwanNote.settings;
@@ -1812,11 +1828,11 @@ export default function App() {
             tab.id, t("notes.conflictCopyTitle", { title: latest.title })
           );
           if (recoveryId) {
-            setPrimaryTabId(recoveryId);
-            setFocusedPane("primary");
+            preserveRecoveredEditors(new Map([[tab.id, recoveryId]]));
             const savedCopy = await saveTabRef.current?.(recoveryId);
-            await message(t(savedCopy ? "notes.conflictCopySaved" : "notes.conflictCopyUnsaved"), {
-              title: t("notes.conflictTitle"), kind: "warning"
+            setLibraryNotice({
+              detail: t(savedCopy ? "notes.conflictCopySaved" : "notes.conflictCopyUnsaved"),
+              title: t("notes.conflictTitle")
             });
             if (!conflictReloadPendingRef.current) {
               conflictReloadPendingRef.current = true;
@@ -1834,7 +1850,7 @@ export default function App() {
       }
       return false;
     }
-  }, [clearAutoSaveTimer, flushTitleDraft, getTabById, loadLibraryState, markTabSaved, t]);
+  }, [clearAutoSaveTimer, flushTitleDraft, getTabById, loadLibraryState, markTabSaved, preserveRecoveredEditors, t]);
 
   const handleSaveTab = useCallback((tabId: string) => {
     return saveQueueRef.current.run(tabId, () => performSaveTab(tabId));
@@ -2474,9 +2490,10 @@ export default function App() {
   useEffect(() => {
     const unlisten = hwanNote.cloud.onFolderMissing((data) => {
       suspendCloudWritesForRecovery();
-      window.alert(
-        `${t("settings.cloudSyncFolderMissing")}\n${t("settings.cloudSyncFolderMissingDetail", { path: data.expectedPath })}`
-      );
+      setLibraryNotice({
+        title: t("settings.cloudSyncFolderMissing"),
+        detail: t("settings.cloudSyncFolderMissingDetail", { path: data.expectedPath })
+      });
     });
     return () => unlisten();
   }, [suspendCloudWritesForRecovery, t]);
@@ -2544,6 +2561,9 @@ export default function App() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if (isImeComposing(event)) {
+        return;
+      }
       if (exitUiLockedRef.current) {
         event.preventDefault();
         return;
@@ -2706,7 +2726,7 @@ export default function App() {
     }
 
     const onEsc = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
+      if (!isImeComposing(event) && event.key === "Escape") {
         setSettingsOpen(false);
         restoreEditorFocus(focusedEditor);
       }
@@ -2730,6 +2750,9 @@ export default function App() {
     };
 
     const onKeyDown = (event: KeyboardEvent) => {
+      if (isImeComposing(event)) {
+        return;
+      }
       if (event.ctrlKey && !event.shiftKey && !event.altKey && event.key === "0") {
         event.preventDefault();
         setEditorFontSize(DEFAULT_EDITOR_FONT_SIZE);
@@ -2893,6 +2916,16 @@ export default function App() {
         </section>
       ) : null}
 
+      {libraryNotice ? (
+        <section className="library-notice no-drag" role="status" aria-live="polite">
+          <div>
+            <strong>{libraryNotice.title}</strong>
+            <span>{libraryNotice.detail}</span>
+          </div>
+          <button type="button" onClick={() => setLibraryNotice(null)}>{t("update.dismiss")}</button>
+        </section>
+      ) : null}
+
       <div className="workspace">
         <Sidebar
           visible={sidebarVisible}
@@ -3027,7 +3060,7 @@ export default function App() {
                   onMouseDown={() => focusPane("primary")}
                 >
                   <Editor
-                    key={`primary-${primaryTab.id}`}
+                    key={`primary-${editorKeys[primaryTab.id] ?? primaryTab.id}`}
                     content={primaryTab.content}
                     tabSize={tabSize}
                     spellcheck={editorSpellcheck}
@@ -3050,7 +3083,7 @@ export default function App() {
                   onMouseDown={() => focusPane("secondary")}
                 >
                   <Editor
-                    key={`secondary-${secondaryTab.id}`}
+                    key={`secondary-${editorKeys[secondaryTab.id] ?? secondaryTab.id}`}
                     content={secondaryTab.content}
                     tabSize={tabSize}
                     spellcheck={editorSpellcheck}
@@ -3067,7 +3100,7 @@ export default function App() {
             ) : primaryTab ? (
               <section className="editor-pane focused" data-pane="primary" onMouseDown={() => focusPane("primary")}>
                 <Editor
-                  key={`primary-${primaryTab.id}`}
+                  key={`primary-${editorKeys[primaryTab.id] ?? primaryTab.id}`}
                   content={primaryTab.content}
                   tabSize={tabSize}
                   spellcheck={editorSpellcheck}

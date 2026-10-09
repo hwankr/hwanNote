@@ -271,4 +271,18 @@ describe("note conflict recovery", () => {
     expect(before.recoverConflictedTab("missing", "Recovered")).toBeNull();
     expect(useNoteStore.getState()).toBe(before);
   });
+
+  it("keeps the active note when another note's save conflicts", () => {
+    const saved = createLibraryTab();
+    const other = createLibraryTab("other-note", "still editing");
+    hydrate([saved, other]);
+    const store = useNoteStore.getState();
+    store.updateTabContent(TAB_ID, documentWithText("draft"), "draft");
+    store.setActiveTab(other.id);
+
+    const recoveryId = store.recoverConflictedTab(TAB_ID, "Recovered draft");
+
+    expect(useNoteStore.getState().activeTabId).toBe(other.id);
+    expect(useNoteStore.getState().notesById[recoveryId!].plainText).toBe("draft");
+  });
 });

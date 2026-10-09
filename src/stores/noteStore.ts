@@ -861,7 +861,8 @@ export const useNoteStore = create<NoteStore>((set, get) => {
           delete notesById[id];
         }
         const openTabIds = [...state.openTabIds.filter((openId) => openId !== recoveryId), recoveryId];
-        return buildStateSlice(notesById, state.noteIds, openTabIds, recoveryId);
+        const activeTabId = state.activeTabId === id ? recoveryId : state.activeTabId;
+        return buildStateSlice(notesById, state.noteIds, openTabIds, activeTabId);
       });
       const state = get();
       persistSession(state.openTabIds, state.activeTabId);
