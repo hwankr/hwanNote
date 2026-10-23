@@ -1,6 +1,6 @@
 use crate::atomic_file::{move_file_without_replace, publish_temp_file, sync_parent_directory};
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -38,6 +38,7 @@ static AUTOSAVE_OPERATION_COUNTER: AtomicU64 = AtomicU64::new(0);
 const TOGGLE_BLOCK_END: &str = ":::";
 const MANUAL_TITLE_META_PREFIX: &str = "<!-- hwan-note:manual-title:";
 const MANUAL_TITLE_META_SUFFIX: &str = " -->";
+const NOTE_IDENTITY_META_PREFIX: &str = "<!-- hwan-note:identity:v1:";
 const TEXT_FORMAT_MARKER: &str = "<!-- hwan-note:format:txt:v1 -->";
 const EMPTY_PARAGRAPH_MARKER: &str = "<!-- hwan-note:empty-paragraph:v1 -->";
 
@@ -63,6 +64,27 @@ pub struct NoteIndexEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NoteIndex {
     pub entries: HashMap<String, NoteIndexEntry>,
+    // A deletion is explicit intent, unlike a file that has not downloaded yet.
+    // Keep just the IDs so an out-of-order cloud delivery cannot resurrect it.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub deleted_note_ids: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    deleted_note_files: HashMap<String, DeletedNoteFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeletedNoteFile {
+    relative_path: String,
+    content_digest: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NoteIdentityMetadata {
+    note_id: String,
+    created_at: u64,
+    is_pinned: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -445,24 +467,42 @@ fn parse_manual_title_metadata_line(line: &str) -> Option<String> {
 }
 
 fn extract_manual_title_metadata(markdown: &str) -> (Option<String>, String) {
-    let normalized = markdown.replace("\r\n", "\n");
+    let (manual_title, _, markdown) = extract_note_metadata(markdown);
+    (manual_title, markdown)
+}
 
-    match normalized.split_once('\n') {
-        Some((first_line, rest)) => {
-            if let Some(title) = parse_manual_title_metadata_line(first_line) {
-                (Some(title), rest.to_string())
-            } else {
-                (None, normalized)
+fn extract_note_metadata(markdown: &str) -> (Option<String>, Option<NoteIdentityMetadata>, String) {
+    let normalized = markdown.replace("\r\n", "\n");
+    let mut body = normalized.as_str();
+    let mut manual_title = None;
+    let mut identity = None;
+    // Only consume a bounded metadata preamble, never comments in the body.
+    for _ in 0..2 {
+        let (line, rest) = body.split_once('\n').unwrap_or((body, ""));
+        if manual_title.is_none() {
+            if let Some(title) = parse_manual_title_metadata_line(line) {
+                manual_title = Some(title);
+                body = rest;
+                continue;
             }
         }
-        None => {
-            if let Some(title) = parse_manual_title_metadata_line(&normalized) {
-                (Some(title), String::new())
-            } else {
-                (None, normalized)
+        if identity.is_none() {
+            if let Some(metadata) = line
+                .strip_prefix(NOTE_IDENTITY_META_PREFIX)
+                .and_then(|value| value.strip_suffix(MANUAL_TITLE_META_SUFFIX))
+                .and_then(|value| serde_json::from_str::<NoteIdentityMetadata>(value).ok())
+                .filter(|value| {
+                    !value.note_id.is_empty() && sanitize_note_id(&value.note_id) == value.note_id
+                })
+            {
+                identity = Some(metadata);
+                body = rest;
+                continue;
             }
         }
+        break;
     }
+    (manual_title, identity, body.to_string())
 }
 
 #[derive(Debug)]
@@ -883,6 +923,7 @@ fn ensure_library_subdirectory(
     Ok(current)
 }
 
+#[cfg(test)]
 fn embed_manual_title_metadata(markdown: &str, manual_title: Option<&str>) -> String {
     let (_, stripped_markdown) = extract_manual_title_metadata(markdown);
     let Some(title) = manual_title.and_then(normalize_manual_title) else {
@@ -901,6 +942,36 @@ fn embed_manual_title_metadata(markdown: &str, manual_title: Option<&str>) -> St
     } else {
         format!("{}\n{}", metadata_line, stripped_markdown)
     }
+}
+
+fn embed_note_metadata(
+    markdown: &str,
+    manual_title: Option<&str>,
+    identity: &NoteIdentityMetadata,
+) -> Result<String, String> {
+    let (_, _, body) = extract_note_metadata(markdown);
+    let identity_line = format!(
+        "{}{}{}",
+        NOTE_IDENTITY_META_PREFIX,
+        serde_json::to_string(identity).map_err(|error| error.to_string())?,
+        MANUAL_TITLE_META_SUFFIX
+    );
+    let body_with_identity = if body.is_empty() {
+        identity_line
+    } else {
+        format!("{identity_line}\n{body}")
+    };
+    // Retain the established manual-title-first layout for older clients.
+    Ok(match manual_title.and_then(normalize_manual_title) {
+        Some(title) => format!(
+            "{}{}{}\n{}",
+            MANUAL_TITLE_META_PREFIX,
+            encode_manual_title_hex(&title),
+            MANUAL_TITLE_META_SUFFIX,
+            body_with_identity
+        ),
+        None => body_with_identity,
+    })
 }
 
 pub fn derive_title(markdown: &str) -> String {
@@ -1016,6 +1087,8 @@ enum IndexWriteFailure {
 
 fn empty_index() -> NoteIndex {
     NoteIndex {
+        deleted_note_ids: BTreeSet::new(),
+        deleted_note_files: HashMap::new(),
         entries: HashMap::new(),
     }
 }
@@ -1066,6 +1139,14 @@ fn cleanup_failed_file(path: &Path, primary_error: io::Error) -> String {
 }
 
 fn backup_corrupt_index(index_path: &Path, bytes: &[u8]) -> Result<PathBuf, NoteLoadIssue> {
+    backup_index_bytes(index_path, bytes, "corrupt")
+}
+
+fn backup_index_bytes(
+    index_path: &Path,
+    bytes: &[u8],
+    reason: &str,
+) -> Result<PathBuf, NoteLoadIssue> {
     let parent = index_path.parent().unwrap_or_else(|| Path::new("."));
     let timestamp = now_millis();
 
@@ -1076,8 +1157,8 @@ fn backup_corrupt_index(index_path: &Path, bytes: &[u8]) -> Result<PathBuf, Note
             format!("-{}", counter + 1)
         };
         let candidate = parent.join(format!(
-            "{}.corrupt-{}{}.bak",
-            INDEX_FILENAME, timestamp, suffix
+            "{}.{}-{}{}.bak",
+            INDEX_FILENAME, reason, timestamp, suffix
         ));
         let mut backup = match OpenOptions::new()
             .write(true)
@@ -1105,7 +1186,10 @@ fn backup_corrupt_index(index_path: &Path, bytes: &[u8]) -> Result<PathBuf, Note
                 reason,
             ));
         }
-
+        drop(backup);
+        sync_parent_directory(&candidate, "backup_index").map_err(|reason| {
+            NoteLoadIssue::new(NoteLoadIssueKind::Index, "backup_index", &candidate, reason)
+        })?;
         return Ok(candidate);
     }
 
@@ -1307,6 +1391,21 @@ fn write_index_from_snapshot_after_temp_hook<F>(
 where
     F: FnOnce(),
 {
+    write_index_from_snapshot_with_pre_publish_check(trusted_root, expected, index, || {
+        before_final_verify();
+        Ok(())
+    })
+}
+
+fn write_index_from_snapshot_with_pre_publish_check<F>(
+    trusted_root: &TrustedLibraryRoot,
+    expected: &IndexSnapshot,
+    index: &NoteIndex,
+    before_final_verify: F,
+) -> Result<(), IndexWriteFailure>
+where
+    F: FnOnce() -> Result<(), IndexWriteFailure>,
+{
     let index_path = get_index_path(trusted_root.path());
     verify_index_snapshot_unchanged(trusted_root, expected)?;
     validate_index_paths(trusted_root, &index_path, index).map_err(IndexWriteFailure::Issue)?;
@@ -1333,7 +1432,9 @@ where
     }
     drop(tmp_file);
 
-    before_final_verify();
+    if let Err(failure) = before_final_verify() {
+        return Err(cleanup_index_temp_after_failure(&tmp_path, failure));
+    }
     if let Err(failure) = verify_index_snapshot_unchanged(trusted_root, expected) {
         return Err(cleanup_index_temp_after_failure(&tmp_path, failure));
     }
@@ -3277,9 +3378,27 @@ fn relative_path(from: &Path, to: &Path) -> String {
 }
 
 fn reconcile_index_with_scan(index: &NoteIndex, scan: &LibraryScan) -> (NoteIndex, bool) {
+    let (index, changed, _) = reconcile_index_with_scan_mode(index, scan, false);
+    (index, changed)
+}
+
+fn matches_deleted_legacy_file(index: &NoteIndex, relative_path: &str, markdown: &str) -> bool {
+    let digest = sha256_hex(markdown.as_bytes());
+    index
+        .deleted_note_files
+        .values()
+        .any(|deleted| deleted.relative_path == relative_path && deleted.content_digest == digest)
+}
+
+fn reconcile_index_with_scan_mode(
+    index: &NoteIndex,
+    scan: &LibraryScan,
+    cloud: bool,
+) -> (NoteIndex, bool, Vec<NoteLoadIssue>) {
     let mut reconciled = index.clone();
     let mut used_paths: HashSet<String> = HashSet::new();
     let mut index_changed = false;
+    let mut issues = Vec::new();
 
     let missing_ids: Vec<String> = reconciled
         .entries
@@ -3289,14 +3408,53 @@ fn reconcile_index_with_scan(index: &NoteIndex, scan: &LibraryScan) -> (NoteInde
         .collect();
 
     for id in &missing_ids {
-        reconciled.entries.remove(id);
-        index_changed = true;
+        if cloud {
+            let entry = &reconciled.entries[id];
+            issues.push(NoteLoadIssue::new(
+                NoteLoadIssueKind::Index,
+                "await_cloud_note",
+                Path::new(&entry.relative_path),
+                "An indexed cloud note is not available yet. Its identity and calendar links are preserved until the file or an explicit deletion arrives.",
+            ));
+        } else {
+            reconciled.entries.remove(id);
+            index_changed = true;
+        }
     }
 
-    for entry in reconciled.entries.values() {
+    if cloud {
+        for (note_id, entry) in &index.entries {
+            let Some(scanned) = scan.files.get(&entry.relative_path) else {
+                continue;
+            };
+            let identity = extract_note_metadata(&scanned.markdown).1;
+            let mismatch = match identity {
+                Some(identity) => identity.note_id != *note_id,
+                None => matches_deleted_legacy_file(index, &entry.relative_path, &scanned.markdown),
+            };
+            if mismatch {
+                issues.push(NoteLoadIssue::new(
+                    NoteLoadIssueKind::Index,
+                    "await_cloud_note_identity",
+                    &scanned.full_path,
+                    "The indexed note and the downloaded file have different identities. Waiting for the matching cloud version before showing or editing it.",
+                ));
+                // This is only the visible, non-authoritative result. The index
+                // on disk remains untouched until the matching bytes arrive.
+                reconciled.entries.remove(note_id);
+            }
+        }
+    }
+    for entry in index.entries.values() {
         used_paths.insert(entry.relative_path.clone());
     }
-    let mut existing_ids = reconciled.entries.keys().cloned().collect::<HashSet<_>>();
+    let identity_source = if cloud { index } else { &reconciled };
+    let mut existing_ids = identity_source
+        .entries
+        .keys()
+        .cloned()
+        .collect::<HashSet<_>>();
+    existing_ids.extend(reconciled.deleted_note_ids.iter().cloned());
 
     let mut relative_paths = scan.files.keys().cloned().collect::<Vec<_>>();
     relative_paths.sort();
@@ -3309,16 +3467,45 @@ fn reconcile_index_with_scan(index: &NoteIndex, scan: &LibraryScan) -> (NoteInde
             .files
             .get(&rel_path)
             .expect("relative path came from the scan map");
-        let generated_id = ensure_unique_note_id(&existing_ids, &rel_path);
-        let manual_title = extract_manual_title_metadata(&scanned.markdown).0;
+        let (manual_title, identity, _) = extract_note_metadata(&scanned.markdown);
+        if cloud {
+            if identity.is_none()
+                && matches_deleted_legacy_file(index, &rel_path, &scanned.markdown)
+            {
+                continue;
+            }
+            if let Some(identity) = identity.as_ref() {
+                if reconciled.deleted_note_ids.contains(&identity.note_id) {
+                    // The deletion index can arrive before the remote file is
+                    // removed. Do not re-import those stale bytes as a new note.
+                    continue;
+                }
+                if reconciled.entries.contains_key(&identity.note_id) {
+                    issues.push(NoteLoadIssue::new(
+                        NoteLoadIssueKind::Index,
+                        "await_cloud_note_move",
+                        &scanned.full_path,
+                        "The same note identity is present at another indexed path. Waiting for the cloud move to finish before changing the index.",
+                    ));
+                    continue;
+                }
+            }
+        }
+        let recovered_identity = identity.filter(|value| !existing_ids.contains(&value.note_id));
+        let generated_id = recovered_identity
+            .as_ref()
+            .map(|value| value.note_id.clone())
+            .unwrap_or_else(|| ensure_unique_note_id(&existing_ids, &rel_path));
 
         reconciled.entries.insert(
             generated_id.clone(),
             NoteIndexEntry {
                 relative_path: rel_path.clone(),
-                created_at: scanned.created_at,
+                created_at: recovered_identity
+                    .as_ref()
+                    .map_or(scanned.created_at, |value| value.created_at),
                 manual_title,
-                is_pinned: None,
+                is_pinned: recovered_identity.and_then(|value| value.is_pinned),
             },
         );
         existing_ids.insert(generated_id);
@@ -3333,13 +3520,19 @@ fn reconcile_index_with_scan(index: &NoteIndex, scan: &LibraryScan) -> (NoteInde
         let Some(scanned) = scan.files.get(&entry.relative_path) else {
             continue;
         };
-        if let Some(recovered_title) = extract_manual_title_metadata(&scanned.markdown).0 {
+        // Existing index metadata remains authoritative: its update may have
+        // downloaded before the replacement Markdown. Embedded identity is for
+        // reconstructing missing entries, not reversing a newer index.
+        let (recovered_title, identity, _) = extract_note_metadata(&scanned.markdown);
+        // A v1 identity means the index can intentionally clear a manual title;
+        // an older file download must not re-enable it. Keep legacy backfill.
+        if let Some(recovered_title) = recovered_title.filter(|_| identity.is_none()) {
             entry.manual_title = Some(recovered_title);
             index_changed = true;
         }
     }
 
-    (reconciled, index_changed)
+    (reconciled, index_changed, issues)
 }
 
 fn ensure_unique_note_id(existing_ids: &HashSet<String>, seed: &str) -> String {
@@ -3750,12 +3943,20 @@ fn auto_save_markdown_note_with_faults(
     } else {
         None
     };
-    let stored_markdown = embed_manual_title_metadata(&payload.content, manual_title.as_deref());
-    let note_bytes = to_platform_line_endings(&stored_markdown).into_bytes();
     let created_at = existing_entry
         .as_ref()
         .map(|entry| entry.created_at)
         .unwrap_or_else(now_millis);
+    let stored_markdown = embed_note_metadata(
+        &payload.content,
+        manual_title.as_deref(),
+        &NoteIdentityMetadata {
+            note_id: safe_id.clone(),
+            created_at,
+            is_pinned: payload.is_pinned,
+        },
+    )?;
+    let note_bytes = to_platform_line_endings(&stored_markdown).into_bytes();
     let previous_note_digest = existing_path
         .as_ref()
         .map(|path| read_existing_file_digest(trusted_root, path, "read_previous_note_digest"))
@@ -3800,6 +4001,8 @@ fn auto_save_markdown_note_with_faults(
     let index_temp_path = index_temp_path_for_operation(trusted_root, &operation_id);
 
     let relative_path_string = relative_path(trusted_root.path(), &next_file_path);
+    next_index.deleted_note_ids.remove(&safe_id);
+    next_index.deleted_note_files.remove(&safe_id);
     next_index.entries.insert(
         safe_id.clone(),
         NoteIndexEntry {
@@ -3940,12 +4143,16 @@ fn materialize_notes(index: &NoteIndex, scan: &LibraryScan) -> Vec<LoadedNote> {
         let Some(scanned) = scan.files.get(&entry.relative_path) else {
             continue;
         };
-        let (embedded_manual_title, markdown) = extract_manual_title_metadata(&scanned.markdown);
+        let (embedded_manual_title, identity, markdown) = extract_note_metadata(&scanned.markdown);
         let indexed_manual_title = entry
             .manual_title
             .as_deref()
             .and_then(normalize_manual_title);
-        let effective_manual_title = indexed_manual_title.or(embedded_manual_title);
+        let effective_manual_title = if identity.is_some() {
+            indexed_manual_title
+        } else {
+            indexed_manual_title.or(embedded_manual_title)
+        };
         let title = effective_manual_title
             .clone()
             .unwrap_or_else(|| derive_title(&markdown));
@@ -4002,6 +4209,14 @@ fn incomplete_load_result(
 fn load_markdown_library_with_fs<F: LibraryFileSystem>(
     auto_save_dir: &Path,
     file_system: &F,
+) -> MarkdownLibraryLoadResult {
+    load_markdown_library_with_fs_mode(auto_save_dir, file_system, false)
+}
+
+fn load_markdown_library_with_fs_mode<F: LibraryFileSystem>(
+    auto_save_dir: &Path,
+    file_system: &F,
+    cloud: bool,
 ) -> MarkdownLibraryLoadResult {
     let trusted_root = match resolve_trusted_library_root(auto_save_dir) {
         Ok(trusted_root) => trusted_root,
@@ -4063,7 +4278,14 @@ fn load_markdown_library_with_fs<F: LibraryFileSystem>(
         return incomplete_load_result(&trusted_root, &index_snapshot.index, scan, issues);
     }
 
-    let (reconciled_index, index_changed) = reconcile_index_with_scan(&index_snapshot.index, &scan);
+    let (reconciled_index, index_changed, issues) =
+        reconcile_index_with_scan_mode(&index_snapshot.index, &scan, cloud);
+    if !issues.is_empty() {
+        // A partial cloud snapshot is never authoritative. In addition to not
+        // overwriting the index, this stops the UI pruning calendar references
+        // for the notes whose downloads are still pending.
+        return incomplete_load_result(&trusted_root, &reconciled_index, scan, issues);
+    }
     let notes = materialize_notes(&reconciled_index, &scan);
 
     if index_changed {
@@ -4104,6 +4326,116 @@ fn load_markdown_library_with_fs<F: LibraryFileSystem>(
 
 pub fn load_markdown_library(auto_save_dir: &Path) -> MarkdownLibraryLoadResult {
     load_markdown_library_with_fs(auto_save_dir, &ProductionFileSystem)
+}
+
+pub fn load_cloud_markdown_library(auto_save_dir: &Path) -> MarkdownLibraryLoadResult {
+    load_markdown_library_with_fs_mode(auto_save_dir, &ProductionFileSystem, true)
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MissingCloudNotesResolution {
+    pub acknowledged_count: usize,
+    pub backup_path: String,
+    pub removed_note_ids: Vec<String>,
+}
+
+fn confirm_missing_cloud_note_set(
+    trusted_root: &TrustedLibraryRoot,
+    index: &NoteIndex,
+    expected_paths: &BTreeSet<String>,
+) -> Result<Vec<String>, String> {
+    let scan = scan_library_tree(&ProductionFileSystem, trusted_root, None, true);
+    if !scan.is_complete() {
+        return Err(scan
+            .issues
+            .iter()
+            .map(NoteLoadIssue::display)
+            .collect::<Vec<_>>()
+            .join("; "));
+    }
+    let (_, _, issues) = reconcile_index_with_scan_mode(index, &scan, true);
+    if let Some(issue) = issues
+        .iter()
+        .find(|issue| issue.operation != "await_cloud_note")
+    {
+        return Err(format!("Cloud note recovery rejected: {}", issue.display()));
+    }
+    let missing_paths = index
+        .entries
+        .values()
+        .filter(|entry| !scan.files.contains_key(&entry.relative_path))
+        .map(|entry| entry.relative_path.clone())
+        .collect::<BTreeSet<_>>();
+    if missing_paths.is_empty() || &missing_paths != expected_paths {
+        return Err("cloud_note_set_changed: The missing cloud files changed after confirmation. Reload and review the missing paths again.".to_string());
+    }
+    let mut missing_ids = index
+        .entries
+        .iter()
+        .filter(|(_, entry)| missing_paths.contains(&entry.relative_path))
+        .map(|(note_id, _)| note_id.clone())
+        .collect::<Vec<_>>();
+    missing_ids.sort();
+    Ok(missing_ids)
+}
+
+pub fn acknowledge_missing_cloud_notes(
+    auto_save_dir: &Path,
+    expected_missing_paths: &[String],
+) -> Result<MissingCloudNotesResolution, String> {
+    acknowledge_missing_cloud_notes_after_stage_hook(auto_save_dir, expected_missing_paths, || {})
+}
+
+fn acknowledge_missing_cloud_notes_after_stage_hook<F>(
+    auto_save_dir: &Path,
+    expected_missing_paths: &[String],
+    after_stage: F,
+) -> Result<MissingCloudNotesResolution, String>
+where
+    F: FnOnce(),
+{
+    let trusted_root = TrustedLibraryRoot::open(auto_save_dir)?;
+    let _index_guard = lock_note_index();
+    recover_pending_note_save_unlocked(&trusted_root)?;
+    let snapshot = require_index_snapshot(&trusted_root)?;
+    let expected_paths = expected_missing_paths
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let removed_note_ids =
+        confirm_missing_cloud_note_set(&trusted_root, &snapshot.index, &expected_paths)?;
+    let original_bytes = snapshot
+        .original_bytes
+        .as_deref()
+        .ok_or_else(|| "Cloud note recovery requires an existing index.".to_string())?;
+    let index_path = get_index_path(trusted_root.path());
+    let backup_path = backup_index_bytes(&index_path, original_bytes, "missing-notes")
+        .map_err(|issue| issue.display())?;
+    let mut next_index = snapshot.index.clone();
+    for note_id in &removed_note_ids {
+        next_index.entries.remove(note_id);
+        next_index.deleted_note_ids.insert(note_id.clone());
+    }
+    write_index_from_snapshot_with_pre_publish_check(&trusted_root, &snapshot, &next_index, || {
+        after_stage();
+        confirm_missing_cloud_note_set(&trusted_root, &snapshot.index, &expected_paths)
+            .map(|_| ())
+            .map_err(|reason| {
+                IndexWriteFailure::Issue(NoteLoadIssue::new(
+                    NoteLoadIssueKind::Index,
+                    "confirm_missing_cloud_notes",
+                    &index_path,
+                    reason,
+                ))
+            })
+    })
+    .map_err(index_write_failure_to_string)?;
+    Ok(MissingCloudNotesResolution {
+        acknowledged_count: removed_note_ids.len(),
+        backup_path: backup_path.to_string_lossy().to_string(),
+        removed_note_ids,
+    })
 }
 
 #[cfg(test)]
@@ -4190,13 +4522,14 @@ pub fn remove_note_from_index_if_path(
     recover_pending_note_save_unlocked(&trusted_root)?;
     let expected_file_path =
         canonicalize_expected_library_path(&trusted_root, auto_save_dir, expected_file_path)?;
-    remove_note_from_index_if_path_unlocked(&trusted_root, note_id, &expected_file_path)
+    remove_note_from_index_if_path_unlocked(&trusted_root, note_id, &expected_file_path, None)
 }
 
 fn remove_note_from_index_if_path_unlocked(
     trusted_root: &TrustedLibraryRoot,
     note_id: &str,
     expected_file_path: &Path,
+    deleted_content_digest: Option<&str>,
 ) -> Result<Option<PathBuf>, String> {
     let safe_id = sanitize_note_id(note_id);
     if safe_id.is_empty() {
@@ -4225,6 +4558,16 @@ fn remove_note_from_index_if_path_unlocked(
     }
 
     index.entries.remove(&safe_id);
+    if let Some(content_digest) = deleted_content_digest {
+        index.deleted_note_files.insert(
+            safe_id.clone(),
+            DeletedNoteFile {
+                relative_path: entry.relative_path,
+                content_digest: content_digest.to_string(),
+            },
+        );
+    }
+    index.deleted_note_ids.insert(safe_id);
     write_index_from_snapshot(trusted_root, &index_snapshot, &index)
         .map_err(index_write_failure_to_string)?;
     Ok(Some(file_path))
@@ -4263,7 +4606,12 @@ where
         Err(error) => return Err(format!("Failed to check note file before delete: {error}")),
     }
 
-    let removed = remove_note_from_index_if_path_unlocked(&trusted_root, note_id, &file_path)?;
+    let removed = remove_note_from_index_if_path_unlocked(
+        &trusted_root,
+        note_id,
+        &file_path,
+        actual_digest.as_deref(),
+    )?;
     Ok(removed.is_some())
 }
 
@@ -4419,8 +4767,15 @@ fn migrate_notes_with_faults(
     }
 
     let (src_index, src_index_changed) = reconcile_index_with_scan(&src_snapshot.index, &src_scan);
-    let (mut dst_index, mut dst_index_changed) =
-        reconcile_index_with_scan(&dst_snapshot.index, &dst_scan);
+    let (mut dst_index, mut dst_index_changed, pending_destination) =
+        reconcile_index_with_scan_mode(&dst_snapshot.index, &dst_scan, true);
+    if !pending_destination.is_empty() {
+        return Err(pending_destination
+            .iter()
+            .map(NoteLoadIssue::display)
+            .collect::<Vec<_>>()
+            .join("; "));
+    }
     if dst_index_changed {
         write_index_from_snapshot(&dst_root, &dst_snapshot, &dst_index)
             .map_err(index_write_failure_to_string)?;
@@ -4508,6 +4863,19 @@ fn migrate_notes_with_faults(
             },
         );
         let bytes = read_trusted_file_bytes(&src_root, &src_file.full_path, "read_migration_note")?;
+        let markdown = String::from_utf8(bytes).map_err(|error| error.to_string())?;
+        let bytes = to_platform_line_endings(&embed_note_metadata(
+            &markdown,
+            src_entry.manual_title.as_deref(),
+            &NoteIdentityMetadata {
+                note_id: final_note_id.clone(),
+                created_at: src_entry.created_at,
+                is_pinned: src_entry.is_pinned,
+            },
+        )?)
+        .into_bytes();
+        dst_index.deleted_note_ids.remove(&final_note_id);
+        dst_index.deleted_note_files.remove(&final_note_id);
         publish_migrated_note(
             &dst_root,
             &dst_snapshot,
@@ -6019,6 +6387,8 @@ mod tests {
             let original_bytes = fs::read(&index_path).map_err(|e| e.to_string())?;
             let preserved_index = dir.join("original-index.json");
             let planned_index = NoteIndex {
+                deleted_note_ids: BTreeSet::new(),
+                deleted_note_files: HashMap::new(),
                 entries: HashMap::from([(
                     "planned".to_string(),
                     NoteIndexEntry {
@@ -6133,6 +6503,8 @@ mod tests {
                 ),
                 expected_index_digest: None,
                 next_index: NoteIndex {
+                    deleted_note_ids: BTreeSet::new(),
+                    deleted_note_files: HashMap::new(),
                     entries: HashMap::from([(
                         "journal-note".to_string(),
                         NoteIndexEntry {
@@ -6487,6 +6859,8 @@ mod tests {
                     || index_error.contains("publish_autosave_index")
             );
             let unrelated_index = NoteIndex {
+                deleted_note_ids: BTreeSet::new(),
+                deleted_note_files: HashMap::new(),
                 entries: HashMap::from([(
                     "other".to_string(),
                     NoteIndexEntry {
@@ -6566,6 +6940,8 @@ mod tests {
                 index_temp_relative_path: ".hwan-note-index-1-2-3.tmp".to_string(),
                 expected_index_digest: None,
                 next_index: NoteIndex {
+                    deleted_note_ids: BTreeSet::new(),
+                    deleted_note_files: HashMap::new(),
                     entries: HashMap::from([(
                         "unsafe".to_string(),
                         NoteIndexEntry {
@@ -7103,6 +7479,8 @@ mod tests {
             write_index(
                 &dir,
                 &NoteIndex {
+                    deleted_note_ids: BTreeSet::new(),
+                    deleted_note_files: HashMap::new(),
                     entries: HashMap::from([(
                         note_id.clone(),
                         NoteIndexEntry {
@@ -7838,6 +8216,537 @@ mod tests {
     }
 
     #[test]
+    fn cloud_same_path_replacement_waits_for_matching_identity_in_both_arrival_orders() {
+        for index_first in [true, false] {
+            let source = make_temp_dir("cloud-replacement-source");
+            let receiver = make_temp_dir("cloud-replacement-receiver");
+            let old = auto_save_markdown_note(
+                &source,
+                &autosave_payload("old-id", "Shared path", "Old bytes", None),
+            )
+            .unwrap();
+            let relative = read_index(&source).unwrap().entries["old-id"]
+                .relative_path
+                .clone();
+            fs::copy(&old.file_path, receiver.join(&relative)).unwrap();
+            fs::copy(source.join(INDEX_FILENAME), receiver.join(INDEX_FILENAME)).unwrap();
+            delete_note_file_and_index(&source, "old-id", |path| {
+                fs::remove_file(path).map_err(|error| error.to_string())
+            })
+            .unwrap();
+            let replacement = auto_save_markdown_note(
+                &source,
+                &autosave_payload("new-id", "Shared path", "New bytes", None),
+            )
+            .unwrap();
+            if index_first {
+                fs::copy(source.join(INDEX_FILENAME), receiver.join(INDEX_FILENAME)).unwrap();
+            } else {
+                fs::copy(&replacement.file_path, receiver.join(&relative)).unwrap();
+            }
+            let expected_index = fs::read(receiver.join(INDEX_FILENAME)).unwrap();
+            let pending = load_cloud_markdown_library(&receiver);
+            assert_eq!(pending.load_state, NoteLoadState::Incomplete);
+            assert!(pending.notes.is_empty());
+            assert!(pending
+                .issues
+                .iter()
+                .any(|issue| issue.operation == "await_cloud_note_identity"));
+            assert_eq!(
+                fs::read(receiver.join(INDEX_FILENAME)).unwrap(),
+                expected_index
+            );
+            fs::copy(source.join(INDEX_FILENAME), receiver.join(INDEX_FILENAME)).unwrap();
+            fs::copy(&replacement.file_path, receiver.join(&relative)).unwrap();
+            let ready = load_cloud_markdown_library(&receiver);
+            assert_eq!(ready.load_state, NoteLoadState::Ready);
+            assert_eq!(ready.notes.len(), 1);
+            assert_eq!(ready.notes[0].note_id, "new-id");
+            assert_eq!(ready.notes[0].markdown, "New bytes");
+            cleanup_temp_dir(&source);
+            cleanup_temp_dir(&receiver);
+        }
+    }
+
+    #[test]
+    fn cloud_legacy_deletion_fingerprint_hides_only_the_exact_deleted_bytes() {
+        let source = make_temp_dir("cloud-legacy-delete-source");
+        let receiver = make_temp_dir("cloud-legacy-delete-receiver");
+        fs::write(source.join("legacy.md"), "Legacy body without identity").unwrap();
+        let legacy = load_markdown_notes(&source).unwrap().remove(0);
+        fs::copy(&legacy.file_path, receiver.join("legacy.md")).unwrap();
+        fs::copy(source.join(INDEX_FILENAME), receiver.join(INDEX_FILENAME)).unwrap();
+        delete_note_file_and_index(&source, &legacy.note_id, |path| {
+            fs::remove_file(path).map_err(|error| error.to_string())
+        })
+        .unwrap();
+        fs::copy(source.join(INDEX_FILENAME), receiver.join(INDEX_FILENAME)).unwrap();
+        let deleted = load_cloud_markdown_library(&receiver);
+        assert_eq!(deleted.load_state, NoteLoadState::Ready);
+        assert!(deleted.notes.is_empty());
+        assert_eq!(
+            fs::read_to_string(receiver.join("legacy.md")).unwrap(),
+            "Legacy body without identity"
+        );
+
+        // An unrelated external file reusing that name is still imported.
+        fs::write(
+            receiver.join("legacy.md"),
+            "A different external replacement",
+        )
+        .unwrap();
+        let replaced = load_cloud_markdown_library(&receiver);
+        assert_eq!(replaced.load_state, NoteLoadState::Ready);
+        assert_eq!(replaced.notes.len(), 1);
+        assert_ne!(replaced.notes[0].note_id, legacy.note_id);
+        assert_eq!(
+            replaced.notes[0].markdown,
+            "A different external replacement"
+        );
+        cleanup_temp_dir(&source);
+        cleanup_temp_dir(&receiver);
+    }
+
+    #[test]
+    fn acknowledge_missing_cloud_notes_backs_up_exact_index_and_preserves_existing_files() {
+        let root = make_temp_dir("ack-cloud-deletion");
+        let missing = auto_save_markdown_note(
+            &root,
+            &autosave_payload("missing-id", "Missing", "Deleted externally", None),
+        )
+        .unwrap();
+        let survivor = auto_save_markdown_note(
+            &root,
+            &autosave_payload("survivor-id", "Survivor", "Unchanged bytes", None),
+        )
+        .unwrap();
+        let missing_path = read_index(&root).unwrap().entries["missing-id"]
+            .relative_path
+            .clone();
+        fs::remove_file(&missing.file_path).unwrap();
+        let original_index = fs::read(root.join(INDEX_FILENAME)).unwrap();
+        let survivor_bytes = fs::read(&survivor.file_path).unwrap();
+
+        let result = acknowledge_missing_cloud_notes(&root, &[missing_path]).unwrap();
+        assert_eq!(result.acknowledged_count, 1);
+        assert_eq!(result.removed_note_ids, vec!["missing-id"]);
+        assert_eq!(fs::read(&result.backup_path).unwrap(), original_index);
+        assert!(result.backup_path.contains(".missing-notes-"));
+        assert_eq!(fs::read(&survivor.file_path).unwrap(), survivor_bytes);
+        let index = read_index(&root).unwrap();
+        assert!(!index.entries.contains_key("missing-id"));
+        assert!(index.deleted_note_ids.contains("missing-id"));
+        let ready = load_cloud_markdown_library(&root);
+        assert_eq!(ready.load_state, NoteLoadState::Ready);
+        assert_eq!(ready.notes.len(), 1);
+        assert_eq!(ready.notes[0].note_id, "survivor-id");
+
+        let survivor_path = index.entries["survivor-id"].relative_path.clone();
+        fs::remove_file(&survivor.file_path).unwrap();
+        let next = acknowledge_missing_cloud_notes(&root, &[survivor_path]).unwrap();
+        assert_ne!(next.backup_path, result.backup_path);
+        assert_eq!(fs::read(&result.backup_path).unwrap(), original_index);
+        cleanup_temp_dir(&root);
+    }
+
+    #[test]
+    fn acknowledge_missing_cloud_notes_rejects_changed_confirmation_sets() {
+        let root = make_temp_dir("ack-cloud-set-changed");
+        let first = auto_save_markdown_note(
+            &root,
+            &autosave_payload("first-id", "First", "First bytes", None),
+        )
+        .unwrap();
+        let second = auto_save_markdown_note(
+            &root,
+            &autosave_payload("second-id", "Second", "Second bytes", None),
+        )
+        .unwrap();
+        let index = read_index(&root).unwrap();
+        let first_path = index.entries["first-id"].relative_path.clone();
+        let first_bytes = fs::read(&first.file_path).unwrap();
+        fs::remove_file(&first.file_path).unwrap();
+        fs::remove_file(&second.file_path).unwrap();
+        let before = fs::read(root.join(INDEX_FILENAME)).unwrap();
+        assert!(
+            acknowledge_missing_cloud_notes(&root, &[first_path.clone()])
+                .unwrap_err()
+                .contains("cloud_note_set_changed")
+        );
+        fs::write(&first.file_path, first_bytes).unwrap();
+        assert!(acknowledge_missing_cloud_notes(&root, &[first_path])
+            .unwrap_err()
+            .contains("cloud_note_set_changed"));
+        assert_eq!(fs::read(root.join(INDEX_FILENAME)).unwrap(), before);
+        assert!(!fs::read_dir(&root).unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains("missing-notes-")));
+        cleanup_temp_dir(&root);
+    }
+
+    #[test]
+    fn acknowledge_missing_cloud_notes_rechecks_after_staging_and_keeps_backup_on_abort() {
+        let root = make_temp_dir("ack-cloud-late-arrival");
+        let saved = auto_save_markdown_note(
+            &root,
+            &autosave_payload("arriving-id", "Arriving", "Downloaded bytes", None),
+        )
+        .unwrap();
+        let relative = read_index(&root).unwrap().entries["arriving-id"]
+            .relative_path
+            .clone();
+        let bytes = fs::read(&saved.file_path).unwrap();
+        fs::remove_file(&saved.file_path).unwrap();
+        let before = fs::read(root.join(INDEX_FILENAME)).unwrap();
+        let error = acknowledge_missing_cloud_notes_after_stage_hook(&root, &[relative], || {
+            fs::write(&saved.file_path, &bytes).unwrap();
+        })
+        .unwrap_err();
+        assert!(error.contains("cloud_note_set_changed"));
+        assert_eq!(fs::read(root.join(INDEX_FILENAME)).unwrap(), before);
+        assert_eq!(fs::read(&saved.file_path).unwrap(), bytes);
+        let backups = fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .contains("missing-notes-")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(fs::read(&backups[0]).unwrap(), before);
+        assert_eq!(
+            load_cloud_markdown_library(&root).load_state,
+            NoteLoadState::Ready
+        );
+        cleanup_temp_dir(&root);
+    }
+
+    #[test]
+    fn acknowledge_missing_cloud_notes_rejects_move_conflicts_and_unreadable_scans() {
+        let root = make_temp_dir("ack-cloud-conflict");
+        let missing = auto_save_markdown_note(
+            &root,
+            &autosave_payload("missing-id", "Missing", "Missing bytes", None),
+        )
+        .unwrap();
+        let moving = auto_save_markdown_note(
+            &root,
+            &autosave_payload("moving-id", "Moving", "Moving bytes", None),
+        )
+        .unwrap();
+        let missing_path = read_index(&root).unwrap().entries["missing-id"]
+            .relative_path
+            .clone();
+        fs::remove_file(&missing.file_path).unwrap();
+        fs::copy(&moving.file_path, root.join("new-location.md")).unwrap();
+        let before = fs::read(root.join(INDEX_FILENAME)).unwrap();
+        assert!(
+            acknowledge_missing_cloud_notes(&root, &[missing_path.clone()])
+                .unwrap_err()
+                .contains("await_cloud_note_move")
+        );
+        fs::remove_file(root.join("new-location.md")).unwrap();
+        fs::write(root.join("unreadable.md"), [0xff, 0xfe]).unwrap();
+        assert!(acknowledge_missing_cloud_notes(&root, &[missing_path]).is_err());
+        assert_eq!(fs::read(root.join(INDEX_FILENAME)).unwrap(), before);
+        cleanup_temp_dir(&root);
+    }
+
+    #[test]
+    fn cloud_index_before_note_preserves_identity_and_never_publishes_a_partial_scan() {
+        let source = make_temp_dir("cloud-index-first-source");
+        let receiver = make_temp_dir("cloud-index-first-receiver");
+        let mut payload = autosave_payload("original-note-id", "Pinned title", "Remote body", None);
+        payload.is_pinned = Some(true);
+        let saved = auto_save_markdown_note(&source, &payload).unwrap();
+        let source_index = read_index(&source).unwrap();
+        let entry = source_index.entries["original-note-id"].clone();
+        let index_bytes = fs::read(source.join(INDEX_FILENAME)).unwrap();
+        fs::write(receiver.join(INDEX_FILENAME), &index_bytes).unwrap();
+        fs::write(receiver.join("external.md"), "An unrelated external note").unwrap();
+
+        for _ in 0..3 {
+            let pending = load_cloud_markdown_library(&receiver);
+            assert_eq!(pending.load_state, NoteLoadState::Incomplete);
+            assert!(pending
+                .issues
+                .iter()
+                .any(|issue| issue.operation == "await_cloud_note"));
+            assert!(!pending
+                .notes
+                .iter()
+                .any(|note| note.note_id == "original-note-id"));
+            assert_eq!(
+                fs::read(receiver.join(INDEX_FILENAME)).unwrap(),
+                index_bytes
+            );
+            assert_eq!(
+                read_index(&receiver).unwrap().entries["original-note-id"],
+                entry
+            );
+        }
+
+        fs::copy(&saved.file_path, receiver.join(&entry.relative_path)).unwrap();
+        let ready = load_cloud_markdown_library(&receiver);
+        assert_eq!(ready.load_state, NoteLoadState::Ready);
+        let note = ready
+            .notes
+            .iter()
+            .find(|note| note.note_id == "original-note-id")
+            .unwrap();
+        assert_eq!(note.created_at, entry.created_at);
+        assert!(note.is_pinned);
+        assert_eq!(note.title, payload.title);
+        assert_eq!(note.markdown, payload.content);
+        assert_eq!(
+            read_index(&receiver).unwrap().entries["original-note-id"],
+            entry
+        );
+        cleanup_temp_dir(&source);
+        cleanup_temp_dir(&receiver);
+    }
+
+    #[test]
+    fn cloud_note_before_index_recovers_durable_identity_and_hides_metadata() {
+        let source = make_temp_dir("cloud-note-first-source");
+        let receiver = make_temp_dir("cloud-note-first-receiver");
+        let mut payload =
+            autosave_payload("durable-id", "Original title", "# Body\nSecond line", None);
+        payload.is_pinned = Some(true);
+        let saved = auto_save_markdown_note(&source, &payload).unwrap();
+        let source_index = read_index(&source).unwrap();
+        let entry = source_index.entries["durable-id"].clone();
+        fs::copy(&saved.file_path, receiver.join(&entry.relative_path)).unwrap();
+
+        let first = load_cloud_markdown_library(&receiver);
+        assert_eq!(first.load_state, NoteLoadState::Ready);
+        assert_eq!(first.notes.len(), 1);
+        assert_eq!(first.notes[0].note_id, "durable-id");
+        assert_eq!(first.notes[0].created_at, entry.created_at);
+        assert!(first.notes[0].is_pinned);
+        assert_eq!(first.notes[0].markdown, payload.content);
+        assert!(!first.notes[0].plain_text.contains("hwan-note:identity"));
+        assert_eq!(read_index(&receiver).unwrap().entries["durable-id"], entry);
+
+        // The delayed authoritative index must not replace a temporary ID or
+        // leave calendar references pointing at a path-derived alias.
+        fs::copy(source.join(INDEX_FILENAME), receiver.join(INDEX_FILENAME)).unwrap();
+        let second = load_cloud_markdown_library(&receiver);
+        assert_eq!(second.load_state, NoteLoadState::Ready);
+        assert_eq!(second.notes.len(), 1);
+        assert_eq!(second.notes[0].note_id, first.notes[0].note_id);
+        assert_eq!(
+            second.notes[0].content_digest,
+            first.notes[0].content_digest
+        );
+        cleanup_temp_dir(&source);
+        cleanup_temp_dir(&receiver);
+    }
+
+    #[test]
+    fn cloud_note_move_waits_for_both_paths_and_index_without_forking_identity() {
+        let source = make_temp_dir("cloud-move-source");
+        let receiver = make_temp_dir("cloud-move-receiver");
+        let mut payload = autosave_payload("moving-id", "Before", "Original body", None);
+        payload.is_pinned = Some(true);
+        let before = auto_save_markdown_note(&source, &payload).unwrap();
+        let before_index = read_index(&source).unwrap();
+        let old_relative = before_index.entries["moving-id"].relative_path.clone();
+        fs::copy(&before.file_path, receiver.join(&old_relative)).unwrap();
+        fs::copy(source.join(INDEX_FILENAME), receiver.join(INDEX_FILENAME)).unwrap();
+        let before_index_bytes = fs::read(receiver.join(INDEX_FILENAME)).unwrap();
+
+        payload.title = "After".to_string();
+        let after = auto_save_markdown_note(&source, &payload).unwrap();
+        let after_index = read_index(&source).unwrap();
+        let new_relative = after_index.entries["moving-id"].relative_path.clone();
+        fs::copy(&after.file_path, receiver.join(&new_relative)).unwrap();
+        let pending = load_cloud_markdown_library(&receiver);
+        assert_eq!(pending.load_state, NoteLoadState::Incomplete);
+        assert_eq!(pending.notes.len(), 1);
+        assert_eq!(pending.notes[0].note_id, "moving-id");
+        assert_eq!(
+            fs::read(receiver.join(INDEX_FILENAME)).unwrap(),
+            before_index_bytes
+        );
+
+        fs::copy(source.join(INDEX_FILENAME), receiver.join(INDEX_FILENAME)).unwrap();
+        let pending = load_cloud_markdown_library(&receiver);
+        assert_eq!(pending.load_state, NoteLoadState::Incomplete);
+        assert_eq!(pending.notes.len(), 1);
+        assert_eq!(pending.notes[0].note_id, "moving-id");
+        fs::remove_file(receiver.join(old_relative)).unwrap();
+        let ready = load_cloud_markdown_library(&receiver);
+        assert_eq!(ready.load_state, NoteLoadState::Ready);
+        assert_eq!(ready.notes.len(), 1);
+        assert_eq!(ready.notes[0].note_id, "moving-id");
+        assert_eq!(ready.notes[0].title, "After");
+        assert_eq!(ready.notes[0].created_at, before.created_at);
+        assert!(ready.notes[0].is_pinned);
+        cleanup_temp_dir(&source);
+        cleanup_temp_dir(&receiver);
+    }
+
+    #[test]
+    fn cloud_explicit_deletion_does_not_resurrect_a_late_note_file() {
+        let source = make_temp_dir("cloud-delete-source");
+        let receiver = make_temp_dir("cloud-delete-receiver");
+        let payload = autosave_payload("deleted-id", "Deleted", "Old body", None);
+        let saved = auto_save_markdown_note(&source, &payload).unwrap();
+        let relative = read_index(&source).unwrap().entries["deleted-id"]
+            .relative_path
+            .clone();
+        fs::copy(&saved.file_path, receiver.join(&relative)).unwrap();
+        fs::copy(source.join(INDEX_FILENAME), receiver.join(INDEX_FILENAME)).unwrap();
+        assert_eq!(load_cloud_markdown_library(&receiver).notes.len(), 1);
+        delete_note_file_and_index(&source, "deleted-id", |path| {
+            fs::remove_file(path).map_err(|error| error.to_string())
+        })
+        .unwrap();
+        fs::copy(source.join(INDEX_FILENAME), receiver.join(INDEX_FILENAME)).unwrap();
+        let deletion_bytes = fs::read(receiver.join(INDEX_FILENAME)).unwrap();
+
+        let deleted = load_cloud_markdown_library(&receiver);
+        assert_eq!(deleted.load_state, NoteLoadState::Ready);
+        assert!(deleted.notes.is_empty());
+        assert!(receiver.join(&relative).exists());
+        assert_eq!(
+            fs::read(receiver.join(INDEX_FILENAME)).unwrap(),
+            deletion_bytes
+        );
+        assert!(read_index(&receiver)
+            .unwrap()
+            .deleted_note_ids
+            .contains("deleted-id"));
+        fs::remove_file(receiver.join(relative)).unwrap();
+        assert_eq!(
+            load_cloud_markdown_library(&receiver).load_state,
+            NoteLoadState::Ready
+        );
+        cleanup_temp_dir(&source);
+        cleanup_temp_dir(&receiver);
+    }
+
+    #[test]
+    fn cloud_legacy_external_markdown_remains_editable_without_identity_metadata() {
+        let root = make_temp_dir("cloud-legacy-markdown");
+        fs::write(root.join("external.md"), "# External note").unwrap();
+        let loaded = load_cloud_markdown_library(&root);
+        assert_eq!(loaded.load_state, NoteLoadState::Ready);
+        assert_eq!(loaded.notes.len(), 1);
+        let note = &loaded.notes[0];
+        let mut payload = autosave_payload(&note.note_id, &note.title, "Edited legacy note", None);
+        payload.expected_content_digest = Some(note.content_digest.clone());
+        super::auto_save_markdown_note(&root, &payload).unwrap();
+        let edited = load_cloud_markdown_library(&root);
+        assert_eq!(edited.load_state, NoteLoadState::Ready);
+        assert_eq!(edited.notes.len(), 1);
+        assert_eq!(edited.notes[0].note_id, note.note_id);
+        assert_eq!(edited.notes[0].markdown, payload.content);
+        cleanup_temp_dir(&root);
+    }
+
+    #[test]
+    fn migration_does_not_prune_destination_notes_awaiting_cloud_download() {
+        let source = make_temp_dir("cloud-migration-source");
+        let destination = make_temp_dir("cloud-migration-destination");
+        auto_save_markdown_note(
+            &source,
+            &autosave_payload("local-id", "Local", "Local body", None),
+        )
+        .unwrap();
+        let remote = auto_save_markdown_note(
+            &destination,
+            &autosave_payload("remote-id", "Remote", "Remote body", None),
+        )
+        .unwrap();
+        let pending_bytes = fs::read(&remote.file_path).unwrap();
+        fs::remove_file(&remote.file_path).unwrap();
+        let expected_index = fs::read(destination.join(INDEX_FILENAME)).unwrap();
+
+        assert!(migrate_notes(&source, &destination)
+            .unwrap_err()
+            .contains("await_cloud_note"));
+        assert_eq!(
+            fs::read(destination.join(INDEX_FILENAME)).unwrap(),
+            expected_index
+        );
+        assert!(!read_index(&destination)
+            .unwrap()
+            .entries
+            .contains_key("local-id"));
+        fs::write(&remote.file_path, pending_bytes).unwrap();
+        assert_eq!(
+            migrate_notes(&source, &destination).unwrap().files_copied,
+            1
+        );
+        assert_eq!(load_cloud_markdown_library(&destination).notes.len(), 2);
+        cleanup_temp_dir(&source);
+        cleanup_temp_dir(&destination);
+    }
+
+    #[test]
+    fn cloud_existing_index_metadata_wins_over_older_downloaded_markdown() {
+        let root = make_temp_dir("cloud-index-metadata-first");
+        let mut payload = autosave_payload("metadata-id", "Old title", "Body", None);
+        payload.is_pinned = Some(true);
+        auto_save_markdown_note(&root, &payload).unwrap();
+        let mut index = read_index(&root).unwrap();
+        let entry = index.entries.get_mut("metadata-id").unwrap();
+        entry.manual_title = Some("New title".to_string());
+        entry.is_pinned = Some(false);
+        entry.created_at = 42;
+        write_index(&root, &index).unwrap();
+        let expected = fs::read(root.join(INDEX_FILENAME)).unwrap();
+
+        let loaded = load_cloud_markdown_library(&root);
+        assert_eq!(loaded.load_state, NoteLoadState::Ready);
+        assert_eq!(loaded.notes[0].title, "New title");
+        assert!(!loaded.notes[0].is_pinned);
+        assert_eq!(loaded.notes[0].created_at, 42);
+        assert_eq!(fs::read(root.join(INDEX_FILENAME)).unwrap(), expected);
+        index.entries.get_mut("metadata-id").unwrap().manual_title = None;
+        write_index(&root, &index).unwrap();
+        let expected = fs::read(root.join(INDEX_FILENAME)).unwrap();
+        let automatic_title = load_cloud_markdown_library(&root);
+        assert_eq!(automatic_title.notes[0].title, "Body");
+        assert!(!automatic_title.notes[0].is_title_manual);
+        assert_eq!(fs::read(root.join(INDEX_FILENAME)).unwrap(), expected);
+        cleanup_temp_dir(&root);
+    }
+
+    #[test]
+    fn locally_restored_deleted_markdown_gets_a_new_editable_identity() {
+        let root = make_temp_dir("local-trash-restore");
+        let payload = autosave_payload("deleted-original-id", "Restored", "Preserved body", None);
+        let saved = auto_save_markdown_note(&root, &payload).unwrap();
+        let saved_bytes = fs::read(&saved.file_path).unwrap();
+        delete_note_file_and_index(&root, "deleted-original-id", |path| {
+            fs::remove_file(path).map_err(|error| error.to_string())
+        })
+        .unwrap();
+        fs::write(&saved.file_path, saved_bytes).unwrap();
+
+        let restored = load_markdown_library(&root);
+        assert_eq!(restored.load_state, NoteLoadState::Ready);
+        assert_eq!(restored.notes.len(), 1);
+        assert_ne!(restored.notes[0].note_id, "deleted-original-id");
+        let note = &restored.notes[0];
+        let mut edit = autosave_payload(&note.note_id, &note.title, "Edited restored body", None);
+        edit.expected_content_digest = Some(note.content_digest.clone());
+        super::auto_save_markdown_note(&root, &edit).unwrap();
+        let edited = load_markdown_library(&root);
+        assert_eq!(edited.notes[0].note_id, note.note_id);
+        assert_eq!(edited.notes[0].markdown, edit.content);
+        cleanup_temp_dir(&root);
+    }
+
+    #[test]
     fn complete_scan_prunes_only_truly_deleted_file_and_preserves_survivor_metadata() {
         let dir = make_temp_dir("complete-real-deletion");
         let result = (|| -> Result<(), String> {
@@ -7938,6 +8847,8 @@ mod tests {
         let result = (|| -> Result<(), String> {
             let index_path = get_index_path(&dir);
             let unsafe_index = NoteIndex {
+                deleted_note_ids: BTreeSet::new(),
+                deleted_note_files: HashMap::new(),
                 entries: HashMap::from([(
                     "escape-note".to_string(),
                     NoteIndexEntry {
@@ -8081,6 +8992,8 @@ mod tests {
                 .map_err(|error| error.display("validate_library_root"))?;
             let snapshot = require_index_snapshot(&trusted_root)?;
             let planned_index = NoteIndex {
+                deleted_note_ids: BTreeSet::new(),
+                deleted_note_files: HashMap::new(),
                 entries: HashMap::from([(
                     "planned".to_string(),
                     NoteIndexEntry {
@@ -8092,6 +9005,8 @@ mod tests {
                 )]),
             };
             let concurrent_index = NoteIndex {
+                deleted_note_ids: BTreeSet::new(),
+                deleted_note_files: HashMap::new(),
                 entries: HashMap::from([(
                     "concurrent".to_string(),
                     NoteIndexEntry {
@@ -8226,6 +9141,8 @@ mod tests {
             let linked_file = dir.join("linked.md");
             fs::write(&linked_file, "library-original").map_err(|e| e.to_string())?;
             let index = NoteIndex {
+                deleted_note_ids: BTreeSet::new(),
+                deleted_note_files: HashMap::new(),
                 entries: HashMap::from([(
                     "linked-note".to_string(),
                     NoteIndexEntry {

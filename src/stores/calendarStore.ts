@@ -22,7 +22,7 @@ import { useNoteStore } from "./noteStore";
 
 const AUTO_SAVE_DELAY_MS = 1750;
 
-export type CalendarLoadState = "idle" | "loading" | "ready" | "corrupt" | "load_error";
+export type CalendarLoadState = "idle" | "loading" | "ready" | "corrupt" | "load_error" | "conflict";
 export type CalendarSaveResult = "saved" | "blocked";
 export interface CalendarRecoveryResult {
   status: "recovered" | "blocked";
@@ -41,6 +41,7 @@ export interface CalendarStore {
   loadError: string | null;
   sourcePath: string | null;
   backupPath: string | null;
+  recoveryCopyPath: string | null;
   storageTransitionInProgress: boolean;
 
   beginStorageTransition: () => boolean;
@@ -48,6 +49,7 @@ export interface CalendarStore {
   blockStorageAfterFailure: (error: unknown) => void;
   loadCalendarData: () => Promise<void>;
   recoverCalendarDataFromCloud: () => Promise<CalendarRecoveryResult>;
+  recoverCalendarConflict: () => Promise<CalendarRecoveryResult>;
   saveCalendarData: () => Promise<CalendarSaveResult>;
   resetCalendarData: () => Promise<CalendarSaveResult>;
 
@@ -154,6 +156,12 @@ async function executeSave(options: ExecuteSaveOptions = {}): Promise<CalendarSa
     return "saved";
   }
 
+  // Closing an unchanged calendar must never republish a stale disk snapshot.
+  if (!hasUnsavedChanges) {
+    return "saved";
+  }
+
+  const savingLoadRequestId = loadRequestId;
   isSaving = true;
   try {
     const state = useCalendarStore.getState();
@@ -169,6 +177,31 @@ async function executeSave(options: ExecuteSaveOptions = {}): Promise<CalendarSa
     return "saved";
   } catch (error) {
     console.error("Failed to save calendar data:", error);
+    if (String(error).includes("CALENDAR_CONFLICT:")) {
+      // A newer load/recovery owns the current snapshot and preservation flow.
+      if (savingLoadRequestId !== loadRequestId) return "blocked";
+      cancelPendingSave();
+      const latestData = useCalendarStore.getState().data;
+      useCalendarStore.setState({
+        loadState: "conflict",
+        loadError: String(error),
+        recoveryCopyPath: null,
+      });
+      // Include edits made while the failed write was in flight. The conflict
+      // state prevents further mutation until the copy and reload are resolved.
+      try {
+        const recoveryCopyPath = await hwanNote.calendar.preserveRecoveryCopy(
+          serializeCalendarData(latestData)
+        );
+        if (useCalendarStore.getState().data === latestData) {
+          useCalendarStore.setState({ recoveryCopyPath });
+        }
+      } catch (copyError) {
+        console.error("Failed to preserve conflicting calendar edits:", copyError);
+        useCalendarStore.setState({ loadError: `${String(error)}\n${String(copyError)}` });
+      }
+      return "blocked";
+    }
     if (options.throwOnError) {
       throw error;
     }
@@ -221,6 +254,7 @@ export const useCalendarStore: UseBoundStore<StoreApi<CalendarStore>> = create<C
   loadError: null,
   sourcePath: null,
   backupPath: null,
+  recoveryCopyPath: null,
   storageTransitionInProgress: false,
 
   beginStorageTransition: () => {
@@ -256,6 +290,22 @@ export const useCalendarStore: UseBoundStore<StoreApi<CalendarStore>> = create<C
     const previousState = useCalendarStore.getState();
     const requestId = ++loadRequestId;
     cancelPendingSave();
+    if (previousState.loadState === "conflict" && hasUnsavedChanges) {
+      // Every reload route, including storage recovery, must preserve local
+      // edits first. A failed copy leaves the conflict and draft intact.
+      if (isSaving) await waitForSaveIdle();
+      if (requestId !== loadRequestId) return;
+      try {
+        const recoveryCopyPath = await hwanNote.calendar.preserveRecoveryCopy(
+          serializeCalendarData(previousState.data)
+        );
+        if (requestId !== loadRequestId) return;
+        set({ recoveryCopyPath });
+      } catch (error) {
+        if (requestId === loadRequestId) set({ loadError: String(error) });
+        return;
+      }
+    }
     set({
       loaded: false,
       loadState: "loading",
@@ -387,6 +437,19 @@ export const useCalendarStore: UseBoundStore<StoreApi<CalendarStore>> = create<C
         backupPath: null,
       });
     }
+  },
+
+  recoverCalendarConflict: async () => {
+    if (useCalendarStore.getState().loadState !== "conflict") {
+      return { status: "blocked", loadedFrom: useCalendarStore.getState().loadedFrom, recoveryCopyPath: null };
+    }
+    await useCalendarStore.getState().loadCalendarData();
+    const state = useCalendarStore.getState();
+    return {
+      status: state.loadState === "ready" ? "recovered" : "blocked",
+      loadedFrom: state.loadedFrom,
+      recoveryCopyPath: state.recoveryCopyPath,
+    };
   },
 
   recoverCalendarDataFromCloud: async (): Promise<CalendarRecoveryResult> => {

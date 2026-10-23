@@ -126,6 +126,12 @@ export interface FolderDeleteResult {
   movedNoteIds: string[];
 }
 
+export interface MissingCloudNotesResolution {
+  acknowledgedCount: number;
+  backupPath: string;
+  removedNoteIds: string[];
+}
+
 // -- IPC abstraction layer --
 // Replaces window.hwanNote and window.hwanShell with Tauri invoke() calls.
 
@@ -183,6 +189,9 @@ export const hwanNote = {
       }),
 
     loadAll: () => invoke<NoteLoadResult>("cmd_note_load_all"),
+
+    acknowledgeMissingCloudNotes: (paths: string[]) =>
+      invoke<MissingCloudNotesResolution>("cmd_note_acknowledge_missing_cloud_notes", { paths }),
 
     importTxt: () =>
       invoke<ImportedFile[] | null>("cmd_note_import_txt"),
@@ -255,7 +264,7 @@ export const hwanNote = {
       invoke<void>("cmd_calendar_confirm_loaded", { payload: { data, loadedFrom } }),
 
     save: (data: string, loadedFrom: CalendarStorageSource) =>
-      invoke("cmd_calendar_save", { payload: { data, loadedFrom } }),
+      invoke<void>("cmd_calendar_save", { payload: { data, loadedFrom } }),
 
     backup: (data: string, loadedFrom: CalendarStorageSource) =>
       invoke<string>("cmd_calendar_backup", { payload: { data, loadedFrom } }),

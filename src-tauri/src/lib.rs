@@ -62,6 +62,7 @@ pub fn run() {
         }))
         .manage(PendingUpdate::default())
         .manage(DownloadedUpdate::default())
+        .manage(UpdateOperationState::default())
         .manage(PendingOpenIntents::default())
         .manage(CalendarWriteGuard::default())
         .invoke_handler(tauri::generate_handler![
@@ -74,6 +75,7 @@ pub fn run() {
             cmd_note_list,
             cmd_note_auto_save,
             cmd_note_load_all,
+            cmd_note_acknowledge_missing_cloud_notes,
             cmd_note_delete,
             cmd_folder_list,
             cmd_folder_create,

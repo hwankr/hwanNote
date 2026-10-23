@@ -5,7 +5,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../i18n/context";
 import { createDefaultShortcuts } from "../lib/shortcuts";
-import type { AutoSaveDirInfo } from "../lib/tauriApi";
+import { hwanNote, type AutoSaveDirInfo } from "../lib/tauriApi";
+import { initialUpdateState, useUpdateStore } from "../stores/updateStore";
 import SettingsPanel from "./SettingsPanel";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -25,6 +26,7 @@ describe("SettingsPanel custom storage status", () => {
 
   beforeEach(() => {
     window.localStorage.clear();
+    useUpdateStore.setState(initialUpdateState);
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -33,6 +35,7 @@ describe("SettingsPanel custom storage status", () => {
   afterEach(() => {
     act(() => root.unmount());
     container.remove();
+    vi.restoreAllMocks();
   });
 
   async function render(language: "ko" | "en") {
@@ -96,5 +99,21 @@ describe("SettingsPanel custom storage status", () => {
     expect(container.textContent).toContain("Browse");
     expect(container.textContent).toContain("Reset to default");
     expect(container.textContent).not.toContain("Using the default directory");
+  });
+
+  it("starts a manual update check and disables repeat clicks until it finishes", async () => {
+    let finish!: () => void;
+    const check = vi.spyOn(hwanNote.updater, "check").mockImplementation(() =>
+      new Promise<void>((resolve) => { finish = resolve; }));
+    await render("en");
+    const button = Array.from(container.querySelectorAll<HTMLButtonElement>("button"))
+      .find((element) => element.textContent === "Check for updates")!;
+    await act(async () => button.click());
+    expect(check).toHaveBeenCalledOnce();
+    expect(button.disabled).toBe(true);
+    await act(async () => button.click());
+    expect(check).toHaveBeenCalledOnce();
+    await act(async () => finish());
+    expect(button.disabled).toBe(false);
   });
 });

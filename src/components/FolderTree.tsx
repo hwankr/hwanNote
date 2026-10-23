@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../i18n/context";
 import { useNoteStore } from "../stores/noteStore";
+import { isImeComposing } from "../lib/ime";
 import ContextMenu, { type ContextMenuEntry } from "./ContextMenu";
 
 interface FolderRow {
@@ -122,6 +123,7 @@ function InlineFolderInput({
         className="folder-inline-input"
         defaultValue={defaultValue}
         onKeyDown={(e) => {
+          if (isImeComposing(e.nativeEvent)) return;
           if (e.key === "Enter") { e.preventDefault(); handleCommit(); }
           if (e.key === "Escape") { e.preventDefault(); onCancel(); }
         }}

@@ -1,7 +1,8 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
@@ -17,6 +18,28 @@ use crate::file_manager::{
 };
 
 // ── State for pending update ──
+
+#[derive(Default)]
+pub struct UpdateOperationState(AtomicBool);
+
+struct UpdateOperationGuard<'a>(&'a AtomicBool);
+
+impl UpdateOperationState {
+    fn begin(&self) -> Result<UpdateOperationGuard<'_>, String> {
+        self.0
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .map_err(|_| {
+                "An update operation is already running. Try again when it finishes.".to_string()
+            })?;
+        Ok(UpdateOperationGuard(&self.0))
+    }
+}
+
+impl Drop for UpdateOperationGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
 
 pub struct PendingUpdate(pub Mutex<Option<tauri_plugin_updater::Update>>);
 
@@ -47,54 +70,91 @@ impl Default for PendingOpenIntents {
     }
 }
 
-pub struct CalendarWriteGuard(Mutex<HashSet<PathBuf>>);
+#[derive(Default)]
+struct CalendarWriteState {
+    blocked_paths: HashSet<PathBuf>,
+    // None is a confirmed missing file; an absent entry has never been loaded.
+    snapshots: HashMap<PathBuf, Option<String>>,
+}
+
+pub struct CalendarWriteGuard(Mutex<CalendarWriteState>);
 
 impl Default for CalendarWriteGuard {
     fn default() -> Self {
-        Self(Mutex::new(HashSet::new()))
+        Self(Mutex::new(CalendarWriteState::default()))
     }
 }
 
 impl CalendarWriteGuard {
-    fn blocked_paths(&self) -> MutexGuard<'_, HashSet<PathBuf>> {
+    fn state(&self) -> MutexGuard<'_, CalendarWriteState> {
         self.0.lock().unwrap_or_else(|error| error.into_inner())
     }
 
     fn block(&self, calendar_path: &Path) {
-        self.blocked_paths().insert(calendar_path.to_path_buf());
+        self.state()
+            .blocked_paths
+            .insert(calendar_path.to_path_buf());
     }
 
-    fn confirm_loaded(&self, calendar_path: &Path) {
-        self.blocked_paths().remove(calendar_path);
+    fn confirm_loaded(
+        &self,
+        trusted_root: &file_manager::TrustedLibraryRoot,
+        data: Option<&str>,
+    ) -> Result<(), String> {
+        let calendar_path = trusted_root.file_path(file_manager::CALENDAR_FILENAME, false)?;
+        let mut state = self.state();
+        state.blocked_paths.insert(calendar_path.clone());
+        verify_calendar_snapshot_with_root(trusted_root, data)?;
+        state
+            .snapshots
+            .insert(calendar_path.clone(), data.map(str::to_owned));
+        state.blocked_paths.remove(&calendar_path);
+        Ok(())
     }
 
     #[cfg(test)]
     fn is_blocked(&self, calendar_path: &Path) -> bool {
-        self.blocked_paths().contains(calendar_path)
+        self.state().blocked_paths.contains(calendar_path)
     }
 
-    fn write_if_allowed<F>(&self, calendar_path: &Path, write: F) -> Result<(), String>
+    fn write_if_allowed<F>(
+        &self,
+        trusted_root: &file_manager::TrustedLibraryRoot,
+        data: &str,
+        write: F,
+    ) -> Result<(), String>
     where
-        F: FnOnce() -> Result<(), String>,
+        F: FnOnce(Option<&str>) -> Result<(), String>,
     {
-        let blocked_paths = self.blocked_paths();
-        if blocked_paths.contains(calendar_path) {
+        let calendar_path = trusted_root.file_path(file_manager::CALENDAR_FILENAME, false)?;
+        let mut state = self.state();
+        if state.blocked_paths.contains(&calendar_path) {
             return Err(format!(
                 "Calendar save rejected: {} is blocked after a calendar load failure. Back up and recover it, or explicitly reset the calendar first.",
                 calendar_path.display()
             ));
         }
 
-        write()
+        let snapshot = state.snapshots.get(&calendar_path).ok_or_else(|| {
+            "CALENDAR_CONFLICT: Calendar must be loaded before saving.".to_string()
+        })?;
+        verify_calendar_snapshot_with_root(trusted_root, snapshot.as_deref())
+            .map_err(|error| format!("CALENDAR_CONFLICT: {}", error))?;
+        write(snapshot.as_deref())?;
+        state.snapshots.insert(calendar_path, Some(data.to_owned()));
+        Ok(())
     }
 
-    fn reset<F>(&self, calendar_path: &Path, write: F) -> Result<(), String>
+    fn reset<F>(&self, calendar_path: &Path, data: &str, write: F) -> Result<(), String>
     where
         F: FnOnce() -> Result<(), String>,
     {
-        let mut blocked_paths = self.blocked_paths();
+        let mut state = self.state();
         write()?;
-        blocked_paths.remove(calendar_path);
+        state
+            .snapshots
+            .insert(calendar_path.to_path_buf(), Some(data.to_owned()));
+        state.blocked_paths.remove(calendar_path);
         Ok(())
     }
 }
@@ -946,6 +1006,7 @@ fn create_unique_calendar_temp(dir: &Path) -> Result<(fs::File, PathBuf), String
 fn write_calendar_data_with_root(
     trusted_root: &file_manager::TrustedLibraryRoot,
     data: &str,
+    before_publish: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
     let (mut tmp_file, tmp_path) = create_unique_calendar_temp_with_root(trusted_root)?;
     if let Err(error) = tmp_file
@@ -966,6 +1027,12 @@ fn write_calendar_data_with_root(
             return Err(error);
         }
     };
+    // Recheck after the potentially slow temp write and fsync, immediately
+    // before publication. External sync clients cannot share our process lock.
+    if let Err(error) = before_publish() {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(error);
+    }
     atomic_file::publish_temp_file(&tmp_path, &path, "write_calendar_data").map_err(|error| {
         tracing::error!("Failed to rename calendar temp file: {}", error);
         let _ = fs::remove_file(&tmp_path);
@@ -978,7 +1045,7 @@ fn write_calendar_data_with_root(
 #[cfg(test)]
 fn write_calendar_data(dir: &Path, data: &str) -> Result<(), String> {
     let trusted_root = file_manager::TrustedLibraryRoot::open(dir)?;
-    write_calendar_data_with_root(&trusted_root, data)
+    write_calendar_data_with_root(&trusted_root, data, || Ok(()))
 }
 
 // ── Window commands ──
@@ -1063,7 +1130,11 @@ pub fn cmd_note_auto_save(
 #[tauri::command]
 pub fn cmd_note_load_all(app: AppHandle) -> Result<NoteLoadResult, String> {
     let (effective_dir, loaded_from) = resolve_calendar_dir(&app)?;
-    let library = file_manager::load_markdown_library(&effective_dir);
+    let library = if loaded_from == ResolvedStorageSource::Cloud {
+        file_manager::load_cloud_markdown_library(&effective_dir)
+    } else {
+        file_manager::load_markdown_library(&effective_dir)
+    };
 
     Ok(NoteLoadResult {
         notes: library.notes,
@@ -1075,6 +1146,22 @@ pub fn cmd_note_load_all(app: AppHandle) -> Result<NoteLoadResult, String> {
         index_source_path: library.index_source_path,
         index_backup_path: library.index_backup_path,
     })
+}
+
+#[tauri::command]
+pub fn cmd_note_acknowledge_missing_cloud_notes(
+    app: AppHandle,
+    paths: Vec<String>,
+) -> Result<file_manager::MissingCloudNotesResolution, String> {
+    let (effective_dir, source) = resolve_calendar_dir(&app)?;
+    if source != ResolvedStorageSource::Cloud {
+        return Err(
+            "Missing cloud notes can only be acknowledged in the active cloud library.".to_string(),
+        );
+    }
+    // The backend rescans and accepts only the explicitly confirmed missing
+    // paths; it never applies this action to a local fallback library.
+    file_manager::acknowledge_missing_cloud_notes(&effective_dir, &paths)
 }
 
 #[tauri::command]
@@ -1257,8 +1344,7 @@ pub fn cmd_calendar_confirm_loaded(
     if let Some(data) = payload.data.as_deref() {
         validate_calendar_data_for_confirmation(data)?;
     }
-    verify_calendar_snapshot_with_root(&trusted_root, payload.data.as_deref())?;
-    write_guard.confirm_loaded(&calendar_path);
+    write_guard.confirm_loaded(&trusted_root, payload.data.as_deref())?;
     Ok(())
 }
 
@@ -1277,10 +1363,12 @@ pub fn cmd_calendar_save(app: AppHandle, payload: CalendarSavePayload) -> Result
 
     let dir = resolve_loaded_storage_dir(&app, loaded_from)?;
     let trusted_root = file_manager::TrustedLibraryRoot::open(&dir)?;
-    let calendar_path = trusted_root.file_path(file_manager::CALENDAR_FILENAME, false)?;
     app.state::<CalendarWriteGuard>()
-        .write_if_allowed(&calendar_path, || {
-            write_calendar_data_with_root(&trusted_root, &payload.data)
+        .write_if_allowed(&trusted_root, &payload.data, |snapshot| {
+            write_calendar_data_with_root(&trusted_root, &payload.data, || {
+                verify_calendar_snapshot_with_root(&trusted_root, snapshot)
+                    .map_err(|error| format!("CALENDAR_CONFLICT: {}", error))
+            })
         })
 }
 
@@ -1301,9 +1389,10 @@ pub fn cmd_calendar_reset(app: AppHandle, payload: CalendarSavePayload) -> Resul
     let dir = resolve_loaded_storage_dir(&app, loaded_from)?;
     let trusted_root = file_manager::TrustedLibraryRoot::open(&dir)?;
     let calendar_path = trusted_root.file_path(file_manager::CALENDAR_FILENAME, false)?;
-    app.state::<CalendarWriteGuard>().reset(&calendar_path, || {
-        write_calendar_data_with_root(&trusted_root, &payload.data)
-    })
+    app.state::<CalendarWriteGuard>()
+        .reset(&calendar_path, &payload.data, || {
+            write_calendar_data_with_root(&trusted_root, &payload.data, || Ok(()))
+        })
 }
 
 // ── Session commands ──
@@ -1502,16 +1591,35 @@ pub fn cmd_settings_get_autosave_dir(app: AppHandle) -> Result<AutoSaveDirInfo, 
 // ── Updater commands ──
 
 #[tauri::command]
-pub async fn cmd_updater_check(app: AppHandle) {
-    check_for_updates(app).await;
+pub async fn cmd_updater_check(app: AppHandle) -> Result<(), String> {
+    let operation_state = app.state::<UpdateOperationState>();
+    let _operation = operation_state.begin()?;
+    perform_update_check(app.clone()).await
 }
 
 pub async fn check_for_updates(app: AppHandle) {
+    let operation_state = app.state::<UpdateOperationState>();
+    // The delayed startup check must not interrupt a manual operation or emit
+    // a misleading status after the user has already started an update.
+    let Ok(_operation) = operation_state.begin() else {
+        return;
+    };
+    // A completed manual check/download may be waiting for user confirmation
+    // (including save dialogs before install). Keep those handles and UI intact.
+    if app.state::<PendingUpdate>().0.lock().unwrap().is_some()
+        || app.state::<DownloadedUpdate>().0.lock().unwrap().is_some()
+    {
+        return;
+    }
+    let _ = perform_update_check(app.clone()).await;
+}
+
+async fn perform_update_check(app: AppHandle) -> Result<(), String> {
     use tauri_plugin_updater::UpdaterExt;
 
     let window = match app.get_webview_window("main") {
         Some(w) => w,
-        None => return,
+        None => return Err("The main window is unavailable.".to_string()),
     };
 
     let emit = |payload: UpdateStatusPayload| {
@@ -1534,26 +1642,26 @@ pub async fn check_for_updates(app: AppHandle) {
                 progress: None,
                 error: Some(e.to_string()),
             });
-            return;
+            return Err(e.to_string());
         }
     };
 
     match updater.check().await {
         Ok(Some(update)) => {
             let version = update.version.clone();
-            emit(UpdateStatusPayload {
-                status: "available".to_string(),
-                version: Some(version),
-                progress: None,
-                error: None,
-            });
-            // Store update handle for download step
+            // Publish handles before advertising the action to the frontend.
             app.state::<PendingUpdate>()
                 .0
                 .lock()
                 .unwrap()
                 .replace(update);
             app.state::<DownloadedUpdate>().0.lock().unwrap().take();
+            emit(UpdateStatusPayload {
+                status: "available".to_string(),
+                version: Some(version),
+                progress: None,
+                error: None,
+            });
         }
         Ok(None) => {
             emit(UpdateStatusPayload {
@@ -1571,15 +1679,19 @@ pub async fn check_for_updates(app: AppHandle) {
                 progress: None,
                 error: Some(e.to_string()),
             });
+            return Err(e.to_string());
         }
     }
+    Ok(())
 }
 
 #[tauri::command]
-pub async fn cmd_updater_download(app: AppHandle) {
+pub async fn cmd_updater_download(app: AppHandle) -> Result<(), String> {
+    let operation_state = app.state::<UpdateOperationState>();
+    let _operation = operation_state.begin()?;
     let window = match app.get_webview_window("main") {
         Some(w) => w,
-        None => return,
+        None => return Err("The main window is unavailable.".to_string()),
     };
 
     let update = app.state::<PendingUpdate>().0.lock().unwrap().take();
@@ -1641,13 +1753,19 @@ pub async fn cmd_updater_download(app: AppHandle) {
                         error: Some(e.to_string()),
                     },
                 );
+                return Err(e.to_string());
             }
         }
+    } else {
+        return Err("No update is ready to download. Check for updates again.".to_string());
     }
+    Ok(())
 }
 
 #[tauri::command]
 pub fn cmd_updater_install(app: AppHandle) -> Result<(), String> {
+    let operation_state = app.state::<UpdateOperationState>();
+    let _operation = operation_state.begin()?;
     let window = match app.get_webview_window("main") {
         Some(w) => w,
         None => return Err("The main window is unavailable.".to_string()),
@@ -1880,6 +1998,32 @@ mod tests {
         dir
     }
 
+    #[test]
+    fn updater_operation_guard_rejects_overlapping_threads_and_releases() {
+        let state = std::sync::Arc::new(super::UpdateOperationState::default());
+        let active = state.begin().unwrap();
+        let competing_state = state.clone();
+        let rejected = std::thread::spawn(move || competing_state.begin().is_err())
+            .join()
+            .unwrap();
+        assert!(rejected);
+        assert!(state.begin().is_err());
+        drop(active);
+        assert!(state.begin().is_ok());
+    }
+
+    #[test]
+    fn updater_operation_guard_releases_after_early_failure() {
+        fn fail_after_start(state: &super::UpdateOperationState) -> Result<(), String> {
+            let _operation = state.begin()?;
+            Err("network unavailable".to_string())
+        }
+        let state = super::UpdateOperationState::default();
+        assert_eq!(fail_after_start(&state).unwrap_err(), "network unavailable");
+        // Retrying any update action is allowed after an error return.
+        assert!(state.begin().is_ok());
+    }
+
     fn normalized_test_path(path: &std::path::Path) -> PathBuf {
         let Some(parent) = path.parent() else {
             return path.to_path_buf();
@@ -2104,46 +2248,180 @@ mod tests {
     #[test]
     fn blocked_calendar_rejects_normal_write_until_confirmed() {
         let guard = CalendarWriteGuard::default();
-        let blocked_path = PathBuf::from("blocked/calendar.json");
-        let other_path = PathBuf::from("other/calendar.json");
+        let root = make_temp_dir("calendar-block-guard");
+        let trusted_root = file_manager::TrustedLibraryRoot::open(&root).unwrap();
+        let blocked_path = trusted_root
+            .file_path(file_manager::CALENDAR_FILENAME, false)
+            .unwrap();
         guard.block(&blocked_path);
 
-        let blocked_write = guard.write_if_allowed(&blocked_path, || {
+        let blocked_write = guard.write_if_allowed(&trusted_root, "saved data", |_| {
             panic!("blocked calendar write must not run")
         });
 
         assert!(blocked_write.is_err());
         assert!(guard.is_blocked(&blocked_path));
-        assert!(guard.write_if_allowed(&other_path, || Ok(())).is_ok());
 
-        guard.confirm_loaded(&blocked_path);
+        guard.confirm_loaded(&trusted_root, None).unwrap();
 
         assert!(!guard.is_blocked(&blocked_path));
-        assert!(guard.write_if_allowed(&blocked_path, || Ok(())).is_ok());
+        assert!(guard
+            .write_if_allowed(&trusted_root, "saved data", |_| write_calendar_data(
+                &root,
+                "saved data"
+            ))
+            .is_ok());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn reset_clears_block_only_after_successful_write() {
         let guard = CalendarWriteGuard::default();
         let root = make_temp_dir("calendar-reset-guard");
-        let calendar_path = root.join(file_manager::CALENDAR_FILENAME);
+        let trusted_root = file_manager::TrustedLibraryRoot::open(&root).unwrap();
+        let calendar_path = trusted_root
+            .file_path(file_manager::CALENDAR_FILENAME, false)
+            .unwrap();
         fs::write(&calendar_path, "corrupt data").unwrap();
         guard.block(&calendar_path);
 
-        let failed_reset = guard.reset(&calendar_path, || Err("write failed".to_string()));
+        let failed_reset =
+            guard.reset(&calendar_path, "failed", || Err("write failed".to_string()));
 
         assert!(failed_reset.is_err());
         assert!(guard.is_blocked(&calendar_path));
-        assert!(guard.write_if_allowed(&calendar_path, || Ok(())).is_err());
+        assert!(guard
+            .write_if_allowed(&trusted_root, "failed", |_| Ok(()))
+            .is_err());
 
         let reset_data = r#"{"version":4,"todos":{},"inbox":[],"noteLinks":{}}"#;
         assert!(guard
-            .reset(&calendar_path, || write_calendar_data(&root, reset_data))
+            .reset(&calendar_path, reset_data, || write_calendar_data(
+                &root, reset_data
+            ))
             .is_ok());
         assert!(!guard.is_blocked(&calendar_path));
         assert_eq!(fs::read_to_string(&calendar_path).unwrap(), reset_data);
-        assert!(guard.write_if_allowed(&calendar_path, || Ok(())).is_ok());
+        assert!(guard
+            .write_if_allowed(&trusted_root, "next write", |_| write_calendar_data(
+                &root,
+                "next write"
+            ))
+            .is_ok());
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn calendar_save_rejects_external_updates_after_confirmation() {
+        let root = make_temp_dir("calendar-save-conflict");
+        let trusted_root = file_manager::TrustedLibraryRoot::open(&root).unwrap();
+        let path = root.join(file_manager::CALENDAR_FILENAME);
+        let guard = CalendarWriteGuard::default();
+        fs::write(&path, "loaded calendar").unwrap();
+        guard
+            .confirm_loaded(&trusted_root, Some("loaded calendar"))
+            .unwrap();
+        fs::write(&path, "other device calendar").unwrap();
+
+        let error = guard
+            .write_if_allowed(&trusted_root, "local draft", |_| {
+                panic!("a conflicting calendar must never be overwritten")
+            })
+            .unwrap_err();
+        assert!(error.starts_with("CALENDAR_CONFLICT:"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "other device calendar");
+        // A repeated save must still fail until the new snapshot is loaded.
+        assert!(guard
+            .write_if_allowed(&trusted_root, "local draft", |_| Ok(()))
+            .is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn calendar_save_advances_snapshot_only_after_successful_writes() {
+        let root = make_temp_dir("calendar-save-consecutive");
+        let trusted_root = file_manager::TrustedLibraryRoot::open(&root).unwrap();
+        let path = root.join(file_manager::CALENDAR_FILENAME);
+        let guard = CalendarWriteGuard::default();
+        assert!(guard
+            .write_if_allowed(&trusted_root, "unloaded", |_| Ok(()))
+            .is_err());
+        guard.confirm_loaded(&trusted_root, None).unwrap();
+        for data in ["first", "second"] {
+            guard
+                .write_if_allowed(&trusted_root, data, |_| write_calendar_data(&root, data))
+                .unwrap();
+        }
+        assert!(guard
+            .write_if_allowed(&trusted_root, "failed", |_| Err("disk full".to_string()))
+            .is_err());
+        guard
+            .write_if_allowed(&trusted_root, "retry", |_| {
+                write_calendar_data(&root, "retry")
+            })
+            .unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "retry");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn calendar_publish_rechecks_snapshot_and_removes_temp_on_conflict() {
+        let root = make_temp_dir("calendar-publish-conflict");
+        let trusted_root = file_manager::TrustedLibraryRoot::open(&root).unwrap();
+        let path = root.join(file_manager::CALENDAR_FILENAME);
+        let guard = CalendarWriteGuard::default();
+        fs::write(&path, "loaded").unwrap();
+        guard.confirm_loaded(&trusted_root, Some("loaded")).unwrap();
+        let error = guard
+            .write_if_allowed(&trusted_root, "local draft", |snapshot| {
+                super::write_calendar_data_with_root(&trusted_root, "local draft", || {
+                    // Simulate a sync client replacing the destination while the
+                    // local replacement bytes were being written to the temp file.
+                    fs::write(&path, "arrived during temp write").unwrap();
+                    super::verify_calendar_snapshot_with_root(&trusted_root, snapshot)
+                        .map_err(|error| format!("CALENDAR_CONFLICT: {}", error))
+                })
+            })
+            .unwrap_err();
+        assert!(error.starts_with("CALENDAR_CONFLICT:"));
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "arrived during temp write"
+        );
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn calendar_save_rejects_external_deletion_and_recreation() {
+        let root = make_temp_dir("calendar-save-deleted");
+        let trusted_root = file_manager::TrustedLibraryRoot::open(&root).unwrap();
+        let path = root.join(file_manager::CALENDAR_FILENAME);
+        let guard = CalendarWriteGuard::default();
+        fs::write(&path, "loaded").unwrap();
+        guard.confirm_loaded(&trusted_root, Some("loaded")).unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(guard
+            .write_if_allowed(&trusted_root, "local", |_| Ok(()))
+            .unwrap_err()
+            .starts_with("CALENDAR_CONFLICT:"));
+        assert!(!path.exists());
+        fs::write(&path, "recreated externally").unwrap();
+        assert!(guard
+            .write_if_allowed(&trusted_root, "local", |_| Ok(()))
+            .unwrap_err()
+            .starts_with("CALENDAR_CONFLICT:"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "recreated externally");
+
+        fs::remove_file(&path).unwrap();
+        guard.confirm_loaded(&trusted_root, None).unwrap();
+        fs::write(&path, "appeared externally").unwrap();
+        assert!(guard
+            .write_if_allowed(&trusted_root, "local", |_| Ok(()))
+            .unwrap_err()
+            .starts_with("CALENDAR_CONFLICT:"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "appeared externally");
         fs::remove_dir_all(root).unwrap();
     }
 

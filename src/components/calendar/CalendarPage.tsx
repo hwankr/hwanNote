@@ -30,7 +30,9 @@ export default function CalendarPage({ onNavigateToNote, weekStartsOn }: Calenda
   const loadError = useCalendarStore((s) => s.loadError);
   const sourcePath = useCalendarStore((s) => s.sourcePath);
   const backupPath = useCalendarStore((s) => s.backupPath);
+  const recoveryCopyPath = useCalendarStore((s) => s.recoveryCopyPath);
   const loadCalendarData = useCalendarStore((s) => s.loadCalendarData);
+  const recoverCalendarConflict = useCalendarStore((s) => s.recoverCalendarConflict);
   const resetCalendarData = useCalendarStore((s) => s.resetCalendarData);
   const setSelectedDate = useCalendarStore((s) => s.setSelectedDate);
   const setCurrentMonth = useCalendarStore((s) => s.setCurrentMonth);
@@ -61,11 +63,21 @@ export default function CalendarPage({ onNavigateToNote, weekStartsOn }: Calenda
   const handleRecoveryReload = useCallback(async () => {
     setRecoveryBusy(true);
     try {
-      await loadCalendarData();
+      if (loadState === "conflict") {
+        const result = await recoverCalendarConflict();
+        await message(
+          result.status === "recovered" && result.recoveryCopyPath
+            ? t("calendar.conflictRecovered", { path: result.recoveryCopyPath })
+            : t("calendar.conflictRecoveryFailed"),
+          { title: t("calendar.conflictTitle"), kind: result.status === "recovered" ? "info" : "error" }
+        );
+      } else {
+        await loadCalendarData();
+      }
     } finally {
       setRecoveryBusy(false);
     }
-  }, [loadCalendarData]);
+  }, [loadCalendarData, loadState, recoverCalendarConflict, t]);
 
   const handleRecoveryReset = useCallback(async () => {
     const confirmed = await confirmDialog(t("calendar.recoveryResetConfirm"), {
@@ -181,19 +193,26 @@ export default function CalendarPage({ onNavigateToNote, weekStartsOn }: Calenda
     );
   }
 
-  if (loadState === "corrupt" || loadState === "load_error") {
+  if (loadState === "corrupt" || loadState === "load_error" || loadState === "conflict") {
+    const isConflict = loadState === "conflict";
     return (
       <div className="calendar-page calendar-recovery-page">
         <section className="calendar-recovery-card" role="alert">
           <div className="calendar-recovery-heading">
             <span className="calendar-recovery-icon" aria-hidden="true">!</span>
             <div>
-              <h2>{t("calendar.recoveryTitle")}</h2>
-              <p>{t("calendar.recoveryDescription")}</p>
+              <h2>{t(isConflict ? "calendar.conflictTitle" : "calendar.recoveryTitle")}</h2>
+              <p>{t(isConflict ? "calendar.conflictDescription" : "calendar.recoveryDescription")}</p>
             </div>
           </div>
 
           <dl className="calendar-recovery-details">
+            {recoveryCopyPath && (
+              <div>
+                <dt>{t("calendar.conflictCopy")}</dt>
+                <dd>{recoveryCopyPath}</dd>
+              </div>
+            )}
             {sourcePath && (
               <div>
                 <dt>{t("calendar.recoverySource")}</dt>
@@ -216,7 +235,7 @@ export default function CalendarPage({ onNavigateToNote, weekStartsOn }: Calenda
 
           <div className="calendar-recovery-actions">
             <button type="button" onClick={() => void handleRecoveryReload()} disabled={recoveryBusy}>
-              {t("calendar.recoveryReload")}
+              {t(isConflict ? "calendar.conflictReload" : "calendar.recoveryReload")}
             </button>
             {loadState === "corrupt" && (
               <button

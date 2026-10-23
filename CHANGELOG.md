@@ -7,6 +7,31 @@ This project follows [Semantic Versioning](https://semver.org/) and commit messa
 
 ## [Unreleased]
 
+## [0.9.19] - 2026-10-23
+
+### Fixed
+
+- Detect calendar changes made by another device or application before saving.
+  Keep conflicting edits in a local recovery copy before reloading, and skip
+  shutdown writes when the calendar has not changed locally.
+- Keep cloud note identities and calendar links when an index arrives before
+  its Markdown files. New note files also carry identity metadata so their IDs,
+  creation dates, and pin state can be recovered if the files arrive first.
+- Preserve two-space indentation, emphasis next to punctuation, and toggles
+  nested inside lists or quotes when saving and reopening Markdown notes.
+- Keep folder creation and renaming active while Korean IME confirmation keys
+  are composing text.
+- Add manual update checks in Settings and persistent retry actions for failed
+  update checks, downloads, and installations. Installation retries still save
+  notes and calendar data before invoking the installer.
+
+### Upgrade note
+
+- Update all devices editing a shared cloud library to 0.9.19 or newer. Older
+  clients do not understand the new note identity comments and deletion records.
+- For files deliberately deleted outside HwanNote, the recovery panel can
+  acknowledge the exact missing list after confirmation and an index backup.
+
 ## [0.9.18] - 2026-10-09
 
 ### Fixed

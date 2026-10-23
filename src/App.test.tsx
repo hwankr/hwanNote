@@ -4,18 +4,20 @@ import type { JSONContent } from "@tiptap/core";
 import { StrictMode, act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { confirm as confirmDialog } from "@tauri-apps/plugin-dialog";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const mocks = vi.hoisted(() => ({
   autoSave: vi.fn(),
+  acknowledgeMissingCloudNotes: vi.fn(),
   beginStorageTransition: vi.fn(),
   endStorageTransition: vi.fn(),
   blockStorageAfterFailure: vi.fn(),
   calendarTransitionActive: false,
   browseAutoSaveDir: vi.fn(),
   calendarData: { version: 1 },
-  calendarLoadState: "ready" as "idle" | "loading" | "ready" | "corrupt" | "load_error",
+  calendarLoadState: "ready" as "idle" | "loading" | "ready" | "corrupt" | "load_error" | "conflict",
   cleanOrphanNoteLinks: vi.fn(),
   closeRequestHandlers: [] as Array<(event: { preventDefault: () => void }) => void | Promise<void>>,
   detectCloudProviders: vi.fn(),
@@ -49,6 +51,7 @@ vi.mock("./lib/tauriApi", () => ({
       exit: mocks.windowExit,
     },
     note: {
+      acknowledgeMissingCloudNotes: mocks.acknowledgeMissingCloudNotes,
       autoSave: mocks.autoSave,
       loadAll: mocks.loadAll,
       importTxt: mocks.importTxt,
@@ -242,7 +245,7 @@ vi.mock("./components/UpdateToast", async () => {
         "button",
         {
           "data-testid": "install-update",
-          onClick: () => void onInstall(),
+          onClick: () => void onInstall().catch(() => undefined),
         },
         "install update",
       ),
@@ -439,6 +442,9 @@ describe("App locale changes", () => {
     });
 
     mocks.autoSave.mockReset().mockResolvedValue(createSaveResult());
+    mocks.acknowledgeMissingCloudNotes.mockReset().mockResolvedValue({
+      acknowledgedCount: 1, backupPath: "C:/cloud/index-backup.json", removedNoteIds: [NOTE_ID],
+    });
     mocks.loadAll.mockReset().mockResolvedValue(createLoadResult("local"));
     mocks.loadSession.mockReset().mockResolvedValue({
       openTabIds: [NOTE_ID],
@@ -947,6 +953,71 @@ describe("App locale changes", () => {
       "local",
       LOADED_DIGEST,
     );
+  });
+
+  it.each([false, true])("requires explicit confirmation before acknowledging missing cloud files: %s", async (confirmed) => {
+    mocks.loadAll.mockResolvedValueOnce(createRecoveryLoadResult({
+      loadState: "incomplete", loadedFrom: "cloud", kind: "index",
+      operation: "await_cloud_note", path: "missing.md", reason: "Cloud file is pending",
+    })).mockResolvedValue(createLoadResult("cloud"));
+    vi.mocked(confirmDialog).mockResolvedValueOnce(confirmed);
+    await renderApp(root);
+    const resolve = Array.from(container.querySelectorAll<HTMLButtonElement>(".note-recovery-actions button"))
+      .find((button) => button.textContent === "누락 파일을 삭제로 확정")!;
+    expect(resolve).toBeDefined();
+    await act(async () => resolve.click());
+    await flushReactWork();
+    expect(confirmDialog).toHaveBeenLastCalledWith(
+      expect.stringContaining("missing.md"), expect.objectContaining({ kind: "warning" })
+    );
+    if (confirmed) {
+      expect(mocks.acknowledgeMissingCloudNotes).toHaveBeenCalledExactlyOnceWith(["missing.md"]);
+      expect(container.querySelector(".note-recovery-panel")).toBeNull();
+      expect(container.querySelector(".library-notice")?.textContent).toContain("C:/cloud/index-backup.json");
+    } else {
+      expect(mocks.acknowledgeMissingCloudNotes).not.toHaveBeenCalled();
+      expect(mocks.loadAll).toHaveBeenCalledOnce();
+      expect(container.querySelector(".note-recovery-panel")).not.toBeNull();
+    }
+  });
+
+  it("does not offer missing-file acknowledgement for a conflicting identity or local scan", async () => {
+    mocks.loadAll.mockResolvedValueOnce(createRecoveryLoadResult({
+      loadState: "incomplete", loadedFrom: "cloud", kind: "index",
+      operation: "await_cloud_note_identity", path: "same-name.md", reason: "Different note bytes are pending",
+    }));
+    await renderApp(root);
+    expect(container.textContent).not.toContain("누락 파일을 삭제로 확정");
+    expect(mocks.acknowledgeMissingCloudNotes).not.toHaveBeenCalled();
+  });
+
+  it("preserves a cached dirty missing note under a new ID when its deletion is acknowledged", async () => {
+    mocks.loadAll.mockResolvedValueOnce(createRecoveryLoadResult({
+      loadState: "incomplete", loadedFrom: "cloud", kind: "index",
+      operation: "await_cloud_note", path: "missing.md", reason: "Cloud file is pending",
+    })).mockResolvedValue({ ...createLoadResult("cloud"), notes: [] });
+    await renderApp(root);
+    // Model an editor that was already open when the cloud file disappeared.
+    await act(async () => {
+      const store = useNoteStore.getState();
+      store.createTab();
+      const cached = useNoteStore.getState().activeOpenTab!;
+      store.hydrateTabs([{ ...cached, id: NOTE_ID, persistence: "library",
+        isDirty: true, plainText: "unsaved cached draft",
+        content: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "unsaved cached draft" }] }] },
+      }], { openTabIds: [NOTE_ID], activeTabId: NOTE_ID });
+    });
+    const resolve = Array.from(container.querySelectorAll<HTMLButtonElement>(".note-recovery-actions button"))
+      .find((button) => button.textContent === "누락 파일을 삭제로 확정")!;
+    await act(async () => resolve.click());
+    await flushReactWork();
+    const recovered = Object.values(useNoteStore.getState().notesById)
+      .find((note) => note.plainText === "unsaved cached draft");
+    expect(recovered).toBeDefined();
+    expect(recovered?.id).not.toBe(NOTE_ID);
+    expect(recovered?.isDirty).toBe(true);
+    expect(useNoteStore.getState().notesById[NOTE_ID]).toBeUndefined();
+    expect(mocks.autoSave.mock.calls.every((call) => call[0] !== NOTE_ID)).toBe(true);
   });
 
   it("preserves note identity, metadata, folders, and calendar links on an incomplete storage reload", async () => {
@@ -2049,6 +2120,22 @@ describe("App locale changes", () => {
       expect.any(String),
       expect.objectContaining({ kind: "error" }),
     );
+  });
+
+  it("keeps the app open and explains recovery when the calendar changed externally", async () => {
+    await renderApp(root);
+    mocks.calendarLoadState = "conflict";
+    await act(async () => { await requestWindowClose(); });
+    expect(mocks.windowExit).not.toHaveBeenCalled();
+    expect(mocks.dialogMessage).toHaveBeenCalledWith(
+      expect.stringContaining("복사본"),
+      expect.objectContaining({ title: "캘린더 파일이 외부에서 변경되었습니다", kind: "warning" }),
+    );
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(container, '[data-testid="install-update"]').click();
+    });
+    await flushReactWork();
+    expect(mocks.updaterInstall).not.toHaveBeenCalled();
   });
 
   it("does not install an update when the calendar save fails", async () => {

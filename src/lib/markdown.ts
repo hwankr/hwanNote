@@ -50,7 +50,79 @@ markdownParser.inline.ruler.before("html_inline", "hwan_html_break", (state, sil
 
 const TOGGLE_START = /^:::toggle\[(open|closed)\](?:\s+(.*))?\s*$/i;
 const TOGGLE_END = /^:::\s*$/;
-const FENCE_START = /^\s{0,3}(`{3,}|~{3,})/;
+
+// Parse toggles within markdown-it's current list/quote context. Splitting the
+// raw source before parsing would detach nested toggles from their parents.
+markdownParser.block.ruler.before("fence", "hwan_toggle", (state, startLine, endLine, silent) => {
+  const openingIndent = state.sCount[startLine];
+  if (openingIndent - state.blkIndent >= 4) {
+    return false;
+  }
+  const lineText = (line: number) => state.src.slice(state.bMarks[line] + state.tShift[line], state.eMarks[line]);
+  const opening = TOGGLE_START.exec(lineText(startLine));
+  if (!opening) {
+    return false;
+  }
+
+  let depth = 1;
+  let closingLine = -1;
+  let fence: string | null = null;
+  for (let line = startLine + 1; line < endLine; line += 1) {
+    const text = lineText(line);
+    if (text && state.sCount[line] < state.blkIndent) {
+      break;
+    }
+    const fenceMatch = /^(`{3,}|~{3,})(.*)$/.exec(text);
+    if (fence) {
+      if (fenceMatch && fenceMatch[1][0] === fence[0] &&
+          fenceMatch[1].length >= fence.length && !fenceMatch[2].trim()) {
+        fence = null;
+      }
+      continue;
+    }
+    if (fenceMatch && state.sCount[line] - state.blkIndent < 4) {
+      fence = fenceMatch[1];
+      continue;
+    }
+    // More deeply indented containers own their markers. Sibling toggles may
+    // share this delimiter, including ones with less cosmetic indentation.
+    if (state.sCount[line] > openingIndent) {
+      continue;
+    }
+    if (TOGGLE_START.test(text)) {
+      depth += 1;
+    } else if (TOGGLE_END.test(text)) {
+      depth -= 1;
+      if (depth === 0) {
+        closingLine = line;
+        break;
+      }
+    }
+  }
+  if (closingLine < 0) {
+    return false;
+  }
+  if (silent) {
+    return true;
+  }
+
+  const toggle = state.push("hwan_toggle_open", "details", 1);
+  toggle.attrSet("open", opening[1].toLowerCase());
+  state.push("hwan_toggle_summary_open", "summary", 1);
+  const summary = state.push("inline", "", 0);
+  summary.content = opening[2]?.trim() ?? "";
+  summary.children = [];
+  state.push("hwan_toggle_summary_close", "summary", -1);
+  state.push("hwan_toggle_content_open", "div", 1);
+  const previousLineMax = state.lineMax;
+  state.lineMax = closingLine;
+  state.md.block.tokenize(state, startLine + 1, closingLine);
+  state.lineMax = previousLineMax;
+  state.push("hwan_toggle_content_close", "div", -1);
+  state.push("hwan_toggle_close", "details", -1);
+  state.line = closingLine + 1;
+  return true;
+}, { alt: ["paragraph", "reference", "blockquote", "list"] });
 
 function createContainer(type: string, attrs?: Record<string, unknown>): JSONContent {
   return {
@@ -304,10 +376,26 @@ function parseStandardMarkdown(markdown: string): JSONContent[] {
         appendChild(current(), { type: "paragraph" });
         break;
 
+      case "hwan_toggle_open":
+        open("toggleBlock", { open: token.attrGet("open") === "open" });
+        break;
+      case "hwan_toggle_summary_open":
+        open("toggleSummary");
+        break;
+      case "hwan_toggle_content_open":
+        open("toggleContent");
+        break;
+      case "hwan_toggle_close":
+      case "hwan_toggle_summary_close":
+      case "hwan_toggle_content_close":
+        close();
+        break;
+
       case "inline": {
         current().content ??= [];
         const parseHtmlBreaks =
           current().type === "heading" ||
+          current().type === "toggleSummary" ||
           stack[stack.length - 2]?.type === "tableHeader" ||
           stack[stack.length - 2]?.type === "tableCell";
         const item = stack[stack.length - 2];
@@ -409,122 +497,9 @@ function ensureRequiredBlockContent(node: JSONContent): JSONContent {
   };
 }
 
-function fenceMarker(line: string) {
-  return FENCE_START.exec(line)?.[1] ?? null;
-}
-
-function isMatchingFence(line: string, openingFence: string) {
-  const candidate = fenceMarker(line);
-  return Boolean(
-    candidate &&
-      candidate[0] === openingFence[0] &&
-      candidate.length >= openingFence.length
-  );
-}
-
-function toggleSyntax(line: string) {
-  const indentation = /^[ \t]*/.exec(line)?.[0] ?? "";
-  if (indentation.includes("\t") || indentation.length > 3) {
-    return null;
-  }
-  return line.trim();
-}
-
-function findToggleEnd(lines: string[], startIndex: number) {
-  let depth = 0;
-  let activeFence: string | null = null;
-
-  for (let index = startIndex; index < lines.length; index += 1) {
-    const line = lines[index];
-    if (activeFence) {
-      if (isMatchingFence(line, activeFence)) {
-        activeFence = null;
-      }
-      continue;
-    }
-
-    const nextFence = fenceMarker(line);
-    if (nextFence) {
-      activeFence = nextFence;
-      continue;
-    }
-
-    const syntax = toggleSyntax(line);
-    if (syntax && TOGGLE_START.test(syntax)) {
-      depth += 1;
-    } else if (syntax && TOGGLE_END.test(syntax)) {
-      depth -= 1;
-      if (depth === 0) {
-        return index;
-      }
-    }
-  }
-
-  return -1;
-}
-
-function parseToggleAwareBlocks(markdown: string): JSONContent[] {
-  const lines = markdown.split("\n");
-  const content: JSONContent[] = [];
-  let regularStart = 0;
-  let activeFence: string | null = null;
-
-  const flushRegular = (end: number) => {
-    const source = lines.slice(regularStart, end).join("\n");
-    content.push(...parseStandardMarkdown(source));
-  };
-
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    if (activeFence) {
-      if (isMatchingFence(line, activeFence)) {
-        activeFence = null;
-      }
-      continue;
-    }
-
-    const nextFence = fenceMarker(line);
-    if (nextFence) {
-      activeFence = nextFence;
-      continue;
-    }
-
-    const syntax = toggleSyntax(line);
-    const match = syntax ? TOGGLE_START.exec(syntax) : null;
-    if (!match) {
-      continue;
-    }
-
-    const end = findToggleEnd(lines, index);
-    if (end < 0) {
-      continue;
-    }
-
-    flushRegular(index);
-    const summary = match[2]?.trim() ?? "";
-    const toggleContent = parseToggleAwareBlocks(lines.slice(index + 1, end).join("\n"));
-    content.push({
-      type: "toggleBlock",
-      attrs: { open: match[1].toLowerCase() === "open" },
-      content: [
-        { type: "toggleSummary", content: parseInlineMarkdown(summary, true) },
-        {
-          type: "toggleContent",
-          content: toggleContent.length > 0 ? toggleContent : [{ type: "paragraph" }]
-        }
-      ]
-    });
-    index = end;
-    regularStart = end + 1;
-  }
-
-  flushRegular(lines.length);
-  return content;
-}
-
 export function markdownToTiptapDocument(markdown: string): JSONContent {
   const normalized = markdown.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
-  const content = parseToggleAwareBlocks(normalized);
+  const content = parseStandardMarkdown(normalized);
   return {
     type: "doc",
     content: content.length > 0 ? content : [{ type: "paragraph" }]
@@ -559,7 +534,7 @@ function escapeLinkDestination(value: string) {
     .replace(/\s/g, (character) => encodeURIComponent(character));
 }
 
-function serializeTextNode(node: JSONContent) {
+function serializeTextNode(node: JSONContent, encodeStart = false, encodeEnd = false, emphasisMarker = "*") {
   const marks = node.marks ?? [];
   const code = marks.some((mark) => mark.type === "code");
   const hasDelimitedMark = !code && marks.some((mark) => ["bold", "italic", "strike", "link"].includes(mark.type));
@@ -573,14 +548,23 @@ function serializeTextNode(node: JSONContent) {
     return escapeInlineText(rawValue);
   }
 
-  let value = code ? serializeInlineCode(rawValue) : escapeInlineText(coreValue || rawValue);
+  let escapedValue: string;
+  if (encodeStart || encodeEnd) {
+    const characters = Array.from(coreValue || rawValue);
+    const first = encodeStart ? characters.shift() : undefined;
+    const last = encodeEnd ? characters.pop() : undefined;
+    escapedValue = `${first ? `&#${first.codePointAt(0)};` : ""}${escapeInlineText(characters.join(""))}${last ? `&#${last.codePointAt(0)};` : ""}`;
+  } else {
+    escapedValue = escapeInlineText(coreValue || rawValue);
+  }
+  let value = code ? serializeInlineCode(rawValue) : escapedValue;
 
   if (!code) {
     if (marks.some((mark) => mark.type === "bold")) {
-      value = `**${value}**`;
+      value = `${emphasisMarker.repeat(2)}${value}${emphasisMarker.repeat(2)}`;
     }
     if (marks.some((mark) => mark.type === "italic")) {
-      value = `*${value}*`;
+      value = `${emphasisMarker}${value}${emphasisMarker}`;
     }
     if (marks.some((mark) => mark.type === "strike")) {
       value = `~~${value}~~`;
@@ -599,10 +583,39 @@ function serializeTextNode(node: JSONContent) {
 }
 
 function serializeInline(content: JSONContent[] = [], hardBreak = "  \n"): string {
+  const needsBoundaryEscape = (left: JSONContent | undefined, right: JSONContent | undefined) => {
+    if (left?.type !== "text" || right?.type !== "text" || !left.text || !right.text ||
+        /\s$/.test(left.text) || /^\s/.test(right.text)) {
+      return false;
+    }
+    return [left, right].some((node) => node.marks?.some((mark) =>
+      ["bold", "italic", "strike"].includes(mark.type)
+    ));
+  };
+  let previousEmphasisMarker = "*";
   return content
-    .map((node) => {
+    .map((node, index) => {
       if (node.type === "text") {
-        return serializeTextNode(node);
+        const encodeStart = needsBoundaryEscape(content[index - 1], node);
+        const encodeEnd = needsBoundaryEscape(node, content[index + 1]);
+        const previousHasEmphasis = content[index - 1]?.marks?.some((mark) =>
+          mark.type === "bold" || mark.type === "italic"
+        );
+        const emphasisMarker = encodeStart && previousHasEmphasis
+          ? (previousEmphasisMarker === "*" ? "_" : "*")
+          : "*";
+        previousEmphasisMarker = emphasisMarker;
+        // Entities keep punctuation on both sides of adjoining delimiters.
+        // Markdown's flanking rules can then preserve e.g. **hello!**world
+        // without inserting visible spaces or introducing private markup.
+        // Alternating * and _ keeps adjacent mark runs from merging into an
+        // ambiguous delimiter run when bold and italic overlap.
+        return serializeTextNode(
+          node,
+          encodeStart,
+          encodeEnd,
+          emphasisMarker
+        );
       }
       if (node.type === "hardBreak") {
         return hardBreak;
@@ -616,8 +629,9 @@ function escapeParagraphOpening(value: string) {
   return value
     .split("\n")
     .map((line) => line
-      .replace(/^\t/, "&#9;")
-      .replace(/^ {4}/, "&#32;   ")
+      .replace(/^[ \t]+/, (whitespace) => Array.from(whitespace, (character) =>
+        character === "\t" ? "&#9;" : "&#32;"
+      ).join(""))
       .replace(/^(\s{0,3})(:::)/, "$1\\$2")
       .replace(/^(\s{0,3})(-+|=+)(\s*)$/, "$1\\$2$3")
       .replace(/^(\s{0,3})([-+>])(?=\s)/, "$1\\$2")

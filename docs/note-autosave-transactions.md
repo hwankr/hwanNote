@@ -135,6 +135,50 @@ References:
 
 ## Guarantee boundary
 
+### Cloud delivery order and explicit deletion
+
+Cloud library loads retain indexed notes whose Markdown has not arrived yet.
+Such a scan is incomplete: it does not publish an inferred replacement index,
+enable normal library mutations, or prune calendar links. A file whose embedded
+identity disagrees with the indexed identity is also withheld until both parts
+agree. This includes deleting and recreating a note with the same filename.
+
+Newly saved and copied notes carry a versioned HTML comment with their ID,
+creation time, and pin state. This recovers identity when a file arrives before
+its index; an existing index remains authoritative over older embedded metadata.
+Explicit deletions leave ID tombstones, plus path/content fingerprints for legacy
+files without identity comments. Late delivery of those deleted bytes does not
+re-import a note. An explicit local-to-cloud copy can restore a deleted local
+note; it is a user-requested copy rather than automatic scan reconciliation.
+
+Missing files alone cannot distinguish a delayed download from an external
+deletion. The recovery panel therefore offers an explicit acknowledgement after
+the user confirms the displayed missing paths. It makes a unique index backup,
+requires the exact missing-path set to remain unchanged through staging, and
+records deletions without deleting files. In-memory dirty notes are retained as
+separate recovery drafts. Unreadable scans, identity conflicts, or files arriving
+during recovery abort acknowledgement and retain the original index.
+
+Older HwanNote clients do not understand the identity comment or deletion
+records. Upgrade every device writing the same cloud library to 0.9.19 or newer
+before continuing edits. The new version reads existing older notes, but mixed
+old/new writers cannot provide these delivery-order guarantees.
+
+### Calendar conflict detection
+
+The calendar guard records the exact confirmed disk snapshot, including an
+explicit missing-file state. Each dirty save compares that baseline before
+writing and again after the temporary file is synchronized, immediately before
+publication. A successful save advances the baseline; failure does not. Closing
+an unchanged calendar does not write it back.
+
+A conflict preserves the latest local edits in memory and in a recovery copy.
+Reloading is blocked until the copy is safely preserved. Copy errors retain the
+draft and allow retry. This is optimistic conflict detection, not an atomic
+compare-and-swap with an unrelated cloud client: an external replacement in the
+small interval between the final comparison and rename cannot be locked by this
+process. Atomic publication still prevents partial-file reads.
+
 ### Folder rename and deletion
 
 Folder operations use a separate immutable intent journal,

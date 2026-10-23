@@ -725,7 +725,7 @@ describe("useCalendarStore corruption handling", () => {
     expect(calendarSave).not.toHaveBeenCalled();
   });
 
-  it("clears corruption after a successful reload and allows save", async () => {
+  it("clears corruption after a successful reload without rewriting unchanged data", async () => {
     calendarLoad
       .mockResolvedValueOnce({
         status: "ok",
@@ -759,7 +759,7 @@ describe("useCalendarStore corruption handling", () => {
       "local"
     );
     await expect(storeState().saveCalendarData()).resolves.toBe("saved");
-    expect(calendarSave).toHaveBeenCalledTimes(1);
+    expect(calendarSave).not.toHaveBeenCalled();
   });
 
   it("stays corrupt when a successful reload cannot clear the recovery guard", async () => {
@@ -853,6 +853,90 @@ describe("useCalendarStore corruption handling", () => {
       loadState: "corrupt",
       backupPath: "C:\\data\\calendar.json.bak",
     });
+  });
+});
+
+describe("useCalendarStore external calendar changes", () => {
+  async function loadExistingCalendar() {
+    calendarLoad.mockResolvedValue({
+      status: "ok",
+      data: serializeCalendarData(createTodoData()),
+      loadedFrom: "cloud",
+      cloudUnavailable: false,
+      sourcePath: "C:\\cloud\\calendar.json",
+    });
+    calendarSave.mockResolvedValue(undefined);
+    await storeState().loadCalendarData();
+  }
+
+  it("does not save on exit when no edits were made, including after successful saves", async () => {
+    await loadExistingCalendar();
+    await expect(storeState().saveCalendarData()).resolves.toBe("saved");
+    expect(calendarSave).not.toHaveBeenCalled();
+    storeState().createInboxTodo("first");
+    await storeState().saveCalendarData();
+    storeState().createInboxTodo("second");
+    await storeState().saveCalendarData();
+    await storeState().saveCalendarData();
+    expect(calendarSave).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(calendarSave.mock.calls[1][0]).inbox.map((item: { text: string }) => item.text))
+      .toEqual(["first", "second"]);
+  });
+
+  it("preserves edits made during a conflicting save and blocks every subsequent write", async () => {
+    await loadExistingCalendar();
+    const activeSave = deferred<void>();
+    calendarSave.mockReturnValueOnce(activeSave.promise);
+    storeState().createInboxTodo("first edit");
+    const save = storeState().saveCalendarData();
+    storeState().createInboxTodo("edit made while saving");
+    const latestData = storeState().data;
+    activeSave.reject("CALENDAR_CONFLICT: calendar changed externally");
+    await expect(save).resolves.toBe("blocked");
+    expect(storeState()).toMatchObject({
+      loadState: "conflict",
+      recoveryCopyPath: "C:\\data\\calendar.json.local-recovery.bak",
+    });
+    expect(storeState().data).toBe(latestData);
+    expect(calendarPreserveRecoveryCopy).toHaveBeenCalledWith(serializeCalendarData(latestData));
+    storeState().createInboxTodo("blocked edit");
+    await vi.advanceTimersByTimeAsync(2_000);
+    await expect(storeState().saveCalendarData()).resolves.toBe("blocked");
+    await expect(storeState().resetCalendarData()).resolves.toBe("blocked");
+    expect(calendarSave).toHaveBeenCalledTimes(1);
+    expect(storeState().data).toBe(latestData);
+  });
+
+  it("does not reload or report saved when preserving the conflict copy fails", async () => {
+    await loadExistingCalendar();
+    calendarSave.mockRejectedValueOnce(new Error("CALENDAR_CONFLICT: changed"));
+    calendarPreserveRecoveryCopy.mockRejectedValue(new Error("recovery disk unavailable"));
+    storeState().createInboxTodo("keep local draft");
+    const draft = storeState().data;
+    await expect(storeState().saveCalendarData()).resolves.toBe("blocked");
+    await expect(storeState().recoverCalendarConflict()).resolves.toMatchObject({ status: "blocked" });
+    // Even a direct reload route must retain the draft when backup fails.
+    await storeState().loadCalendarData();
+    expect(calendarLoad).toHaveBeenCalledTimes(1);
+    expect(storeState()).toMatchObject({ loadState: "conflict", recoveryCopyPath: null });
+    expect(storeState().data).toBe(draft);
+
+    calendarPreserveRecoveryCopy.mockResolvedValue("C:\\recovered\\local.bak");
+    const remote = createTodoData();
+    remote.todos["2026-08-11"].items[0].text = "other device edit";
+    calendarLoad.mockResolvedValue({
+      status: "ok", data: serializeCalendarData(remote), loadedFrom: "cloud",
+      cloudUnavailable: false, sourcePath: "C:\\cloud\\calendar.json",
+    });
+    await expect(storeState().recoverCalendarConflict()).resolves.toMatchObject({
+      status: "recovered", recoveryCopyPath: "C:\\recovered\\local.bak",
+    });
+    expect(calendarPreserveRecoveryCopy).toHaveBeenLastCalledWith(serializeCalendarData(draft));
+    expect(storeState().data).toEqual(remote);
+    expect(storeState().loadState).toBe("ready");
+    calendarSave.mockClear();
+    await expect(storeState().saveCalendarData()).resolves.toBe("saved");
+    expect(calendarSave).not.toHaveBeenCalled();
   });
 });
 

@@ -1992,6 +1992,12 @@ export default function App() {
 
   const notifyCalendarSaveBlocked = useCallback(async () => {
     const { backupPath, loadError, loadState, sourcePath } = useCalendarStore.getState();
+    if (loadState === "conflict") {
+      await message(t("calendar.conflictDescription"), {
+        title: t("calendar.conflictTitle"), kind: "warning"
+      });
+      return;
+    }
     console.error("Calendar save blocked until recovery or explicit reset:", {
       loadState,
       loadError,
@@ -2219,6 +2225,48 @@ export default function App() {
     }
   }, [autoSaveDirInfo, noteLoadRetrying, reloadCurrentStorage, runStorageTransition]);
 
+  const canAcknowledgeMissingCloudNotes = noteStorageSourceRef.current === "cloud" &&
+    noteLoadRecovery?.loadState === "incomplete" && noteLoadRecovery.issues.length > 0 &&
+    noteLoadRecovery.issues.every((issue) => issue.operation === "await_cloud_note");
+
+  const handleAcknowledgeMissingCloudNotes = useCallback(async () => {
+    if (noteLoadRetrying || !canAcknowledgeMissingCloudNotes) return;
+    const recovery = noteLoadRecoveryRef.current;
+    if (!recovery) return;
+    const paths = recovery.issues.map((issue) => issue.path);
+    setNoteLoadRetrying(true);
+    try {
+      const confirmed = await confirmDialog(t("notes.missingCloudConfirm", { paths: paths.join("\n") }), {
+        title: t("notes.missingCloudResolve"), kind: "warning"
+      });
+      if (!confirmed) return;
+      await runStorageTransition(async () => {
+        // A storage switch or newer scan invalidates the list the user saw.
+        if (noteStorageSourceRef.current !== "cloud" || recovery !== noteLoadRecoveryRef.current) return;
+        const result = await hwanNote.note.acknowledgeMissingCloudNotes(paths);
+        const recoveredIds = new Map<string, string>();
+        for (const id of result.removedNoteIds) {
+          flushTitleDraft(id);
+          const tab = useNoteStore.getState().notesById[id];
+          if (!tab?.isDirty) continue;
+          const recoveryId = useNoteStore.getState().recoverConflictedTab(
+            id, t("notes.conflictCopyTitle", { title: tab.title })
+          );
+          if (recoveryId) recoveredIds.set(id, recoveryId);
+        }
+        preserveRecoveredEditors(recoveredIds);
+        await reloadCurrentStorage();
+        setLibraryNotice({
+          title: t("notes.missingCloudResolve"),
+          detail: t("notes.missingCloudResolved", { count: result.acknowledgedCount, path: result.backupPath })
+        });
+      }, false, true);
+    } finally {
+      setNoteLoadRetrying(false);
+    }
+  }, [canAcknowledgeMissingCloudNotes, flushTitleDraft, noteLoadRetrying,
+    preserveRecoveredEditors, reloadCurrentStorage, runStorageTransition, t]);
+
   const handleBrowseAutoSaveDir = useCallback(async () => {
     const settingsApi = hwanNote.settings;
     if (!settingsApi) return;
@@ -2342,6 +2390,7 @@ export default function App() {
       await hwanNote.updater.install();
     } catch (error) {
       console.error("Failed to install update:", error);
+      throw error;
     } finally {
       // A successful installer normally terminates the process. Any return,
       // including an IPC rejection, must restore normal close protection.
@@ -2912,6 +2961,12 @@ export default function App() {
             >
               {noteLoadRetrying ? t("notes.recoveryRetrying") : t("notes.recoveryRetry")}
             </button>
+            {canAcknowledgeMissingCloudNotes ? (
+              <button type="button" disabled={noteLoadRetrying}
+                onClick={() => void handleAcknowledgeMissingCloudNotes()}>
+                {t("notes.missingCloudResolve")}
+              </button>
+            ) : null}
           </div>
         </section>
       ) : null}

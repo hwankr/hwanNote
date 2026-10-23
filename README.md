@@ -2,7 +2,7 @@
 
 # HwanNote
 
-![Version](https://img.shields.io/badge/version-0.9.18-2f7d32) ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-blue) ![Tauri](https://img.shields.io/badge/Tauri-v2-24C8D8) ![React](https://img.shields.io/badge/React-18-61DAFB) ![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white) ![License](https://img.shields.io/badge/License-MIT-green)
+![Version](https://img.shields.io/badge/version-0.9.19-2f7d32) ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-blue) ![Tauri](https://img.shields.io/badge/Tauri-v2-24C8D8) ![React](https://img.shields.io/badge/React-18-61DAFB) ![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white) ![License](https://img.shields.io/badge/License-MIT-green)
 
 > Windows 11 메모장 감성을 바탕으로 만든 데스크톱 마크다운 메모 앱
 
@@ -10,7 +10,7 @@ HwanNote는 Tauri v2 + React 18 + TypeScript 기반의 로컬 우선 메모 앱�
 
 ## 현재 상태
 
-- 최신 버전: `v0.9.18`
+- 최신 버전: `v0.9.19`
 - 기본 저장소: `문서/HwanNote/Notes`
 - 지원 언어: 한국어, English
 - 기본 대상 플랫폼: Windows 10/11 (64-bit)
@@ -78,6 +78,12 @@ HwanNote는 Tauri v2 + React 18 + TypeScript 기반의 로컬 우선 메모 앱�
 
 ## 최근 반영된 내용
 
+- `v0.9.19`
+  - 캘린더 외부 변경 감지, 충돌 복사본 보존 및 미편집 종료 저장 생략
+  - 클라우드 파일 도착 순서가 달라도 메모 ID·고정 상태·캘린더 연결 보존
+  - 저장·재열기 시 2칸 들여쓰기, 문장부호 주변 강조, 목록 안 토글 구조 보존
+  - 폴더명 생성·변경 중 한글 조합 Enter·Escape 보호
+  - 설정에서 업데이트 확인, 다운로드·설치 실패 후 앱 재시작 없이 재시도
 - `v0.9.18`
   - 저장 충돌·클라우드 복구 중 편집기, 커서와 실행 취소 기록 유지
   - 자동 복구 알림 및 Tab·Shift+Tab에 의한 입력 포커스 이탈 방지
@@ -123,6 +129,10 @@ HwanNote는 Tauri v2 + React 18 + TypeScript 기반의 로컬 우선 메모 앱�
   - Google Drive: `<Google Drive>/HwanNote/Notes`
 
 클라우드 동기화는 별도 클라우드 API를 직접 호출하는 방식이 아니라, 데스크톱 동기화 클라이언트가 제공하는 로컬 동기화 폴더를 라이브러리 위치로 사용하는 방식입니다. 연동 후에는 설정에서 로컬 라이브러리와 클라우드 라이브러리 중 현재 보기를 전환할 수 있습니다.
+
+`v0.9.19`부터 클라우드 파일 도착 순서와 삭제 기록을 보호하기 위해 메모의 숨김 식별 정보를 저장합니다. 같은 클라우드 라이브러리를 편집하는 모든 기기를 `v0.9.19` 이상으로 업데이트하세요. 이전 버전은 새 식별 정보와 삭제 기록을 이해하지 못합니다.
+
+동기화 중 메모 파일이 누락되면 파일과 인덱스가 일치할 때까지 저장을 보류합니다. 동기화가 끝났고 파일을 실제로 외부에서 삭제했다면 복구 안내의 `누락 파일을 삭제로 확정`을 사용할 수 있습니다. 이전 인덱스를 백업하고 현재 편집 내용은 별도 사본으로 보존합니다.
 
 ## 다운로드 및 설치
 

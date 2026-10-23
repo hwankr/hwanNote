@@ -3,6 +3,7 @@ import { useI18n } from "../i18n/context";
 import type { AppLanguage } from "../i18n/messages";
 import type { WeekStart } from "../lib/calendarRange";
 import type { AutoSaveDirInfo, CloudProviderInfo, CloudSyncSource } from "../lib/tauriApi";
+import { useUpdateStore } from "../stores/updateStore";
 import {
   SHORTCUT_DEFINITIONS,
   SHORTCUT_GROUPS,
@@ -78,6 +79,8 @@ export default function SettingsPanel({
   const { t, language, setLanguage } = useI18n();
   const [listeningAction, setListeningAction] = useState<ShortcutAction | null>(null);
   const [shortcutHint, setShortcutHint] = useState("");
+  const updateBusy = useUpdateStore((state) => state.busy);
+  const checkForUpdates = useUpdateStore((state) => state.check);
   const providerLabels: Record<string, string> = {
     onedrive: "OneDrive",
     google_drive: "Google Drive",
@@ -163,6 +166,13 @@ export default function SettingsPanel({
         </div>
 
         <div className="settings-body">
+          <div className="settings-item">
+            <label>{t("update.settingsTitle")}</label>
+            <button type="button" className="settings-autosave-btn"
+              disabled={updateBusy} onClick={() => void checkForUpdates()}>
+              {t("update.check")}
+            </button>
+          </div>
           <div className="settings-item">
             <label htmlFor="theme-mode">{t("settings.themeMode")}</label>
             <select

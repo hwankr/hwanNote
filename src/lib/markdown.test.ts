@@ -257,7 +257,7 @@ describe("Tiptap JSON and Markdown round trips", () => {
     const reparsed = markdownToTiptapDocument(markdown);
     const nodes = walk(reparsed);
 
-    expect(markdown).toBe(" *spaced* ");
+    expect(markdown).toBe("&#32;*spaced* ");
     expect(nodes.some((node) => node.type === "bulletList")).toBe(false);
     expect(nodes.find((node) => node.text === "spaced")?.marks?.some((mark) => mark.type === "italic")).toBe(true);
   });
@@ -290,6 +290,100 @@ describe("Tiptap JSON and Markdown round trips", () => {
 
     expect(markdown).toContain("100. outer\n     - inner");
     expect(orderedList?.content?.[0]?.content?.some((node) => node.type === "bulletList")).toBe(true);
+  });
+
+  it.each([1, 2, 3, 4, 8])("preserves %i leading spaces, including the two-space Tab setting", (spaces) => {
+    const text = `${" ".repeat(spaces)}indented`;
+    const paragraph: JSONContent = {
+      type: "paragraph",
+      content: [{ type: "text", text }, { type: "hardBreak" }, { type: "text", text }]
+    };
+    expectDocumentRoundTrip({ type: "doc", content: [paragraph] });
+    expectDocumentRoundTrip({
+      type: "doc",
+      content: [{ type: "bulletList", content: [{ type: "listItem", content: [paragraph] }] }]
+    });
+  });
+
+  it.each(["bold", "italic", "strike"])("preserves punctuation at adjacent %s boundaries", (mark) => {
+    for (const [left, right] of [["hello!", "world"], ["hello", "!world"], ["한글。", "다음"], ["😀!", "끝"]]) {
+      for (const markedIndex of [0, 1]) {
+        expectDocumentRoundTrip({
+          type: "doc",
+          content: [{
+            type: "paragraph",
+            content: [left, right].map((text, index) => ({
+              type: "text",
+              text,
+              ...(index === markedIndex ? { marks: [{ type: mark }] } : {})
+            }))
+          }]
+        });
+      }
+    }
+  });
+
+  it("preserves punctuation-only emphasis between differently marked text runs", () => {
+    for (const [left, right] of [["bold", "bold"], ["bold", "italic"], ["italic", "bold"]]) {
+      expectDocumentRoundTrip({
+        type: "doc",
+        content: [{
+          type: "paragraph",
+          content: [
+            { type: "text", text: "foo", marks: [{ type: left }] },
+            { type: "text", text: "!", marks: [{ type: "bold" }, { type: "italic" }] },
+            { type: "text", text: "bar", marks: [{ type: right }] }
+          ]
+        }]
+      });
+    }
+  });
+
+  it.each(["bulletList", "orderedList", "taskList", "blockquote"])(
+    "keeps nested toggles inside their %s parent when saving and reopening",
+    (containerType) => {
+      const paragraph = (text: string): JSONContent => ({ type: "paragraph", content: [{ type: "text", text }] });
+      const toggle: JSONContent = {
+        type: "toggleBlock",
+        attrs: { open: false },
+        content: [
+          { type: "toggleSummary", content: [{ type: "text", text: "Nested details" }] },
+          { type: "toggleContent", content: [paragraph("body"), { type: "paragraph" }] }
+        ]
+      };
+      const children = [paragraph("before"), toggle, paragraph("after")];
+      const container: JSONContent = containerType === "blockquote"
+        ? { type: containerType, content: children }
+        : {
+          type: containerType,
+          ...(containerType === "orderedList" ? { attrs: { start: 100 } } : {}),
+          content: [children, [paragraph("next item")]].map((content) => ({
+            type: containerType === "taskList" ? "taskItem" : "listItem",
+            ...(containerType === "taskList" ? { attrs: { checked: true } } : {}),
+            content
+          }))
+        };
+      expectDocumentRoundTrip({ type: "doc", content: [container, paragraph("outside")] });
+      expectDocumentRoundTrip({
+        type: "doc",
+        content: [{
+          ...toggle,
+          content: [toggle.content![0], { type: "toggleContent", content: [container, toggle] }]
+        }]
+      });
+    }
+  );
+
+  it("keeps toggle delimiters in fenced and indented code literal inside a toggle", () => {
+    const source = [
+      ":::toggle[open] Outer",
+      "```text", ":::toggle[closed] code", "::: extra", ":::", "```",
+      "", "    :::toggle[open] indented", "    :::", "", ":::"
+    ].join("\n");
+    const document = markdownToTiptapDocument(source);
+    expect(walk(document).filter((node) => node.type === "toggleBlock")).toHaveLength(1);
+    expect(walk(document).filter((node) => node.type === "codeBlock")).toHaveLength(2);
+    expectDocumentRoundTrip(document);
   });
 
   it("does not treat toggle-looking indented code as a toggle block", () => {
