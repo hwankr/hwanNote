@@ -14,6 +14,7 @@ vi.mock("@tauri-apps/api/core", async (importOriginal) => ({
 }));
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({
+    outerPosition: async () => ({ x: 0, y: 0 }),
     onMoved: async () => () => {},
     onScaleChanged: async () => () => {},
   }),
@@ -186,7 +187,7 @@ describe("mounted editor during IME composition", () => {
     expect(editor.view.composing).toBe(false);
   });
 
-  it("defers Windows resize recovery until composition finishes and preserves final text, selection and undo", async () => {
+  it("never blurs for a Windows resize that overlaps composition, and a later idle refresh preserves text, selection and undo", async () => {
     vi.useFakeTimers();
     vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
     vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
@@ -213,6 +214,11 @@ describe("mounted editor during IME composition", () => {
     });
     expect(editor.getText()).toBe("prefix 한");
     expect(onChange.mock.lastCall?.[1]).toBe("prefix 한");
+    // The resize happened while the user was typing; the pause before the next
+    // syllable must not become a blur.
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(blur).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(originalDOM);
     act(() => { editor.commands.setTextSelection({ from: 9, to: 8 }); });
     const documentBeforeRecovery = editor.getJSON();
     const modelSelection = editor.state.selection.toJSON();
@@ -224,6 +230,8 @@ describe("mounted editor during IME composition", () => {
       focusOffset: selection.focusOffset,
     };
 
+    // A resize while idle still refreshes the IME anchor once.
+    window.dispatchEvent(new Event("resize"));
     await act(async () => { await vi.advanceTimersByTimeAsync(149); });
     expect(blur).not.toHaveBeenCalled();
     await act(async () => { await vi.advanceTimersByTimeAsync(1); });

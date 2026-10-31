@@ -7,6 +7,17 @@ This project follows [Semantic Versioning](https://semver.org/) and commit messa
 
 ## [Unreleased]
 
+### Fixed
+
+- Keep keyboard focus in the editor while typing on Windows. The IME position
+  refresh added in 0.9.18 now ignores move notifications that leave the window
+  in place, and typing or IME composition cancels a pending refresh. A refresh
+  after the window moves, resizes, or changes DPI runs only if there has been
+  no input for at least one second. After a refresh, focus returns to the same
+  editor right away, or when the window becomes active again if it was hidden
+  or lost focus in the meantime. It stays where it is if that editor has been
+  closed or replaced, or if focus has moved to another control.
+
 ## [0.9.19] - 2026-10-23
 
 ### Fixed
