@@ -7,6 +7,8 @@ This project follows [Semantic Versioning](https://semver.org/) and commit messa
 
 ## [Unreleased]
 
+## [0.9.20] - 2026-10-31
+
 ### Fixed
 
 - Keep keyboard focus in the editor while typing on Windows. The IME position
@@ -17,6 +19,12 @@ This project follows [Semantic Versioning](https://semver.org/) and commit messa
   editor right away, or when the window becomes active again if it was hidden
   or lost focus in the meantime. It stays where it is if that editor has been
   closed or replaced, or if focus has moved to another control.
+
+### Validation note
+
+- Automated tests cover the refresh timing and focus restoration. The fix still
+  needs verification on the affected dual-monitor Windows setup with Korean IME
+  input, where the focus loss was reported.
 
 ## [0.9.19] - 2026-10-23
 
