@@ -7,6 +7,7 @@ const native = vi.hoisted(() => ({
   getCurrentWindow: vi.fn(),
   onMoved: vi.fn(),
   onScaleChanged: vi.fn(),
+  outerPosition: vi.fn(),
   unlistenMoved: vi.fn(),
   unlistenScaleChanged: vi.fn(),
 }));
@@ -31,7 +32,8 @@ describe("Windows WebView IME geometry recovery", () => {
   let scrollParent: HTMLDivElement;
   let text: Text;
   let cleanup: (() => void) | undefined;
-  let moved: () => void;
+  let movedListener: (event: { payload: { x: number; y: number } }) => void;
+  let nextWindowX: number;
   let scaleChanged: () => void;
 
   beforeEach(() => {
@@ -40,11 +42,14 @@ describe("Windows WebView IME geometry recovery", () => {
     native.getCurrentWindow.mockReset().mockReturnValue({
       onMoved: native.onMoved,
       onScaleChanged: native.onScaleChanged,
+      outerPosition: native.outerPosition,
     });
+    native.outerPosition.mockReset().mockResolvedValue({ x: 100, y: 100 });
+    nextWindowX = 100;
     native.unlistenMoved.mockReset();
     native.unlistenScaleChanged.mockReset();
-    native.onMoved.mockReset().mockImplementation((callback: () => void) => {
-      moved = callback;
+    native.onMoved.mockReset().mockImplementation((callback: typeof movedListener) => {
+      movedListener = callback;
       return Promise.resolve(native.unlistenMoved);
     });
     native.onScaleChanged.mockReset().mockImplementation((callback: () => void) => {
@@ -77,7 +82,25 @@ describe("Windows WebView IME geometry recovery", () => {
 
   async function install() {
     cleanup = installWindowsImeRecovery();
-    await Promise.resolve();
+    // Let the initial window position and native subscriptions settle.
+    for (let tick = 0; tick < 3; tick += 1) await Promise.resolve();
+  }
+
+  // By default every notification reports a new position, i.e. a real move.
+  function moved(position = { x: (nextWindowX += 40), y: 100 }) {
+    movedListener({ payload: position });
+  }
+
+  function keyDown(key: string) {
+    editor.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+  }
+
+  function expectSelectionRestored() {
+    const selection = window.getSelection()!;
+    expect(selection.anchorNode).toBe(text);
+    expect(selection.anchorOffset).toBe(6);
+    expect(selection.focusNode).toBe(text);
+    expect(selection.focusOffset).toBe(2);
   }
 
   function resize() {
@@ -164,7 +187,7 @@ describe("Windows WebView IME geometry recovery", () => {
     expect(scrollParent.scrollLeft).toBe(11);
   });
 
-  it("never blurs during composition and waits for the final character flush after compositionend", async () => {
+  it("ignores geometry changes during composition and never blurs after compositionend", async () => {
     await install();
     const blur = vi.spyOn(editor, "blur");
     compose("compositionstart");
@@ -174,29 +197,118 @@ describe("Windows WebView IME geometry recovery", () => {
     vi.advanceTimersByTime(2_000);
     expect(blur).not.toHaveBeenCalled();
     expect(document.activeElement).toBe(editor);
+    // The next syllable usually follows after a short pause; that pause is still typing.
     compose("compositionend");
-    vi.advanceTimersByTime(149);
+    vi.advanceTimersByTime(5_000);
+    vi.runAllTimers();
     expect(blur).not.toHaveBeenCalled();
-    vi.advanceTimersByTime(1);
+    expect(document.activeElement).toBe(editor);
+  });
+
+  it("cancels the refresh instead of postponing it when typing resumes after a geometry change", async () => {
+    await install();
+    const blur = vi.spyOn(editor, "blur");
+    resize();
+    vi.advanceTimersByTime(100);
+    keyDown("a");
+    vi.advanceTimersByTime(149);
+    keyDown("b");
+    // A pause between words must never become the moment the editor is blurred.
+    vi.advanceTimersByTime(5_000);
+    vi.runAllTimers();
+    expect(blur).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(editor);
+  });
+
+  it("treats text inserted without a key press as typing", async () => {
+    await install();
+    const blur = vi.spyOn(editor, "blur");
+    moved();
+    editor.dispatchEvent(new InputEvent("beforeinput", { bubbles: true, inputType: "insertText", data: "가" }));
+    vi.runAllTimers();
+    expect(blur).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(editor);
+  });
+
+  it("does not refresh when the geometry changes shortly after typing", async () => {
+    await install();
+    const blur = vi.spyOn(editor, "blur");
+    keyDown("a");
+    vi.advanceTimersByTime(500);
+    moved();
+    vi.runAllTimers();
+    expect(blur).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(editor);
+
+    // After a quiet period the same kind of change refreshes the anchor again.
+    vi.advanceTimersByTime(1_000);
+    moved();
+    vi.advanceTimersByTime(150);
     expect(blur).toHaveBeenCalledTimes(1);
     vi.runOnlyPendingTimers();
     expect(document.activeElement).toBe(editor);
   });
 
-  it("postpones recovery while typing resumes after resizing", async () => {
+  it("still refreshes after modifier-only keys such as a keyboard window snap", async () => {
     await install();
     const blur = vi.spyOn(editor, "blur");
-    resize();
-    vi.advanceTimersByTime(100);
-    editor.dispatchEvent(new KeyboardEvent("keydown", { key: "a", bubbles: true }));
-    vi.advanceTimersByTime(149);
-    expect(blur).not.toHaveBeenCalled();
-    editor.dispatchEvent(new KeyboardEvent("keydown", { key: "b", bubbles: true }));
-    vi.advanceTimersByTime(149);
-    expect(blur).not.toHaveBeenCalled();
-    vi.advanceTimersByTime(1);
+    keyDown("Meta");
+    keyDown("Shift");
+    moved();
+    vi.advanceTimersByTime(150);
     expect(blur).toHaveBeenCalledTimes(1);
     vi.runOnlyPendingTimers();
+    expect(document.activeElement).toBe(editor);
+    expectSelectionRestored();
+  });
+
+  it("ignores native move notifications that do not change the window position", async () => {
+    await install();
+    const blur = vi.spyOn(editor, "blur");
+    moved({ x: 100, y: 100 });
+    vi.runAllTimers();
+    moved({ x: 100, y: 100 });
+    vi.runAllTimers();
+    expect(blur).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(editor);
+
+    moved({ x: 1_920, y: 100 });
+    vi.advanceTimersByTime(150);
+    expect(blur).toHaveBeenCalledTimes(1);
+    vi.runOnlyPendingTimers();
+    expect(document.activeElement).toBe(editor);
+  });
+
+  it("does not treat the first move notification as movement when the start position is unknown", async () => {
+    const failure = new Error("position unavailable");
+    native.outerPosition.mockRejectedValueOnce(failure);
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    await install();
+    expect(warning).toHaveBeenCalledWith("IME window position unavailable", failure);
+    const blur = vi.spyOn(editor, "blur");
+    moved({ x: 100, y: 100 });
+    vi.runAllTimers();
+    expect(blur).not.toHaveBeenCalled();
+    moved({ x: 140, y: 100 });
+    vi.advanceTimersByTime(150);
+    expect(blur).toHaveBeenCalledTimes(1);
+    vi.runOnlyPendingTimers();
+    expect(document.activeElement).toBe(editor);
+  });
+
+  it("keeps the newer position when a move notification arrives before the start position", async () => {
+    const start = deferred<{ x: number; y: number }>();
+    native.outerPosition.mockReturnValueOnce(start.promise);
+    await install();
+    const blur = vi.spyOn(editor, "blur");
+    moved({ x: 1_920, y: 100 });
+    start.resolve({ x: 100, y: 100 });
+    await Promise.resolve();
+    await Promise.resolve();
+    moved({ x: 1_920, y: 100 });
+    vi.runAllTimers();
+    expect(blur).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(editor);
   });
 
   it("cancels a scheduled blur when composition starts after resizing", async () => {
@@ -230,13 +342,12 @@ describe("Windows WebView IME geometry recovery", () => {
     }
   );
 
-  it.each(["focus", "pointer", "window blur", "hidden", "remounted", "document unfocused"])(
+  it.each(["focus", "window blur", "hidden", "remounted", "document unfocused"])(
     "does not restore the old editor when %s occurs during the blur gap", async (reason) => {
       await install();
       startBlurGap();
       const focus = vi.spyOn(editor, "focus");
       if (reason === "focus") anotherControl().focus();
-      if (reason === "pointer") document.dispatchEvent(new Event("pointerdown", { bubbles: true }));
       if (reason === "window blur") windowBlur();
       if (reason === "hidden") {
         vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
@@ -254,6 +365,62 @@ describe("Windows WebView IME geometry recovery", () => {
       expect(document.activeElement).toBe(activeElement);
     }
   );
+
+  it.each(["window blur", "hidden", "document unfocused"])(
+    "refocuses the editor when the window becomes active again after %s in the blur gap", async (reason) => {
+      await install();
+      startBlurGap();
+      window.getSelection()!.removeAllRanges();
+      const hasFocus = vi.spyOn(document, "hasFocus").mockReturnValue(false);
+      const visibility = vi.spyOn(document, "visibilityState", "get");
+      if (reason === "window blur") windowBlur();
+      if (reason === "hidden") {
+        visibility.mockReturnValue("hidden");
+        document.dispatchEvent(new Event("visibilitychange"));
+      }
+      vi.runAllTimers();
+      expect(document.activeElement).toBe(document.body);
+
+      if (reason === "hidden") {
+        visibility.mockReturnValue("visible");
+        document.dispatchEvent(new Event("visibilitychange"));
+        expect(document.activeElement).toBe(document.body);
+      }
+      hasFocus.mockReturnValue(true);
+      window.dispatchEvent(new FocusEvent("focus"));
+      expect(document.activeElement).toBe(editor);
+      expectSelectionRestored();
+      const blur = vi.spyOn(editor, "blur");
+      vi.runAllTimers();
+      expect(blur).not.toHaveBeenCalled();
+    }
+  );
+
+  it("does not refocus on the window's return after another control took focus", async () => {
+    await install();
+    startBlurGap();
+    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    windowBlur();
+    const input = anotherControl();
+    input.focus();
+    window.dispatchEvent(new FocusEvent("focus"));
+    expect(document.activeElement).toBe(input);
+  });
+
+  it("puts focus back before handling a pointer press in the blur gap", async () => {
+    await install();
+    startBlurGap();
+    window.getSelection()!.removeAllRanges();
+    // The browser's own pointer handling runs afterwards and moves focus to the
+    // pressed control, exactly as if the editor had never been blurred.
+    document.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+    expect(document.activeElement).toBe(editor);
+    expectSelectionRestored();
+    const blur = vi.spyOn(editor, "blur");
+    vi.runAllTimers();
+    expect(blur).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(editor);
+  });
 
   it("finishes a pending refocus before handling typing in the blur gap", async () => {
     await install();
