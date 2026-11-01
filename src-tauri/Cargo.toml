@@ -1,6 +1,6 @@
 [package]
 name = "hwan-note"
-version = "0.9.21"
+version = "0.9.22"
 edition = "2021"
 description = "Windows 11 Notepad-style desktop markdown note app"
 

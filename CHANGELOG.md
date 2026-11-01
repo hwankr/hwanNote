@@ -7,6 +7,8 @@ This project follows [Semantic Versioning](https://semver.org/) and commit messa
 
 ## [Unreleased]
 
+## [0.9.22] - 2026-11-01
+
 ### Fixed
 
 - Focus restoration after closing a popup or rearranging existing split-view
@@ -24,6 +26,13 @@ This project follows [Semantic Versioning](https://semver.org/) and commit messa
   kept focus. A note you pick yourself with a tab, the sidebar, or a tab
   shortcut, including by dragging, closing, or unsplitting tabs, still gets
   focus as before.
+
+### Validation note
+
+- Automated tests run the real TipTap editor in jsdom and cover the focus rules
+  for split view changes, focus restoration while the window is inactive, and
+  the cursor fix for swapped panes. The fixes have not yet been verified in the
+  Windows (WebView2) app.
 
 ## [0.9.21] - 2026-11-01
 
