@@ -88,12 +88,32 @@ interface LinkBubbleState {
   to: number;
 }
 
+// Keep one editor instance for the component's lifetime. A changing value
+// would make @tiptap/react destroy and recreate the editor (losing its DOM,
+// selection, undo history and focus), and an empty list would make it call
+// setOptions on every render.
+const EDITOR_INSTANCE_DEPS = ["editor"] as const;
+
 export function restoreEditorFocus(editor: TiptapEditor | null) {
   if (!editor || editor.isDestroyed) return;
   requestAnimationFrame(() => {
-    if (!editor.isDestroyed) {
-      editor.commands.focus();
+    if (editor.isDestroyed) return;
+    const { view } = editor;
+    const editorDOM = view.dom;
+    if (!editorDOM.isConnected) return;
+    // Only take focus back when the closed UI dropped it on the page. A click
+    // that closed it may have focused another field, button or editor.
+    const ownerDocument = editorDOM.ownerDocument;
+    const activeElement = ownerDocument.activeElement;
+    if (activeElement && activeElement !== ownerDocument.body && !editorDOM.contains(activeElement)) {
+      return;
     }
+    if (view.hasFocus()) return;
+    // Focus in the frame that checked. editor.commands.focus() would wait one
+    // more frame, where focus the user has moved since would be taken back.
+    // Like that command, keep the selection and scroll the cursor into view.
+    view.focus();
+    editor.commands.scrollIntoView();
   });
 }
 
@@ -109,6 +129,9 @@ export default function Editor({
 }: EditorProps) {
   const { t } = useI18n();
   const placeholderText = t("editor.placeholder");
+  const placeholderTextRef = useRef(placeholderText);
+  placeholderTextRef.current = placeholderText;
+  const appliedPlaceholderTextRef = useRef(placeholderText);
   const [linkBubble, setLinkBubble] = useState<LinkBubbleState | null>(null);
 
   const onChangeRef = useRef(onChange);
@@ -160,7 +183,7 @@ export default function Editor({
       MarkdownTableHeader,
       MarkdownTableCell,
       Placeholder.configure({
-        placeholder: placeholderText
+        placeholder: () => placeholderTextRef.current
       }),
       TabIndent.configure({
         tabSize
@@ -193,10 +216,14 @@ export default function Editor({
     onFocus: () => {
       onFocusRef.current?.();
     }
-  }, [placeholderText]);
+  }, EDITOR_INSTANCE_DEPS);
 
   const closeLinkBubble = useCallback(() => {
     setLinkBubble(null);
+    restoreEditorFocus(editor);
+  }, [editor]);
+
+  const handleLinkEditCancel = useCallback(() => {
     restoreEditorFocus(editor);
   }, [editor]);
 
@@ -227,6 +254,18 @@ export default function Editor({
   }, [editor, spellcheck]);
 
   useEffect(() => {
+    if (!editor || editor.isDestroyed || appliedPlaceholderTextRef.current === placeholderText) {
+      return;
+    }
+
+    appliedPlaceholderTextRef.current = placeholderText;
+    // Placeholder decorations are rebuilt on each view update. An empty
+    // transaction redraws them in the new language without changing the
+    // document, selection or undo history.
+    editor.view.dispatch(editor.state.tr.setMeta("addToHistory", false));
+  }, [editor, placeholderText]);
+
+  useEffect(() => {
     if (!editor) {
       return;
     }
@@ -247,6 +286,12 @@ export default function Editor({
     }
 
     if (event.button !== 0) {
+      return;
+    }
+
+    // React also delivers events from the link bubble, which is portaled to
+    // the page body. Only presses on the shell itself are empty-area clicks.
+    if (!event.currentTarget.contains(event.target as Node)) {
       return;
     }
 
@@ -311,6 +356,7 @@ export default function Editor({
           linkFrom={linkBubble.from}
           linkTo={linkBubble.to}
           onClose={closeLinkBubble}
+          onEditCancel={handleLinkEditCancel}
         />
       )}
     </section>

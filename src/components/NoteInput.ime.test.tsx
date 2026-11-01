@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../i18n/context";
 import LinkBubble from "./LinkBubble";
 import LinkPopup from "./LinkPopup";
+import TableSizePopup from "./TableSizePopup";
 import Toolbar from "./Toolbar";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -155,10 +156,24 @@ describe("note input IME confirmation keys", () => {
     expect(onClose).toHaveBeenCalledOnce();
   });
 
+  it.each(compositionModes)("keeps the table size popup open on $name Escape", async (mode) => {
+    const onClose = vi.fn();
+    await render(<TableSizePopup anchor={{ x: 20, y: 20 }} onSelect={vi.fn()} onClose={onClose} />);
+    // The popup has no field of its own; Escape comes from the focused editor.
+    await act(async () => { editor.view.focus(); });
+
+    await pressKey(editor.view.dom, "Escape", mode);
+    expect(onClose).not.toHaveBeenCalled();
+    expect(document.querySelector(".table-size-popup")).not.toBeNull();
+
+    await pressKey(editor.view.dom, "Escape");
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
   async function renderEditableBubble() {
     const onClose = vi.fn();
     await render(<LinkBubble editor={editor} anchor={{ x: 20, y: 20 }}
-      href="https://example.com" linkFrom={1} linkTo={3} onClose={onClose} />);
+      href="https://example.com" linkFrom={1} linkTo={3} onClose={onClose} onEditCancel={vi.fn()} />);
     const editButton = document.querySelectorAll<HTMLButtonElement>(".link-bubble-actions button")[1];
     if (!editButton) throw new Error("Expected the link edit button");
     await act(async () => { editButton.click(); });

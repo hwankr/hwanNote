@@ -33,27 +33,47 @@ export default function LinkPopup({
   }, []);
 
   useEffect(() => {
-    const handleMouseDown = (e: MouseEvent) => {
-      if (popupRef.current && popupRef.current.contains(e.target as Node)) {
-        return;
+    const isInsidePopup = (target: EventTarget | null) =>
+      target instanceof Node && Boolean(popupRef.current?.contains(target));
+
+    const close = () => {
+      // React may render a close started by scroll after the next animation
+      // frame, where the editor checks whether focus was lost. Drop focus held
+      // inside the popup now so it does not count as another control's focus.
+      const activeElement = document.activeElement;
+      if (activeElement instanceof HTMLElement && isInsidePopup(activeElement)) {
+        activeElement.blur();
       }
       onClose();
     };
 
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (!isImeComposing(e) && e.key === "Escape") onClose();
+    const handleMouseDown = (e: MouseEvent) => {
+      if (isInsidePopup(e.target)) {
+        return;
+      }
+      close();
     };
 
-    const close = () => onClose();
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (!isImeComposing(e) && e.key === "Escape") close();
+    };
+
+    // A URL field fires scroll when a long value scrolls inside it.
+    const handleScroll = (e: Event) => {
+      if (isInsidePopup(e.target)) {
+        return;
+      }
+      close();
+    };
 
     window.addEventListener("mousedown", handleMouseDown);
-    window.addEventListener("scroll", close, true);
+    window.addEventListener("scroll", handleScroll, true);
     window.addEventListener("resize", close);
     window.addEventListener("keydown", handleKeyDown);
 
     return () => {
       window.removeEventListener("mousedown", handleMouseDown);
-      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("scroll", handleScroll, true);
       window.removeEventListener("resize", close);
       window.removeEventListener("keydown", handleKeyDown);
     };

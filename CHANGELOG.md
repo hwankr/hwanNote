@@ -26,6 +26,22 @@ This project follows [Semantic Versioning](https://semver.org/) and commit messa
 - Stop re-rendering the whole window on every storage folder status check
   (every five seconds and when the window regains focus) when nothing changed.
   The app now updates only when the folder or its availability changes.
+- Changing the app language no longer recreates the open editors. Their cursor
+  position, selection, undo history, and focus are kept, and the placeholder of
+  an empty note switches to the new language right away.
+- Closing a link or table popup by clicking another field, button, or the other
+  split-view editor no longer pulls focus back into the editor you left.
+  Pressing Escape in a link popup still returns focus to the editor, and
+  cancelling a link edit now does too.
+- A link popup no longer closes while you type a URL that is too long for its
+  field and scrolls inside it. Scrolling outside the popup still closes it.
+- Closing the link popup by clicking the toolbar link button again now returns
+  focus to the editor. Before, keyboard focus was lost until you clicked the
+  note.
+- While the table size popup is open, an Escape press that belongs to IME
+  composition (such as Korean input) no longer closes the popup.
+- While you edit a link from the link bubble, clicking its URL or display name
+  field no longer moves focus into the note.
 
 ## [0.9.20] - 2026-10-31
 

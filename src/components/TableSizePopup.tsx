@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useI18n } from "../i18n/context";
+import { isImeComposing } from "../lib/ime";
 
 interface TableSizePopupProps {
   anchor: { x: number; y: number };
@@ -20,27 +21,38 @@ export default function TableSizePopup({ anchor, onSelect, onClose }: TableSizeP
   const [hovered, setHovered] = useState<{ row: number; col: number } | null>(null);
 
   useEffect(() => {
+    const isInsidePopup = (target: EventTarget | null) =>
+      target instanceof Node && Boolean(popupRef.current?.contains(target));
+
     const handleMouseDown = (e: MouseEvent) => {
-      if (popupRef.current && popupRef.current.contains(e.target as Node)) {
+      if (isInsidePopup(e.target)) {
         return;
       }
       onClose();
     };
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (!isImeComposing(e) && e.key === "Escape") onClose();
+    };
+
+    // Like the other editor popups, only scrolling outside the popup closes it.
+    const handleScroll = (e: Event) => {
+      if (isInsidePopup(e.target)) {
+        return;
+      }
+      onClose();
     };
 
     const close = () => onClose();
 
     window.addEventListener("mousedown", handleMouseDown);
-    window.addEventListener("scroll", close, true);
+    window.addEventListener("scroll", handleScroll, true);
     window.addEventListener("resize", close);
     window.addEventListener("keydown", handleKeyDown);
 
     return () => {
       window.removeEventListener("mousedown", handleMouseDown);
-      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("scroll", handleScroll, true);
       window.removeEventListener("resize", close);
       window.removeEventListener("keydown", handleKeyDown);
     };
