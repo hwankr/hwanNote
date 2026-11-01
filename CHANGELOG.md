@@ -7,6 +7,8 @@ This project follows [Semantic Versioning](https://semver.org/) and commit messa
 
 ## [Unreleased]
 
+## [0.9.21] - 2026-11-01
+
 ### Fixed
 
 - Keep the editors that stay on screen when the split view changes. Opening a
@@ -42,6 +44,12 @@ This project follows [Semantic Versioning](https://semver.org/) and commit messa
   composition (such as Korean input) no longer closes the popup.
 - While you edit a link from the link bubble, clicking its URL or display name
   field no longer moves focus into the note.
+
+### Validation note
+
+- Automated tests run the real TipTap editor in jsdom and cover the split view
+  changes, language changes, and popup focus handling. The fixes have not yet
+  been verified in the Windows (WebView2) app.
 
 ## [0.9.20] - 2026-10-31
 
