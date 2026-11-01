@@ -53,6 +53,12 @@ import { mergeReloadedNoteTabs } from "./lib/noteReload";
 import { isSameAutoSaveDirInfo } from "./lib/autoSaveDirInfo";
 import { canRunNoteLibraryMutation } from "./lib/noteMutationGuard";
 import { installWindowsImeRecovery } from "./lib/windowsImeRecovery";
+import {
+  isDocumentActive,
+  requestEditorFocus,
+  type EditorFocusPermission,
+  type EditorFocusRequest
+} from "./lib/editorFocusRestore";
 import { isImeComposing } from "./lib/ime";
 import {
   hasRichTextFormatting,
@@ -259,6 +265,41 @@ function readEditorCursor(editor: TiptapEditor): PaneCursor {
     column: (lines[lines.length - 1] ?? "").length + 1,
     chars: collectPlainText(editor).length
   };
+}
+
+// What a layout focus request reads each time it is tried, including after the
+// window becomes active again. The layout effect updates it on every commit.
+interface LayoutFocusState {
+  focusedEditorKey: string | null;
+  mountedEditors: Record<string, TiptapEditor>;
+  settingsOpen: boolean;
+  activeView: AppView;
+}
+
+const TEXT_FIELD_SELECTOR = "input, textarea, select, [contenteditable]:not([contenteditable='false'])";
+
+// Whether the retained editor of a layout change may take focus now. It must
+// still be the focused pane's editor, and focus must not be in a text field.
+function layoutFocusPermission(editor: TiptapEditor, state: LayoutFocusState): EditorFocusPermission {
+  const { focusedEditorKey } = state;
+  if (
+    state.settingsOpen ||
+    state.activeView !== "notes" ||
+    !focusedEditorKey ||
+    state.mountedEditors[focusedEditorKey] !== editor
+  ) {
+    return "deny";
+  }
+  const editorDOM = editor.view.dom;
+  const activeElement = editorDOM.ownerDocument.activeElement;
+  if (activeElement && editorDOM.contains(activeElement)) {
+    return "already-focused";
+  }
+  const isInOtherEditor = Boolean(activeElement?.closest(".note-editor"));
+  if (!isInOtherEditor && activeElement?.closest(TEXT_FIELD_SELECTOR)) {
+    return "deny";
+  }
+  return "allow";
 }
 
 function pickDistinctTabId(tabIds: string[], excludedId: string, preferredId?: string | null) {
@@ -492,8 +533,21 @@ export default function App() {
       ? `${secondaryEditorKeyCandidate}:secondary`
       : secondaryEditorKeyCandidate;
   const focusedEditorKey = focusedPane === "secondary" ? secondaryEditorKey : primaryEditorKey;
+  // Focus, commands (App shortcuts and the toolbar) and focus restoration use
+  // only this strict editor.
   const focusedEditor = focusedEditorKey ? (mountedEditors[focusedEditorKey] ?? null) : null;
-  const cursor = (focusedEditorKey ? editorCursors[focusedEditorKey] : undefined) ?? DEFAULT_PANE_CURSOR;
+  // When the focused pane's note has just gone, one commit has no focused key
+  // until pane normalization points it at the editor that stayed. The status
+  // bar shows that editor's cursor meanwhile. Display only: the toolbar gets
+  // the strict editor, because it also runs commands and restores focus.
+  const remainingPaneEditorKey = focusedPane === "secondary" ? primaryEditorKey : secondaryEditorKey;
+  const remainingPaneEditor = remainingPaneEditorKey ? mountedEditors[remainingPaneEditorKey] : undefined;
+  const displayEditorKey = focusedEditorKey ?? (
+    remainingPaneEditor && !remainingPaneEditor.isDestroyed && remainingPaneEditor.view.dom.isConnected
+      ? remainingPaneEditorKey
+      : null
+  );
+  const cursor = (displayEditorKey ? editorCursors[displayEditorKey] : undefined) ?? DEFAULT_PANE_CURSOR;
 
   const getTabById = useCallback((tabId: string) => {
     return useNoteStore.getState().notesById[tabId] ?? null;
@@ -1490,11 +1544,12 @@ export default function App() {
   }, [activeTabId, focusedPane, isSplit, openTabIds, primaryTabId, secondaryTabId]);
 
   useEffect(() => {
-    if (!focusedTabId || focusedTabId === activeTabId) {
+    // Before pane normalization a pane can still name a tab that was closed.
+    if (!focusedTabId || focusedTabId === activeTabId || !openTabIds.includes(focusedTabId)) {
       return;
     }
     setActiveTab(focusedTabId);
-  }, [activeTabId, focusedTabId, setActiveTab]);
+  }, [activeTabId, focusedTabId, openTabIds, setActiveTab]);
 
   useEffect(() => {
     const noteApi = hwanNote.note;
@@ -2971,7 +3026,27 @@ export default function App() {
     secondary: string | null;
     focused: string | null;
   } | null>(null);
+  const layoutFocusStateRef = useRef<LayoutFocusState>({
+    focusedEditorKey: null,
+    mountedEditors: {},
+    settingsOpen: false,
+    activeView: "notes"
+  });
+  // A layout focus that waits for an inactive window to become active again.
+  const layoutFocusRequestRef = useRef<EditorFocusRequest | null>(null);
+  const cancelLayoutFocusRequest = () => {
+    layoutFocusRequestRef.current?.cancel();
+    layoutFocusRequestRef.current = null;
+  };
+  useEffect(() => () => {
+    layoutFocusRequestRef.current?.cancel();
+    layoutFocusRequestRef.current = null;
+  }, []);
   useLayoutEffect(() => {
+    layoutFocusStateRef.current = { focusedEditorKey, mountedEditors, settingsOpen, activeView };
+    if (settingsOpen || activeView !== "notes") {
+      cancelLayoutFocusRequest();
+    }
     const previous = previousEditorLayoutRef.current;
     previousEditorLayoutRef.current = {
       primary: primaryEditorKey,
@@ -2989,6 +3064,8 @@ export default function App() {
     ) {
       return;
     }
+    // A newer layout decides focus again; an older request must not run later.
+    cancelLayoutFocusRequest();
 
     // A new editor autofocuses when it mounts in the focused pane. An editor
     // that was already visible keeps its selection instead; focus it when the
@@ -3005,18 +3082,36 @@ export default function App() {
     if (!editor || editor.isDestroyed) {
       return;
     }
-    const activeElement = document.activeElement;
-    if (activeElement && editor.view.dom.contains(activeElement)) {
-      return;
-    }
-    const isInOtherEditor = Boolean(activeElement?.closest(".note-editor"));
+
+    // Moving a pane moves its DOM. React then restores the selection it saved
+    // as character offsets, which lands elsewhere inside tables and other
+    // nested nodes, and ProseMirror would adopt that on its next selectionchange.
+    // Its own state is still right here, so write it back to the DOM now. Only
+    // for the editor root that already has focus, in an active window and
+    // outside composition. No transaction or scrolling.
+    const { view } = editor;
+    const previousSlot: PaneId = focusedEditorKey === previous.primary ? "primary" : "secondary";
+    const slot: PaneId = focusedEditorKey === primaryEditorKey ? "primary" : "secondary";
+    const ownerDocument = view.dom.ownerDocument;
     if (
-      !isInOtherEditor &&
-      activeElement?.closest("input, textarea, select, [contenteditable]:not([contenteditable='false'])")
+      slot !== previousSlot &&
+      activeView === "notes" &&
+      view.dom.isConnected &&
+      isDocumentActive(ownerDocument) &&
+      ownerDocument.activeElement === view.dom &&
+      view.hasFocus() &&
+      !view.composing
     ) {
+      view.focus();
       return;
     }
-    editor.view.focus();
+
+    // Focus now when the window is active; otherwise this waits for the window
+    // and checks the then-current focused editor, settings and view again.
+    layoutFocusRequestRef.current = requestEditorFocus(editor, {
+      start: "now",
+      permission: () => layoutFocusPermission(editor, layoutFocusStateRef.current)
+    });
   });
 
   return (

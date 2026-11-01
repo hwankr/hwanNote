@@ -7,6 +7,18 @@ This project follows [Semantic Versioning](https://semver.org/) and commit messa
 
 ## [Unreleased]
 
+### Fixed
+
+- Focus restoration after closing a popup or rearranging existing split-view
+  editors now waits until the window is visible and active. A different control
+  focused while restoration is pending keeps focus. Clicking another editor or
+  control while restoration is pending also takes priority over it.
+- When the two split-view panes swap notes, the editor you were typing in now
+  keeps its cursor and selection, including inside a table cell or a toggle and
+  a selection of table cells or a horizontal line. Previously the cursor could
+  jump to the start of the note, and the next text you typed went there. This
+  resolves the known limitation noted for 0.9.21.
+
 ## [0.9.21] - 2026-11-01
 
 ### Fixed

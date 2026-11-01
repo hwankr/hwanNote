@@ -106,6 +106,8 @@ import App from "./App";
 import { I18nProvider } from "./i18n/context";
 import { useNoteStore } from "./stores/noteStore";
 
+const windowState = { focused: true, visibility: "visible" as DocumentVisibilityState };
+
 const AUTO_SAVE_DELAY_MS = 1_750;
 
 function savedResult(noteId: string) {
@@ -204,6 +206,12 @@ describe("App focus with the real editor during autosave", () => {
     vi.useFakeTimers();
     window.localStorage.clear();
     document.body.inert = false;
+    // Focus restoration needs an active window. Model one explicitly: jsdom's
+    // document.hasFocus() is false whenever no element has focus.
+    windowState.focused = true;
+    windowState.visibility = "visible";
+    vi.spyOn(document, "hasFocus").mockImplementation(() => windowState.focused);
+    vi.spyOn(document, "visibilityState", "get").mockImplementation(() => windowState.visibility);
     Object.defineProperty(window, "matchMedia", {
       configurable: true,
       value: vi.fn(() => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })),

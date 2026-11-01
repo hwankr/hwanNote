@@ -6,6 +6,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../i18n/context";
 import { translate } from "../i18n/messages";
+import { isEditorFocusPending } from "../lib/editorFocusRestore";
 import Editor, { restoreEditorFocus } from "./Editor";
 import Toolbar from "./Toolbar";
 
@@ -31,11 +32,18 @@ describe("editor popups and focus restoration", () => {
   let container: HTMLDivElement;
   let root: Root;
   const editors: TiptapEditor[] = [];
+  // Focus restoration needs an active window. Model one explicitly: jsdom's
+  // document.hasFocus() is false whenever no element has focus.
+  const windowState = { focused: true, visibility: "visible" as DocumentVisibilityState };
 
   beforeEach(() => {
     vi.useFakeTimers();
     window.localStorage.clear();
     editors.length = 0;
+    windowState.focused = true;
+    windowState.visibility = "visible";
+    vi.spyOn(document, "hasFocus").mockImplementation(() => windowState.focused);
+    vi.spyOn(document, "visibilityState", "get").mockImplementation(() => windowState.visibility);
     // jsdom has no layout. ProseMirror reads these when it focuses and scrolls.
     Object.defineProperties(Range.prototype, {
       getClientRects: { configurable: true, value: () => [] },
@@ -50,6 +58,7 @@ describe("editor popups and focus restoration", () => {
     act(() => root.unmount());
     container.remove();
     vi.useRealTimers();
+    vi.restoreAllMocks();
   });
 
   async function mount({ editorCount = 1 }: { editorCount?: number } = {}) {
@@ -93,7 +102,8 @@ describe("editor popups and focus restoration", () => {
   }
 
   async function advanceFrames() {
-    // restoreEditorFocus waits one frame and editor.commands.focus() one more.
+    // Flush the restore frame and any extra frame a TipTap command schedules
+    // (editor.commands.focus() focuses one frame later).
     await act(async () => { await vi.advanceTimersByTimeAsync(64); });
   }
 
@@ -527,5 +537,385 @@ describe("editor popups and focus restoration", () => {
 
     expect(document.querySelector(".link-popup")).toBeNull();
     expect(document.activeElement).toBe(editor.view.dom);
+  });
+
+  async function deactivateWindow() {
+    windowState.focused = false;
+    await act(async () => { window.dispatchEvent(new FocusEvent("blur")); });
+  }
+
+  async function activateWindow() {
+    windowState.focused = true;
+    windowState.visibility = "visible";
+    await act(async () => { window.dispatchEvent(new FocusEvent("focus")); });
+  }
+
+  function recordScrolls(editor: TiptapEditor) {
+    const scrolls: unknown[] = [];
+    editor.on("transaction", ({ transaction }) => {
+      if (transaction.scrolledIntoView) scrolls.push(transaction);
+    });
+    return scrolls;
+  }
+
+  it("waits while the window is inactive, then restores once with the selection and marks when it returns (W1, W2)", async () => {
+    const [editor] = await mount();
+    await blurEditorAt(editor, 3);
+    const bold = editor.schema.marks.bold.create();
+    await act(async () => { editor.view.dispatch(editor.state.tr.addStoredMark(bold)); });
+    const scrolls = recordScrolls(editor);
+    const viewFocus = vi.spyOn(editor.view, "focus");
+    await deactivateWindow();
+
+    act(() => restoreEditorFocus(editor));
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+
+    expect(document.activeElement).toBe(document.body);
+    expect(viewFocus).not.toHaveBeenCalled();
+    expect(scrolls).toHaveLength(0);
+
+    await activateWindow();
+    expect(viewFocus).not.toHaveBeenCalled();
+    await advanceOneFrame();
+
+    expect(viewFocus).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(editor.view.dom);
+    expect(editor.state.selection.from).toBe(3);
+    expect(editor.state.storedMarks).toEqual([bold]);
+    expect(scrolls).toHaveLength(1);
+  });
+
+  it("does not restore in a hidden window even when the document reports focus (W3)", async () => {
+    const [editor] = await mount();
+    await blurEditorAt(editor, 3);
+    const scrolls = recordScrolls(editor);
+    const viewFocus = vi.spyOn(editor.view, "focus");
+    windowState.visibility = "hidden";
+
+    act(() => restoreEditorFocus(editor));
+    await advanceFrames();
+    await act(async () => { window.dispatchEvent(new FocusEvent("focus")); });
+    await advanceFrames();
+
+    expect(document.activeElement).toBe(document.body);
+    expect(viewFocus).not.toHaveBeenCalled();
+    expect(scrolls).toHaveLength(0);
+
+    windowState.visibility = "visible";
+    await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+    await advanceOneFrame();
+    expect(document.activeElement).toBe(editor.view.dom);
+    expect(scrolls).toHaveLength(1);
+  });
+
+  it.each([
+    { name: "an input", target: (_editors: TiptapEditor[]) => titleInput() },
+    {
+      name: "a button",
+      target: (_editors: TiptapEditor[]) => {
+        const button = document.createElement("button");
+        container.appendChild(button);
+        return button;
+      },
+    },
+    { name: "the other editor", target: (editors: TiptapEditor[]) => editors[1].view.dom },
+  ])("leaves focus in $name chosen while the window comes back, and does not restore later (W4)", async ({ target }) => {
+    const editors = await mount({ editorCount: 2 });
+    const [editor] = editors;
+    await blurEditorAt(editor, 3);
+    const viewFocus = vi.spyOn(editor.view, "focus");
+    await deactivateWindow();
+    act(() => restoreEditorFocus(editor));
+    await advanceFrames();
+    const control = target(editors);
+
+    await activateWindow();
+    if (control === editors[1].view.dom) {
+      // ProseMirror maps the press to a document position. jsdom has no hit testing.
+      const paragraph = control.querySelector("p")!;
+      Object.defineProperty(document, "elementFromPoint", { configurable: true, value: () => paragraph });
+      try {
+        await pressOn(paragraph, () => editors[1].view.focus());
+      } finally {
+        Reflect.deleteProperty(document, "elementFromPoint");
+      }
+    } else {
+      await pressOn(control, () => control.focus());
+    }
+    await advanceFrames();
+
+    expect(document.activeElement).toBe(control);
+    expect(viewFocus).not.toHaveBeenCalled();
+
+    await act(async () => { control.blur(); });
+    await deactivateWindow();
+    await activateWindow();
+    await advanceFrames();
+    expect(document.activeElement).toBe(document.body);
+    expect(viewFocus).not.toHaveBeenCalled();
+  });
+
+  it("does not focus an editor whose DOM left the page while the window was inactive (W5)", async () => {
+    const [editor] = await mount();
+    await blurEditorAt(editor, 3);
+    const editorDOM = editor.view.dom;
+    const parent = editorDOM.parentElement!;
+    const viewFocus = vi.spyOn(editor.view, "focus");
+    await deactivateWindow();
+    act(() => restoreEditorFocus(editor));
+    await advanceFrames();
+
+    try {
+      editorDOM.remove();
+      await activateWindow();
+      await advanceFrames();
+
+      expect(viewFocus).not.toHaveBeenCalled();
+    } finally {
+      parent.appendChild(editorDOM);
+    }
+  });
+
+  /** The focus, press and visibilitychange listeners added to the window and document from now on, not yet removed. */
+  function trackListeners() {
+    const watched = new Set(["focus", "focusin", "mousedown", "pointerdown", "visibilitychange"]);
+    const entries: Array<{ target: EventTarget; type: string; listener: unknown; capture: boolean }> = [];
+    const isCapture = (options?: boolean | EventListenerOptions) =>
+      typeof options === "boolean" ? options : Boolean(options?.capture);
+    for (const target of [window, document] as EventTarget[]) {
+      const add = target.addEventListener;
+      const remove = target.removeEventListener;
+      vi.spyOn(target, "addEventListener").mockImplementation((type, listener, options) => {
+        if (watched.has(type)) entries.push({ target, type, listener, capture: isCapture(options) });
+        add.call(target, type, listener, options);
+      });
+      vi.spyOn(target, "removeEventListener").mockImplementation((type, listener, options) => {
+        const index = entries.findIndex((entry) =>
+          entry.target === target && entry.type === type && entry.listener === listener &&
+          entry.capture === isCapture(options));
+        if (index >= 0) entries.splice(index, 1);
+        remove.call(target, type, listener, options);
+      });
+    }
+    return () => entries.map(({ target, type }) => `${target === window ? "window" : "document"}:${type}`).sort();
+  }
+
+  it("drops a waiting restore, its listeners and its frame as soon as its editor unmounts (W5)", async () => {
+    const [editor] = await mount();
+    await blurEditorAt(editor, 3);
+    const viewFocus = vi.spyOn(editor.view, "focus");
+    await deactivateWindow();
+    const listeners = trackListeners();
+    act(() => restoreEditorFocus(editor));
+    await advanceFrames();
+    expect(isEditorFocusPending()).toBe(true);
+    expect(listeners()).toEqual(expect.arrayContaining(["document:focusin", "document:visibilitychange", "window:focus"]));
+
+    await act(async () => { root.render(<I18nProvider>{null}</I18nProvider>); });
+
+    // Before any timer runs, so before @tiptap/react destroys the editor.
+    expect(editor.isDestroyed).toBe(false);
+    expect(isEditorFocusPending()).toBe(false);
+    expect(listeners()).toEqual([]);
+    const frames = vi.spyOn(window, "requestAnimationFrame");
+    await activateWindow();
+    expect(frames).not.toHaveBeenCalled();
+
+    await advanceFrames();
+    expect(editor.isDestroyed).toBe(true);
+    expect(viewFocus).not.toHaveBeenCalled();
+  });
+
+  async function mountKeyed(keys: string[]) {
+    const byKey: Record<string, TiptapEditor> = {};
+    await act(async () => {
+      root.render(
+        <I18nProvider>
+          {keys.map((key) => (
+            <Editor
+              key={key}
+              content={linkDocument}
+              tabSize={4}
+              spellcheck={false}
+              autofocus={false}
+              onChange={noop}
+              onCursorChange={noop}
+              onEditorReady={(nextEditor) => {
+                if (nextEditor) byKey[key] = nextEditor;
+              }}
+            />
+          ))}
+        </I18nProvider>
+      );
+    });
+    return byKey;
+  }
+
+  it("keeps the newer restore of another editor when an older editor unmounts (R3)", async () => {
+    const { a, b } = await mountKeyed(["a", "b"]);
+    await blurEditorAt(a, 3);
+    const aFocus = vi.spyOn(a.view, "focus");
+    const bFocus = vi.spyOn(b.view, "focus");
+    await deactivateWindow();
+    act(() => {
+      restoreEditorFocus(a);
+      restoreEditorFocus(b);
+    });
+    await advanceFrames();
+
+    await mountKeyed(["b"]);
+
+    expect(a.isDestroyed).toBe(false);
+    expect(isEditorFocusPending()).toBe(true);
+    await activateWindow();
+    await advanceOneFrame();
+    expect(aFocus).not.toHaveBeenCalled();
+    expect(bFocus).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(b.view.dom);
+  });
+
+  it("keeps the restore of a link bubble that closes while the window is inactive, though the bubble unmounts (R3)", async () => {
+    const [editor] = await mount();
+    await openLinkBubble(editor);
+    await act(async () => { editor.commands.setTextSelection(3); });
+    await act(async () => { editor.view.dom.blur(); });
+    await deactivateWindow();
+    const viewFocus = vi.spyOn(editor.view, "focus");
+
+    await act(async () => { window.dispatchEvent(new Event("resize")); });
+    await advanceFrames();
+
+    expect(document.querySelector(".link-bubble")).toBeNull();
+    expect(isEditorFocusPending()).toBe(true);
+    expect(viewFocus).not.toHaveBeenCalled();
+    await activateWindow();
+    await advanceOneFrame();
+    expect(viewFocus).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(editor.view.dom);
+    expect(editor.state.selection.from).toBe(3);
+  });
+
+  /** A pointer press that focuses nothing by itself; the pressed element's own handlers decide. */
+  async function pointerPress(target: HTMLElement) {
+    await act(async () => {
+      target.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, cancelable: true, button: 0 }));
+      target.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0 }));
+    });
+  }
+
+  it("gives way to the other editor whose empty area is pressed while the window comes back, though it takes focus a frame later (R1)", async () => {
+    const [editor, other] = await mount({ editorCount: 2 });
+    await blurEditorAt(editor, 3);
+    await deactivateWindow();
+    act(() => restoreEditorFocus(editor));
+    await advanceOneFrame();
+    const viewFocus = vi.spyOn(editor.view, "focus");
+    const scrolls = recordScrolls(editor);
+    const focusOrder: string[] = [];
+    editor.view.dom.addEventListener("focus", () => focusOrder.push("requested"));
+    other.view.dom.addEventListener("focus", () => focusOrder.push("chosen"));
+
+    await activateWindow();
+    // The real shell handler focuses the other editor through editor.commands.focus(), a frame later.
+    await pointerPress(other.view.dom.closest<HTMLElement>(".editor-shell")!);
+    expect(document.activeElement).toBe(document.body);
+    await advanceFrames();
+
+    expect(focusOrder).toEqual(["chosen"]);
+    expect(viewFocus).not.toHaveBeenCalled();
+    expect(scrolls).toHaveLength(0);
+    expect(document.activeElement).toBe(other.view.dom);
+
+    // Focus falling back to the page later does not bring the restore back.
+    await act(async () => { other.view.dom.blur(); });
+    await deactivateWindow();
+    await activateWindow();
+    await advanceFrames();
+    expect(document.activeElement).toBe(document.body);
+    expect(viewFocus).not.toHaveBeenCalled();
+    expect(scrolls).toHaveLength(0);
+  });
+
+  it("still restores when a press on the title bar brings the window back (R1)", async () => {
+    const [editor] = await mount({ editorCount: 2 });
+    const titleBar = document.createElement("header");
+    titleBar.className = "titlebar";
+    const dragArea = document.createElement("div");
+    dragArea.className = "titlebar-drag-handle";
+    titleBar.appendChild(dragArea);
+    container.prepend(titleBar);
+    await blurEditorAt(editor, 3);
+    await deactivateWindow();
+    act(() => restoreEditorFocus(editor));
+    await advanceOneFrame();
+    const viewFocus = vi.spyOn(editor.view, "focus");
+    const scrolls = recordScrolls(editor);
+
+    await activateWindow();
+    await pointerPress(dragArea);
+    expect(isEditorFocusPending()).toBe(true);
+    await advanceOneFrame();
+
+    expect(viewFocus).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(editor.view.dom);
+    expect(editor.state.selection.from).toBe(3);
+    expect(scrolls).toHaveLength(1);
+  });
+
+  it("still restores when the window comes back through a press on the requested editor's own empty area (R1)", async () => {
+    const [editor] = await mount({ editorCount: 2 });
+    await blurEditorAt(editor, 3);
+    await deactivateWindow();
+    act(() => restoreEditorFocus(editor));
+    await advanceOneFrame();
+
+    await activateWindow();
+    await pointerPress(editor.view.dom.closest<HTMLElement>(".editor-shell")!);
+    expect(isEditorFocusPending()).toBe(true);
+    await advanceFrames();
+
+    expect(document.activeElement).toBe(editor.view.dom);
+    expect(editor.state.selection.from).toBe(3);
+  });
+
+  it("keeps only the newer of two waiting restores (W6)", async () => {
+    const [first, second] = await mount({ editorCount: 2 });
+    await blurEditorAt(first, 3);
+    const firstFocus = vi.spyOn(first.view, "focus");
+    await deactivateWindow();
+
+    act(() => {
+      restoreEditorFocus(first);
+      restoreEditorFocus(second);
+    });
+    await advanceFrames();
+    await activateWindow();
+    await advanceFrames();
+
+    expect(firstFocus).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(second.view.dom);
+  });
+
+  it("leaves a focused editor in composition untouched when a popup closes (I2)", async () => {
+    const [editor] = await mount();
+    await focusEditor(editor);
+    await act(async () => { editor.commands.setTextSelection(3); });
+    await act(async () => {
+      editor.view.dom.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    });
+    expect(editor.view.composing).toBe(true);
+    const transactions = vi.fn();
+    editor.on("transaction", transactions);
+    const viewFocus = vi.spyOn(editor.view, "focus");
+    const blur = vi.spyOn(editor.view.dom, "blur");
+
+    act(() => restoreEditorFocus(editor));
+    await advanceFrames();
+
+    expect(document.activeElement).toBe(editor.view.dom);
+    expect(editor.view.composing).toBe(true);
+    expect(viewFocus).not.toHaveBeenCalled();
+    expect(blur).not.toHaveBeenCalled();
+    expect(transactions).not.toHaveBeenCalled();
   });
 });
