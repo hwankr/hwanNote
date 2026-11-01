@@ -7,6 +7,33 @@ This project follows [Semantic Versioning](https://semver.org/) and commit messa
 
 ## [Unreleased]
 
+## [0.9.22] - 2026-11-01
+
+### Fixed
+
+- Focus restoration after closing a popup or rearranging existing split-view
+  editors now waits until the window is visible and active. A different control
+  focused while restoration is pending keeps focus. Clicking another editor or
+  control while restoration is pending also takes priority over it.
+- When the two split-view panes swap notes, the editor you were typing in now
+  keeps its cursor and selection, including inside a table cell or a toggle and
+  a selection of table cells or a horizontal line. Previously the cursor could
+  jump to the start of the note, and the next text you typed went there. This
+  resolves the known limitation noted for 0.9.21.
+- When a background reload or a similar change rearranges the split view, the
+  editor that stays on screen no longer takes keyboard focus from a sidebar,
+  toolbar, or title bar control, a tab, a menu, or a dialog. Text fields already
+  kept focus. A note you pick yourself with a tab, the sidebar, or a tab
+  shortcut, including by dragging, closing, or unsplitting tabs, still gets
+  focus as before.
+
+### Validation note
+
+- Automated tests run the real TipTap editor in jsdom and cover the focus rules
+  for split view changes, focus restoration while the window is inactive, and
+  the cursor fix for swapped panes. The fixes have not yet been verified in the
+  Windows (WebView2) app.
+
 ## [0.9.21] - 2026-11-01
 
 ### Fixed

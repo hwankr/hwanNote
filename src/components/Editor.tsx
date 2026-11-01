@@ -11,11 +11,12 @@ import { UndoRedo } from "@tiptap/extensions";
 import StarterKit from "@tiptap/starter-kit";
 import { createDocument, getMarkRange, type JSONContent } from "@tiptap/core";
 import { Editor as TiptapEditor, EditorContent, useEditor } from "@tiptap/react";
-import { type MouseEvent as ReactMouseEvent, useCallback, useEffect, useRef, useState } from "react";
+import { type MouseEvent as ReactMouseEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { TabIndent } from "../extensions/tabIndent";
 import { LinkWithTitle } from "../extensions/linkWithTitle";
 import { ToggleBlock, ToggleContent, ToggleSummary } from "../extensions/toggleBlock";
 import { useI18n } from "../i18n/context";
+import { cancelEditorFocusRequestFor, requestEditorFocus } from "../lib/editorFocusRestore";
 import LinkBubble from "./LinkBubble";
 
 interface EditorProps {
@@ -94,26 +95,32 @@ interface LinkBubbleState {
 // setOptions on every render.
 const EDITOR_INSTANCE_DEPS = ["editor"] as const;
 
+// Gives focus back to the editor after a popup or panel closes. The check runs
+// in the next frame, and again after the window becomes active if it is
+// inactive then (see editorFocusRestore.ts).
 export function restoreEditorFocus(editor: TiptapEditor | null) {
   if (!editor || editor.isDestroyed) return;
-  requestAnimationFrame(() => {
-    if (editor.isDestroyed) return;
-    const { view } = editor;
-    const editorDOM = view.dom;
-    if (!editorDOM.isConnected) return;
-    // Only take focus back when the closed UI dropped it on the page. A click
-    // that closed it may have focused another field, button or editor.
-    const ownerDocument = editorDOM.ownerDocument;
-    const activeElement = ownerDocument.activeElement;
-    if (activeElement && activeElement !== ownerDocument.body && !editorDOM.contains(activeElement)) {
-      return;
-    }
-    if (view.hasFocus()) return;
-    // Focus in the frame that checked. editor.commands.focus() would wait one
-    // more frame, where focus the user has moved since would be taken back.
-    // Like that command, keep the selection and scroll the cursor into view.
-    view.focus();
-    editor.commands.scrollIntoView();
+  requestEditorFocus(editor, {
+    start: "frame",
+    permission: () => {
+      const { view } = editor;
+      const editorDOM = view.dom;
+      // Only take focus back when the closed UI dropped it on the page. A click
+      // that closed it may have focused another field, button or editor.
+      const ownerDocument = editorDOM.ownerDocument;
+      const activeElement = ownerDocument.activeElement;
+      if (activeElement && activeElement !== ownerDocument.body && !editorDOM.contains(activeElement)) {
+        return "deny";
+      }
+      return view.hasFocus() ? "already-focused" : "allow";
+    },
+    // The module focuses in the frame that checked. editor.commands.focus()
+    // would wait one more frame, where focus the user has moved since would be
+    // taken back. Like that command, keep the selection and scroll the cursor
+    // into view, only when focus was actually restored.
+    onFocused: () => {
+      editor.commands.scrollIntoView();
+    },
   });
 }
 
@@ -231,6 +238,17 @@ export default function Editor({
     onEditorReadyRef.current(editor);
     return () => {
       onEditorReadyRef.current(null);
+    };
+  }, [editor]);
+
+  // A focus restore that still waits for this editor ends when the editor
+  // unmounts, in the same commit; @tiptap/react destroys it only later. A
+  // closing popup does not unmount the editor and keeps its restore. Only this
+  // instance's request is dropped, never one for another editor.
+  useLayoutEffect(() => {
+    if (!editor) return;
+    return () => {
+      cancelEditorFocusRequestFor(editor);
     };
   }, [editor]);
 

@@ -53,6 +53,20 @@ import { mergeReloadedNoteTabs } from "./lib/noteReload";
 import { isSameAutoSaveDirInfo } from "./lib/autoSaveDirInfo";
 import { canRunNoteLibraryMutation } from "./lib/noteMutationGuard";
 import { installWindowsImeRecovery } from "./lib/windowsImeRecovery";
+import {
+  cancelEditorFocusRequest,
+  isDocumentActive,
+  requestEditorFocus,
+  type EditorFocusPermission,
+  type EditorFocusRequest
+} from "./lib/editorFocusRestore";
+import {
+  decideNavigationIntent,
+  layoutFocusPermission,
+  type LayoutFocusView,
+  type NavigationIntent,
+  type NavigationTarget
+} from "./lib/layoutFocusPolicy";
 import { isImeComposing } from "./lib/ime";
 import {
   hasRichTextFormatting,
@@ -101,6 +115,8 @@ type CloseDecision = "save" | "discard" | "cancel";
 
 interface ResolveDirtyTabsOptions {
   closeResolvedTabs?: boolean;
+  /** Runs right before each resolved tab is closed. */
+  beforeClose?: (tabId: string) => void;
 }
 
 type NoteLoadRecoveryState = Pick<
@@ -259,6 +275,45 @@ function readEditorCursor(editor: TiptapEditor): PaneCursor {
     column: (lines[lines.length - 1] ?? "").length + 1,
     chars: collectPlainText(editor).length
   };
+}
+
+// What a layout focus request reads each time it is tried, including after the
+// window becomes active again. The layout effect updates it on every commit.
+interface LayoutFocusState {
+  focusedEditorKey: string | null;
+  mountedEditors: Record<string, TiptapEditor>;
+  settingsOpen: boolean;
+  activeView: AppView;
+  workspace: HTMLElement | null;
+}
+
+// Whether the retained editor of a layout change may take focus now (see
+// layoutFocusPolicy.ts). It must still be the focused pane's registered, live
+// editor, connected inside the notes workspace, with settings closed. `intent`
+// is the navigation the layout change showed, if any; a newer navigation
+// cancels the waiting request that holds it.
+function currentLayoutFocusPermission(
+  editor: TiptapEditor,
+  state: LayoutFocusState,
+  intent: NavigationIntent | null
+): EditorFocusPermission {
+  const { focusedEditorKey } = state;
+  if (
+    state.settingsOpen ||
+    state.activeView !== "notes" ||
+    !focusedEditorKey ||
+    state.mountedEditors[focusedEditorKey] !== editor ||
+    editor.isDestroyed ||
+    !editor.view.dom.isConnected ||
+    !state.workspace?.contains(editor.view.dom)
+  ) {
+    return "deny";
+  }
+  const registered: LayoutFocusView[] = [];
+  Object.values(state.mountedEditors).forEach((mounted) => {
+    if (!mounted.isDestroyed) registered.push(mounted.view);
+  });
+  return layoutFocusPermission({ eligible: true, target: editor.view, registered, intent });
 }
 
 function pickDistinctTabId(tabIds: string[], excludedId: string, preferredId?: string | null) {
@@ -492,8 +547,21 @@ export default function App() {
       ? `${secondaryEditorKeyCandidate}:secondary`
       : secondaryEditorKeyCandidate;
   const focusedEditorKey = focusedPane === "secondary" ? secondaryEditorKey : primaryEditorKey;
+  // Focus, commands (App shortcuts and the toolbar) and focus restoration use
+  // only this strict editor.
   const focusedEditor = focusedEditorKey ? (mountedEditors[focusedEditorKey] ?? null) : null;
-  const cursor = (focusedEditorKey ? editorCursors[focusedEditorKey] : undefined) ?? DEFAULT_PANE_CURSOR;
+  // When the focused pane's note has just gone, one commit has no focused key
+  // until pane normalization points it at the editor that stayed. The status
+  // bar shows that editor's cursor meanwhile. Display only: the toolbar gets
+  // the strict editor, because it also runs commands and restores focus.
+  const remainingPaneEditorKey = focusedPane === "secondary" ? primaryEditorKey : secondaryEditorKey;
+  const remainingPaneEditor = remainingPaneEditorKey ? mountedEditors[remainingPaneEditorKey] : undefined;
+  const displayEditorKey = focusedEditorKey ?? (
+    remainingPaneEditor && !remainingPaneEditor.isDestroyed && remainingPaneEditor.view.dom.isConnected
+      ? remainingPaneEditorKey
+      : null
+  );
+  const cursor = (displayEditorKey ? editorCursors[displayEditorKey] : undefined) ?? DEFAULT_PANE_CURSOR;
 
   const getTabById = useCallback((tabId: string) => {
     return useNoteStore.getState().notesById[tabId] ?? null;
@@ -1490,11 +1558,12 @@ export default function App() {
   }, [activeTabId, focusedPane, isSplit, openTabIds, primaryTabId, secondaryTabId]);
 
   useEffect(() => {
-    if (!focusedTabId || focusedTabId === activeTabId) {
+    // Before pane normalization a pane can still name a tab that was closed.
+    if (!focusedTabId || focusedTabId === activeTabId || !openTabIds.includes(focusedTabId)) {
       return;
     }
     setActiveTab(focusedTabId);
-  }, [activeTabId, focusedTabId, setActiveTab]);
+  }, [activeTabId, focusedTabId, openTabIds, setActiveTab]);
 
   useEffect(() => {
     const noteApi = hwanNote.note;
@@ -1569,18 +1638,185 @@ export default function App() {
     }
   }, [selectedTag, tags]);
 
+  // ---- Note navigation intent (focus after a split-layout change) ----
+  // A navigation the user starts (tab, drop, unsplit, close, sidebar, tab
+  // shortcuts) may move focus from the control it started on into the editor
+  // it shows. The intent carries that permission to the first layout commit
+  // that shows the result, once. One slot: the newest navigation wins, and
+  // async work only changes its own intent object. No timers: the operation
+  // and the user's own focus moves end it.
+  const navigationIntentRef = useRef<NavigationIntent | null>(null);
+  const stopWatchingNavigationRef = useRef<(() => void) | null>(null);
+  // True while App itself focuses an editor for a layout change: that focus is
+  // not the user moving away from a pending navigation.
+  const applyingLayoutFocusRef = useRef(false);
+  // The tabs the panes showed at the last commit (the secondary only while split).
+  const shownPaneTabIdsRef = useRef<Array<string | null>>([]);
+  const activeViewRef = useRef(activeView);
+  activeViewRef.current = activeView;
+
+  /** Ends `intent` if it is still the pending one. A dropped intent never comes back. */
+  const dropNavigationIntent = useCallback((intent: NavigationIntent | null) => {
+    if (!intent || navigationIntentRef.current !== intent) {
+      return;
+    }
+    navigationIntentRef.current = null;
+    stopWatchingNavigationRef.current?.();
+    stopWatchingNavigationRef.current = null;
+  }, []);
+
+  /**
+   * Starts a note navigation, first thing in its handler. Any navigation, even
+   * one that turns out to change nothing, ends the older intent and a waiting
+   * focus restore of the document. Returns the new intent, not applied yet:
+   * the handler applies it right before its state change, or drops it.
+   */
+  const beginNavigation = useCallback((targetOrOperation: NavigationTarget): NavigationIntent | null => {
+    cancelEditorFocusRequest(document);
+    dropNavigationIntent(navigationIntentRef.current);
+    // From the calendar the notes workspace mounts anew and its autofocus decides.
+    if (activeViewRef.current !== "notes") {
+      return null;
+    }
+
+    const intent: NavigationIntent = {
+      sourceElement: document.activeElement,
+      targetOrOperation,
+      applied: false
+    };
+    // The click or key that started this navigation is not a later move.
+    const originEvent = window.event;
+    // Focus that moves anywhere but the control the navigation started on ends
+    // it, and so does pressing an editor's area: that picks the editor, which
+    // can take focus a frame later.
+    const onFocusIn = (event: FocusEvent) => {
+      if (applyingLayoutFocusRef.current) {
+        return;
+      }
+      if (event.target !== intent.sourceElement) {
+        dropNavigationIntent(intent);
+      }
+    };
+    const onPress = (event: Event) => {
+      if (event === originEvent) {
+        return;
+      }
+      const node = event.target as Node | null;
+      const element = node && node.nodeType === Node.ELEMENT_NODE ? (node as Element) : node?.parentElement;
+      if (element?.closest(".editor-shell")) {
+        dropNavigationIntent(intent);
+      }
+    };
+    document.addEventListener("focusin", onFocusIn, true);
+    document.addEventListener("pointerdown", onPress, true);
+    document.addEventListener("mousedown", onPress, true);
+    navigationIntentRef.current = intent;
+    stopWatchingNavigationRef.current = () => {
+      document.removeEventListener("focusin", onFocusIn, true);
+      document.removeEventListener("pointerdown", onPress, true);
+      document.removeEventListener("mousedown", onPress, true);
+    };
+    return intent;
+  }, [dropNavigationIntent]);
+
+  /**
+   * Marks `intent` applied, right before its state change, if it is still the
+   * pending one. `targetOrOperation` replaces the target when the handler
+   * worked it out only after the navigation started.
+   */
+  const markNavigationApplied = useCallback((intent: NavigationIntent | null, targetOrOperation?: NavigationTarget) => {
+    if (intent && navigationIntentRef.current === intent) {
+      if (targetOrOperation) {
+        intent.targetOrOperation = targetOrOperation;
+      }
+      intent.applied = true;
+    }
+  }, []);
+
+  /**
+   * Runs a close navigation. Its intent is applied right before the first tab
+   * actually closes, not while saves or the save prompt are awaited. When the
+   * close is cancelled, fails, or takes away no tab a pane showed, no layout
+   * change will carry the intent, so it ends here. Otherwise the commit that
+   * shows the result uses it.
+   */
+  const runCloseNavigation = useCallback(async (
+    intent: NavigationIntent | null,
+    run: (beforeClose: (tabId: string) => void) => Promise<boolean>
+  ) => {
+    const shownTabsClosing: string[] = [];
+    try {
+      return await run((tabId) => {
+        if (shownPaneTabIdsRef.current.includes(tabId)) {
+          shownTabsClosing.push(tabId);
+        }
+        markNavigationApplied(intent);
+      });
+    } finally {
+      // The store reopens the last library note instead of leaving no tab.
+      const { openTabIds: tabsStillOpen } = useNoteStore.getState();
+      if (!shownTabsClosing.some((tabId) => !tabsStillOpen.includes(tabId))) {
+        dropNavigationIntent(intent);
+      }
+    }
+  }, [dropNavigationIntent, markNavigationApplied]);
+
+  useEffect(() => () => {
+    dropNavigationIntent(navigationIntentRef.current);
+  }, [dropNavigationIntent]);
+
   const handleSelectTabInFocusedPane = useCallback((tabId: string) => {
+    const intent = beginNavigation({ kind: "target", tabId });
+    const paneTabId = focusedPane === "secondary" && isSplit ? secondaryTabId : primaryTabId;
+    if (paneTabId === tabId) {
+      // Already shown in the focused pane: nothing will change.
+      dropNavigationIntent(intent);
+    } else {
+      markNavigationApplied(intent);
+    }
     flushAutoSaveBeforeFocusChange(focusedTabId);
     setPaneTab(focusedPane, tabId);
     setActiveTab(tabId);
-  }, [flushAutoSaveBeforeFocusChange, focusedPane, focusedTabId, setActiveTab, setPaneTab]);
+  }, [
+    beginNavigation,
+    dropNavigationIntent,
+    flushAutoSaveBeforeFocusChange,
+    focusedPane,
+    focusedTabId,
+    isSplit,
+    markNavigationApplied,
+    primaryTabId,
+    secondaryTabId,
+    setActiveTab,
+    setPaneTab
+  ]);
 
   const handleSelectNoteInFocusedPane = useCallback((tabId: string) => {
+    const intent = beginNavigation({ kind: "target", tabId });
+    const paneTabId = focusedPane === "secondary" && isSplit ? secondaryTabId : primaryTabId;
+    if (paneTabId === tabId) {
+      dropNavigationIntent(intent);
+    } else {
+      markNavigationApplied(intent);
+    }
     flushAutoSaveBeforeFocusChange(focusedTabId);
     openNote(tabId);
     setPaneTab(focusedPane, tabId);
     setActiveTab(tabId);
-  }, [flushAutoSaveBeforeFocusChange, focusedPane, focusedTabId, openNote, setActiveTab, setPaneTab]);
+  }, [
+    beginNavigation,
+    dropNavigationIntent,
+    flushAutoSaveBeforeFocusChange,
+    focusedPane,
+    focusedTabId,
+    isSplit,
+    markNavigationApplied,
+    openNote,
+    primaryTabId,
+    secondaryTabId,
+    setActiveTab,
+    setPaneTab
+  ]);
 
   const handleCreateTabInFocusedPane = useCallback((targetFolderPath?: string | null) => {
     flushAutoSaveBeforeFocusChange(focusedTabId);
@@ -1660,22 +1896,38 @@ export default function App() {
   }, []);
 
   const handleDropTabOutside = useCallback((tabId: string, clientX: number, clientY: number) => {
+    const intent = beginNavigation({ kind: "target", tabId });
     flushAutoSaveBeforeFocusChange(focusedTabId);
     setSplitDropTarget(null);
     if (openTabIds.length <= 1) {
+      dropNavigationIntent(intent);
       return;
     }
 
     const targetPane = resolveWorkspaceDropTarget(clientX, clientY);
     if (!targetPane) {
+      dropNavigationIntent(intent);
       return;
     }
 
     const fallbackTabId = pickDistinctTabId(openTabIds, tabId, targetPane === "primary" ? secondaryTabId : primaryTabId);
     if (!fallbackTabId) {
+      dropNavigationIntent(intent);
       return;
     }
 
+    const [nextPrimaryTabId, nextSecondaryTabId] = targetPane === "primary" ? [tabId, fallbackTabId] : [fallbackTabId, tabId];
+    if (
+      isSplit &&
+      focusedPane === targetPane &&
+      primaryTabId === nextPrimaryTabId &&
+      secondaryTabId === nextSecondaryTabId
+    ) {
+      // Dropped where it already is: nothing will change.
+      dropNavigationIntent(intent);
+    } else {
+      markNavigationApplied(intent);
+    }
     setIsSplit(true);
     setFocusedPane(targetPane);
     if (targetPane === "primary") {
@@ -1686,10 +1938,25 @@ export default function App() {
       setPrimaryTabId(fallbackTabId);
     }
     setActiveTab(tabId);
-  }, [flushAutoSaveBeforeFocusChange, focusedTabId, openTabIds, primaryTabId, resolveWorkspaceDropTarget, secondaryTabId, setActiveTab]);
+  }, [
+    beginNavigation,
+    dropNavigationIntent,
+    flushAutoSaveBeforeFocusChange,
+    focusedPane,
+    focusedTabId,
+    isSplit,
+    markNavigationApplied,
+    openTabIds,
+    primaryTabId,
+    resolveWorkspaceDropTarget,
+    secondaryTabId,
+    setActiveTab
+  ]);
 
   const handleUnsplit = useCallback((targetTabId: string) => {
+    const intent = beginNavigation({ kind: "target", tabId: targetTabId });
     if (!isSplit) {
+      dropNavigationIntent(intent);
       return;
     }
 
@@ -1702,9 +1969,12 @@ export default function App() {
       null;
 
     if (!nextPrimaryTabId) {
+      dropNavigationIntent(intent);
       return;
     }
 
+    // Ending the split always changes the layout; the tab that stays is the target.
+    markNavigationApplied(intent, { kind: "target", tabId: nextPrimaryTabId });
     flushAutoSaveBeforeFocusChange(focusedTabId);
     setSplitDropTarget(null);
     setPrimaryTabId(nextPrimaryTabId);
@@ -1716,9 +1986,12 @@ export default function App() {
     }
   }, [
     activeTabId,
+    beginNavigation,
+    dropNavigationIntent,
     flushAutoSaveBeforeFocusChange,
     focusedTabId,
     isSplit,
+    markNavigationApplied,
     openTabIds,
     primaryTabId,
     secondaryTabId,
@@ -1727,21 +2000,39 @@ export default function App() {
 
   const handleCycleTabInFocusedPane = useCallback((direction: 1 | -1) => {
     const currentTabId = focusedPane === "secondary" && isSplit ? secondaryTabId : primaryTabId;
+    // The key asks to navigate even when there is no other tab: an older focus
+    // restore ends either way. The target is known below.
+    const intent = beginNavigation({ kind: "target", tabId: currentTabId ?? "" });
     if (!currentTabId || openTabIds.length <= 1) {
+      dropNavigationIntent(intent);
       return;
     }
 
     const currentIndex = openTabIds.findIndex((id) => id === currentTabId);
     if (currentIndex === -1) {
+      dropNavigationIntent(intent);
       return;
     }
 
     const nextIndex = (currentIndex + direction + openTabIds.length) % openTabIds.length;
     const nextTabId = openTabIds[nextIndex];
+    markNavigationApplied(intent, { kind: "target", tabId: nextTabId });
     flushAutoSaveBeforeFocusChange(currentTabId);
     setPaneTab(focusedPane, nextTabId);
     setActiveTab(nextTabId);
-  }, [flushAutoSaveBeforeFocusChange, focusedPane, isSplit, openTabIds, primaryTabId, secondaryTabId, setActiveTab, setPaneTab]);
+  }, [
+    beginNavigation,
+    dropNavigationIntent,
+    flushAutoSaveBeforeFocusChange,
+    focusedPane,
+    isSplit,
+    markNavigationApplied,
+    openTabIds,
+    primaryTabId,
+    secondaryTabId,
+    setActiveTab,
+    setPaneTab
+  ]);
 
   const handleSplitDividerPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     if (!isSplit || !editorWorkspaceRef.current) {
@@ -1984,6 +2275,7 @@ export default function App() {
       if (options.closeResolvedTabs) {
         const latestTab = getTabById(tabId);
         if (latestTab) {
+          options.beforeClose?.(tabId);
           closeTab(tabId);
         }
       }
@@ -2058,22 +2350,34 @@ export default function App() {
   }, [armAutoSaveForTab, clearAutoSaveTimer]);
 
   const handleRequestCloseTab = useCallback(async (tabId: string) => {
-    return runGuardedFlow(() => resolveDirtyTabs([tabId], { closeResolvedTabs: true }));
-  }, [resolveDirtyTabs, runGuardedFlow]);
+    const intent = beginNavigation({ kind: "close", tabIds: [tabId] });
+    return runCloseNavigation(intent, (beforeClose) =>
+      runGuardedFlow(() => resolveDirtyTabs([tabId], { closeResolvedTabs: true, beforeClose }))
+    );
+  }, [beginNavigation, resolveDirtyTabs, runCloseNavigation, runGuardedFlow]);
 
   const handleRequestCloseOtherTabs = useCallback(async (tabId: string) => {
-    return runGuardedFlow(async () => {
+    // One intent for the whole operation, never one per closed tab. The flow
+    // below reads the same tabs in this task.
+    const startState = useNoteStore.getState();
+    const intent = beginNavigation({
+      kind: "close",
+      tabIds: startState.openTabIds.filter(
+        (openId) => openId !== tabId && startState.notesById[openId]?.isPinned !== true
+      )
+    });
+    return runCloseNavigation(intent, (beforeClose) => runGuardedFlow(async () => {
       const state = useNoteStore.getState();
       const closableIds = state.openTabIds.filter(
         (openId) => openId !== tabId && state.notesById[openId]?.isPinned !== true
       );
-      const didResolve = await resolveDirtyTabs(closableIds, { closeResolvedTabs: true });
+      const didResolve = await resolveDirtyTabs(closableIds, { closeResolvedTabs: true, beforeClose });
       if (didResolve && getTabById(tabId)) {
         setActiveTab(tabId);
       }
       return didResolve;
-    });
-  }, [getTabById, resolveDirtyTabs, runGuardedFlow, setActiveTab]);
+    }));
+  }, [beginNavigation, getTabById, resolveDirtyTabs, runCloseNavigation, runGuardedFlow, setActiveTab]);
 
   const notifyCalendarSaveBlocked = useCallback(async () => {
     const { backupPath, loadError, loadState, sourcePath } = useCalendarStore.getState();
@@ -2971,29 +3275,84 @@ export default function App() {
     secondary: string | null;
     focused: string | null;
   } | null>(null);
+  const layoutFocusStateRef = useRef<LayoutFocusState>({
+    focusedEditorKey: null,
+    mountedEditors: {},
+    settingsOpen: false,
+    activeView: "notes",
+    workspace: null
+  });
+  // A layout focus that waits for an inactive window to become active again.
+  const layoutFocusRequestRef = useRef<EditorFocusRequest | null>(null);
+  const cancelLayoutFocusRequest = () => {
+    layoutFocusRequestRef.current?.cancel();
+    layoutFocusRequestRef.current = null;
+  };
+  useEffect(() => () => {
+    layoutFocusRequestRef.current?.cancel();
+    layoutFocusRequestRef.current = null;
+  }, []);
   useLayoutEffect(() => {
+    layoutFocusStateRef.current = {
+      focusedEditorKey,
+      mountedEditors,
+      settingsOpen,
+      activeView,
+      workspace: editorWorkspaceRef.current
+    };
+    if (settingsOpen || activeView !== "notes") {
+      cancelLayoutFocusRequest();
+    }
     const previous = previousEditorLayoutRef.current;
     previousEditorLayoutRef.current = {
       primary: primaryEditorKey,
       secondary: secondaryEditorKey,
       focused: focusedEditorKey
     };
+    const previousPaneTabIds = shownPaneTabIdsRef.current;
+    shownPaneTabIdsRef.current = [primaryTabId, isSplit ? secondaryTabId : null];
     // The focused key is part of the layout: when the focused pane's note goes
     // away, the first commit has no focused editor and only the later pane
     // normalization points focus at the editor that stayed.
-    if (
-      !previous ||
-      (previous.primary === primaryEditorKey &&
-        previous.secondary === secondaryEditorKey &&
-        previous.focused === focusedEditorKey)
-    ) {
-      return;
+    const layoutChanged = previous !== null && (
+      previous.primary !== primaryEditorKey ||
+      previous.secondary !== secondaryEditorKey ||
+      previous.focused !== focusedEditorKey
+    );
+
+    // The navigation this commit shows is used once, here; a pending one that
+    // no longer applies ends. Either way it leaves its slot before any focus
+    // below.
+    let intent: NavigationIntent | null = null;
+    const pendingIntent = navigationIntentRef.current;
+    if (pendingIntent) {
+      const focusedPaneTab = focusedPane === "secondary" ? secondaryTab : primaryTab;
+      const decision = decideNavigationIntent(pendingIntent, {
+        layoutChanged,
+        notesVisible: activeView === "notes" && !settingsOpen,
+        openTabIds,
+        focusedTabId: focusedEditorKey ? (focusedPaneTab?.id ?? null) : null,
+        previousPaneTabIds
+      });
+      if (decision !== "keep") {
+        dropNavigationIntent(pendingIntent);
+      }
+      if (decision === "consume") {
+        intent = pendingIntent;
+      }
     }
 
+    if (!layoutChanged) {
+      return;
+    }
+    // A newer layout decides focus again; an older request must not run later.
+    cancelLayoutFocusRequest();
+
     // A new editor autofocuses when it mounts in the focused pane. An editor
-    // that was already visible keeps its selection instead; focus it when the
-    // change left focus outside a text field (on the page, a closed or clicked
-    // tab, or the editor that moved to the other pane).
+    // that was already visible keeps its selection instead; it takes focus only
+    // as layoutFocusPolicy.ts allows: never from a text field, a dialog or
+    // another editor's composition, and from any other control only for the
+    // navigation started there.
     if (
       settingsOpen ||
       !focusedEditorKey ||
@@ -3005,18 +3364,52 @@ export default function App() {
     if (!editor || editor.isDestroyed) {
       return;
     }
-    const activeElement = document.activeElement;
-    if (activeElement && editor.view.dom.contains(activeElement)) {
-      return;
-    }
-    const isInOtherEditor = Boolean(activeElement?.closest(".note-editor"));
+
+    // Moving a pane moves its DOM. React then restores the selection it saved
+    // as character offsets, which lands elsewhere inside tables and other
+    // nested nodes, and ProseMirror would adopt that on its next selectionchange.
+    // Its own state is still right here, so write it back to the DOM now. Only
+    // for the editor root that already has focus, in an active window and
+    // outside composition. No transaction or scrolling.
+    const { view } = editor;
+    const previousSlot: PaneId = focusedEditorKey === previous.primary ? "primary" : "secondary";
+    const slot: PaneId = focusedEditorKey === primaryEditorKey ? "primary" : "secondary";
+    const ownerDocument = view.dom.ownerDocument;
     if (
-      !isInOtherEditor &&
-      activeElement?.closest("input, textarea, select, [contenteditable]:not([contenteditable='false'])")
+      slot !== previousSlot &&
+      activeView === "notes" &&
+      view.dom.isConnected &&
+      isDocumentActive(ownerDocument) &&
+      ownerDocument.activeElement === view.dom &&
+      view.hasFocus() &&
+      !view.composing
     ) {
+      applyingLayoutFocusRef.current = true;
+      try {
+        view.focus();
+      } finally {
+        applyingLayoutFocusRef.current = false;
+      }
       return;
     }
-    editor.view.focus();
+
+    // Focus now when the window is active; otherwise this waits for the window
+    // and checks the then-current focused editor, settings, view and focus
+    // again, with the same navigation.
+    layoutFocusRequestRef.current = requestEditorFocus(editor, {
+      start: "now",
+      permission: () => {
+        const permission = currentLayoutFocusPermission(editor, layoutFocusStateRef.current, intent);
+        // The module focuses right after an "allow" in an active window, in
+        // the same callback; onFocused follows it.
+        applyingLayoutFocusRef.current = permission === "allow" && isDocumentActive(ownerDocument);
+        return permission;
+      },
+      onFocused: () => {
+        applyingLayoutFocusRef.current = false;
+      }
+    });
+    applyingLayoutFocusRef.current = false;
   });
 
   return (
