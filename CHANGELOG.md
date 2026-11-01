@@ -18,6 +18,12 @@ This project follows [Semantic Versioning](https://semver.org/) and commit messa
   a selection of table cells or a horizontal line. Previously the cursor could
   jump to the start of the note, and the next text you typed went there. This
   resolves the known limitation noted for 0.9.21.
+- When a background reload or a similar change rearranges the split view, the
+  editor that stays on screen no longer takes keyboard focus from a sidebar,
+  toolbar, or title bar control, a tab, a menu, or a dialog. Text fields already
+  kept focus. A note you pick yourself with a tab, the sidebar, or a tab
+  shortcut, including by dragging, closing, or unsplitting tabs, still gets
+  focus as before.
 
 ## [0.9.21] - 2026-11-01
 
