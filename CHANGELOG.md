@@ -7,6 +7,26 @@ This project follows [Semantic Versioning](https://semver.org/) and commit messa
 
 ## [Unreleased]
 
+### Fixed
+
+- Keep the editors that stay on screen when the split view changes. Opening a
+  second note beside the current one, closing or unsplitting one side, a reload
+  that removes the other note, or a note moving to the other pane no longer
+  recreates those editors. Their cursor position, selection, and undo history
+  are kept, and the editor you were typing in stays focused unless a newly
+  opened note takes focus, as before. When the split ends because the side that
+  had focus was closed, unsplit, or removed by a reload, the remaining editor
+  takes focus at its previous cursor position instead of the end. Known
+  limitation: when the two panes swap notes, a cursor inside a table cell may
+  not stay in place.
+- With three or more notes open, closing the left note (or a reload removing
+  it) while you type in the right one no longer moves focus and the active tab
+  to the note that opens in the right pane. The note you were typing in moves to
+  the left pane and keeps focus.
+- Stop re-rendering the whole window on every storage folder status check
+  (every five seconds and when the window regains focus) when nothing changed.
+  The app now updates only when the folder or its availability changes.
+
 ## [0.9.20] - 2026-10-31
 
 ### Fixed
