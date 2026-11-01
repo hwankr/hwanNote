@@ -170,7 +170,7 @@ export default function Toolbar({
 
   const toggleLinkPopup = () => {
     if (linkPopupAnchor) {
-      setLinkPopupAnchor(null);
+      closeLinkPopup();
       return;
     }
     if (!editor) return;
@@ -238,7 +238,7 @@ export default function Toolbar({
 
   const toggleTablePopup = () => {
     if (tablePopupAnchor) {
-      setTablePopupAnchor(null);
+      closeTablePopup();
       return;
     }
     const rect = tableButtonRef.current?.getBoundingClientRect();

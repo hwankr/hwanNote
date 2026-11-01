@@ -2,7 +2,16 @@ import type { JSONContent } from "@tiptap/core";
 import { Editor as TiptapEditor } from "@tiptap/react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { confirm as confirmDialog, message } from "@tauri-apps/plugin-dialog";
-import { type PointerEvent as ReactPointerEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState
+} from "react";
 import {
   hwanNote,
   type AutoSaveDirInfo,
@@ -12,7 +21,7 @@ import {
   type NoteLoadResult,
   type NoteStorageSource
 } from "./lib/tauriApi";
-import Editor, { restoreEditorFocus } from "./components/Editor";
+import Editor, { collectPlainText, restoreEditorFocus } from "./components/Editor";
 import SettingsPanel, { type ThemeMode } from "./components/SettingsPanel";
 import Sidebar, { type AppView, type SidebarTag } from "./components/Sidebar";
 import CalendarPage from "./components/calendar/CalendarPage";
@@ -41,6 +50,7 @@ import { normalizeFolderPath } from "./lib/folderPaths";
 import { KeyedDebouncer, KeyedSerialTaskQueue } from "./lib/keyedTasks";
 import { mergeRecoveredNoteTabs } from "./lib/noteRecovery";
 import { mergeReloadedNoteTabs } from "./lib/noteReload";
+import { isSameAutoSaveDirInfo } from "./lib/autoSaveDirInfo";
 import { canRunNoteLibraryMutation } from "./lib/noteMutationGuard";
 import { installWindowsImeRecovery } from "./lib/windowsImeRecovery";
 import { isImeComposing } from "./lib/ime";
@@ -86,9 +96,7 @@ const RECOVERY_TITLE_TOKEN = "__HWAN_NOTE_RECOVERY_TITLE__";
 
 type SortMode = "updated" | "title" | "created";
 type PaneId = "primary" | "secondary";
-type PaneEditors = Record<PaneId, TiptapEditor | null>;
 type PaneCursor = { line: number; column: number; chars: number };
-type PaneCursors = Record<PaneId, PaneCursor>;
 type CloseDecision = "save" | "discard" | "cancel";
 
 interface ResolveDirtyTabsOptions {
@@ -237,6 +245,22 @@ function formatRecoveredNoteTitle(template: string, title: string) {
   return `${prefix}${title.trim().slice(0, titleLength)}${suffix}`.trim().slice(0, 50);
 }
 
+const DEFAULT_PANE_CURSOR: PaneCursor = { line: 1, column: 1, chars: 0 };
+
+// Same line/column/chars as collectCursor in components/Editor.tsx, read from an
+// editor that has not reported a selection change yet.
+function readEditorCursor(editor: TiptapEditor): PaneCursor {
+  const textBeforeCursor = editor.state.doc.textBetween(0, editor.state.selection.from, "\n", (node) =>
+    node.type.name === "hardBreak" ? "\n" : "\0"
+  );
+  const lines = textBeforeCursor.split("\n");
+  return {
+    line: lines.length,
+    column: (lines[lines.length - 1] ?? "").length + 1,
+    chars: collectPlainText(editor).length
+  };
+}
+
 function pickDistinctTabId(tabIds: string[], excludedId: string, preferredId?: string | null) {
   if (preferredId && preferredId !== excludedId && tabIds.includes(preferredId)) {
     return preferredId;
@@ -329,12 +353,11 @@ export default function App() {
   const [primaryTabId, setPrimaryTabId] = useState<string | null>(null);
   const [secondaryTabId, setSecondaryTabId] = useState<string | null>(null);
   const [focusedPane, setFocusedPane] = useState<PaneId>("primary");
-  const [paneEditors, setPaneEditors] = useState<PaneEditors>({ primary: null, secondary: null });
+  // Mounted editors and their cursors are keyed by editor identity, not pane,
+  // so an editor that changes pane keeps reporting to the right place.
+  const [mountedEditors, setMountedEditors] = useState<Record<string, TiptapEditor>>({});
   const [editorKeys, setEditorKeys] = useState<Record<string, string>>({});
-  const [paneCursors, setPaneCursors] = useState<PaneCursors>({
-    primary: { line: 1, column: 1, chars: 0 },
-    secondary: { line: 1, column: 1, chars: 0 }
-  });
+  const [editorCursors, setEditorCursors] = useState<Record<string, PaneCursor>>({});
   const [isMaximized, setIsMaximized] = useState(false);
   const exitUiLockedRef = useRef(false);
   const storageTransitionRef = useRef(false);
@@ -459,8 +482,18 @@ export default function App() {
   const primaryTab = primaryTabId ? (tabById.get(primaryTabId) ?? null) : null;
   const secondaryTab = secondaryTabId ? (tabById.get(secondaryTabId) ?? null) : null;
   const focusedTab = focusedTabId ? (tabById.get(focusedTabId) ?? null) : null;
-  const focusedEditor = focusedPane === "secondary" ? paneEditors.secondary : paneEditors.primary;
-  const cursor = paneCursors[focusedPane];
+  // An editor's React identity follows the document it shows (its editor key),
+  // so it survives split, unsplit and pane changes without being recreated.
+  const primaryEditorKey = primaryTab ? (editorKeys[primaryTab.id] ?? primaryTab.id) : null;
+  const secondaryEditorKeyCandidate =
+    isSplit && secondaryTab ? (editorKeys[secondaryTab.id] ?? secondaryTab.id) : null;
+  const secondaryEditorKey =
+    secondaryEditorKeyCandidate !== null && secondaryEditorKeyCandidate === primaryEditorKey
+      ? `${secondaryEditorKeyCandidate}:secondary`
+      : secondaryEditorKeyCandidate;
+  const focusedEditorKey = focusedPane === "secondary" ? secondaryEditorKey : primaryEditorKey;
+  const focusedEditor = focusedEditorKey ? (mountedEditors[focusedEditorKey] ?? null) : null;
+  const cursor = (focusedEditorKey ? editorCursors[focusedEditorKey] : undefined) ?? DEFAULT_PANE_CURSOR;
 
   const getTabById = useCallback((tabId: string) => {
     return useNoteStore.getState().notesById[tabId] ?? null;
@@ -655,25 +688,46 @@ export default function App() {
     [activeTabId, flushAutoSaveBeforeFocusChange, focusedPane, focusedTabId, isSplit, primaryTabId, secondaryTabId, setActiveTab]
   );
 
-  const handleCursorChange = useCallback((pane: PaneId, line: number, column: number, chars: number) => {
-    setPaneCursors((prev) => ({
+  const handleCursorChange = useCallback((editorKey: string, line: number, column: number, chars: number) => {
+    setEditorCursors((prev) => ({
       ...prev,
-      [pane]: { line, column, chars }
+      [editorKey]: { line, column, chars }
     }));
   }, []);
 
-  const handleEditorChange = useCallback((pane: PaneId, content: JSONContent, plainText: string) => {
+  const registerEditor = useCallback((editorKey: string, editor: TiptapEditor | null) => {
+    setMountedEditors((prev) => {
+      if (editor) {
+        return prev[editorKey] === editor ? prev : { ...prev, [editorKey]: editor };
+      }
+      if (!(editorKey in prev)) {
+        return prev;
+      }
+      const next = { ...prev };
+      delete next[editorKey];
+      return next;
+    });
+    setEditorCursors((prev) => {
+      if (editor) {
+        return { ...prev, [editorKey]: readEditorCursor(editor) };
+      }
+      if (!(editorKey in prev)) {
+        return prev;
+      }
+      const next = { ...prev };
+      delete next[editorKey];
+      return next;
+    });
+  }, []);
+
+  const handleEditorChange = useCallback((tabId: string, content: JSONContent, plainText: string) => {
     if (exitUiLockedRef.current) {
       return;
     }
-    const targetTabId = pane === "secondary" && isSplit ? secondaryTabId : primaryTabId;
-    if (!targetTabId) {
-      return;
-    }
 
-    updateTabContent(targetTabId, content, plainText);
-    armAutoSaveForTab(targetTabId);
-  }, [armAutoSaveForTab, isSplit, primaryTabId, secondaryTabId, updateTabContent]);
+    updateTabContent(tabId, content, plainText);
+    armAutoSaveForTab(tabId);
+  }, [armAutoSaveForTab, updateTabContent]);
 
   useEffect(() => {
     return () => {
@@ -694,7 +748,25 @@ export default function App() {
   const [editorLineHeight, setEditorLineHeight] = useState(DEFAULT_EDITOR_LINE_HEIGHT);
   const [editorSpellcheck, setEditorSpellcheck] = useState(true);
   const [autoSaveDirInfo, setAutoSaveDirInfo] = useState<AutoSaveDirInfo | null>(null);
-  const [autoSaveDirRecoveryPending, setAutoSaveDirRecoveryPending] = useState(false);
+  const autoSaveDirInfoRef = useRef<AutoSaveDirInfo | null>(null);
+  // Status polls usually return the same report; skip the state update (and the
+  // whole-app render) unless something in it changed.
+  const applyAutoSaveDirInfo = useCallback((next: AutoSaveDirInfo) => {
+    if (isSameAutoSaveDirInfo(autoSaveDirInfoRef.current, next)) {
+      return;
+    }
+    autoSaveDirInfoRef.current = next;
+    setAutoSaveDirInfo(next);
+  }, []);
+  const [autoSaveDirRecoveryPending, setAutoSaveDirRecoveryPendingState] = useState(false);
+  const autoSaveDirRecoveryPendingRef = useRef(false);
+  const setAutoSaveDirRecoveryPending = useCallback((pending: boolean) => {
+    if (autoSaveDirRecoveryPendingRef.current === pending) {
+      return;
+    }
+    autoSaveDirRecoveryPendingRef.current = pending;
+    setAutoSaveDirRecoveryPendingState(pending);
+  }, []);
   const [shortcuts, setShortcuts] = useState<ShortcutMap>(() => createDefaultShortcuts());
   const [tabSize, setTabSize] = useState(DEFAULT_TAB_SIZE);
   const [cloudSyncProvider, setCloudSyncProvider] = useState<string | null>(null);
@@ -1113,9 +1185,9 @@ export default function App() {
     }
 
     const result = await settingsApi.getAutoSaveDir();
-    setAutoSaveDirInfo(result);
+    applyAutoSaveDirInfo(result);
     return result;
-  }, []);
+  }, [applyAutoSaveDirInfo]);
 
   const refreshCloudSyncState = useCallback(async () => {
     const [status, providers] = await Promise.all([
@@ -1399,8 +1471,21 @@ export default function App() {
     if (nextIsSplit !== isSplit) {
       setIsSplit(nextIsSplit);
     }
-    if (!nextIsSplit && focusedPane !== "primary") {
-      setFocusedPane("primary");
+
+    // When the other pane's note goes away and the focused pane's note moves
+    // into that pane, focus follows the note the user was in. The note that
+    // fills the freed pane opens without taking focus.
+    const otherPane: PaneId = focusedPane === "primary" ? "secondary" : "primary";
+    const focusedPaneTabId = focusedPane === "primary" ? primaryTabId : secondaryTabId;
+    const otherPaneTabId = focusedPane === "primary" ? secondaryTabId : primaryTabId;
+    const nextOtherPaneTabId = otherPane === "primary" ? nextPrimary : nextSecondary;
+    const nextFocusedPane: PaneId = !nextIsSplit
+      ? "primary"
+      : focusedPaneTabId !== null && focusedPaneTabId !== otherPaneTabId && focusedPaneTabId === nextOtherPaneTabId
+        ? otherPane
+        : focusedPane;
+    if (nextFocusedPane !== focusedPane) {
+      setFocusedPane(nextFocusedPane);
     }
   }, [activeTabId, focusedPane, isSplit, openTabIds, primaryTabId, secondaryTabId]);
 
@@ -2276,11 +2361,11 @@ export default function App() {
 
     await runStorageTransition(async () => {
       const result = await settingsApi.setAutoSaveDir(selected);
-      setAutoSaveDirInfo(result);
+      applyAutoSaveDirInfo(result);
       setAutoSaveDirRecoveryPending(false);
       await reloadCurrentStorage();
     });
-  }, [reloadCurrentStorage, runStorageTransition]);
+  }, [applyAutoSaveDirInfo, reloadCurrentStorage, runStorageTransition, setAutoSaveDirRecoveryPending]);
 
   const handleResetAutoSaveDir = useCallback(async () => {
     const settingsApi = hwanNote.settings;
@@ -2288,11 +2373,11 @@ export default function App() {
 
     await runStorageTransition(async () => {
       const result = await settingsApi.setAutoSaveDir(null);
-      setAutoSaveDirInfo(result);
+      applyAutoSaveDirInfo(result);
       setAutoSaveDirRecoveryPending(false);
       await reloadCurrentStorage();
     });
-  }, [reloadCurrentStorage, runStorageTransition]);
+  }, [applyAutoSaveDirInfo, reloadCurrentStorage, runStorageTransition, setAutoSaveDirRecoveryPending]);
 
   const handleRetryAutoSaveDir = useCallback(async () => {
     const wasUnavailable =
@@ -2313,7 +2398,7 @@ export default function App() {
     } catch (error) {
       console.error("Failed to retry the auto-save directory:", error);
     }
-  }, [autoSaveDirInfo?.status, autoSaveDirRecoveryPending, runStorageTransition, refreshCloudSyncState, refreshLocalAutoSaveDir, reloadCurrentStorage]);
+  }, [autoSaveDirInfo?.status, autoSaveDirRecoveryPending, runStorageTransition, refreshCloudSyncState, refreshLocalAutoSaveDir, reloadCurrentStorage, setAutoSaveDirRecoveryPending]);
 
   const handleCloudSyncChange = useCallback(async (provider: string | null, options?: { copyLocalNotes: boolean }) => {
     await runStorageTransition(async () => {
@@ -2416,17 +2501,17 @@ export default function App() {
           return;
         }
         if (result.status === "unavailable") {
-          setAutoSaveDirInfo(result);
+          applyAutoSaveDirInfo(result);
           setAutoSaveDirRecoveryPending(false);
           return;
         }
         if (autoSaveDirInfo?.status === "unavailable") {
-          setAutoSaveDirInfo(result);
+          applyAutoSaveDirInfo(result);
           setAutoSaveDirRecoveryPending(true);
           return;
         }
         if (!autoSaveDirRecoveryPending) {
-          setAutoSaveDirInfo(result);
+          applyAutoSaveDirInfo(result);
         }
       } catch {
         // A later poll or focus event retries the read-only status check.
@@ -2454,7 +2539,7 @@ export default function App() {
       window.removeEventListener("focus", handleFocus);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [autoSaveDirInfo?.status, autoSaveDirRecoveryPending]);
+  }, [applyAutoSaveDirInfo, autoSaveDirInfo?.status, autoSaveDirRecoveryPending, setAutoSaveDirRecoveryPending]);
 
   useEffect(() => {
     void refreshCloudSyncState().catch(() => { /* ignore */ });
@@ -2843,6 +2928,97 @@ export default function App() {
   const splitDropLeftLabel = language === "ko" ? "왼쪽에 놓아 분할" : "Drop to split left";
   const splitDropRightLabel = language === "ko" ? "오른쪽에 놓아 분할" : "Drop to split right";
 
+  // Panes are keyed by editor identity. React then moves or relabels the pane
+  // around a kept editor instead of destroying it when the layout changes.
+  const showSplitPanes = primaryEditorKey !== null && secondaryEditorKey !== null;
+  const renderEditorPane = (pane: PaneId, tab: NoteTab, editorKey: string) => (
+    <section
+      key={`editor-${editorKey}`}
+      className={showSplitPanes ? `editor-pane ${focusedPane === pane ? "focused" : ""}` : "editor-pane focused"}
+      data-pane={pane}
+      style={showSplitPanes
+        ? { flexBasis: `${(pane === "primary" ? splitRatio : 1 - splitRatio) * 100}%` }
+        : undefined}
+      onMouseDown={() => focusPane(pane)}
+    >
+      <Editor
+        content={tab.content}
+        tabSize={tabSize}
+        spellcheck={editorSpellcheck}
+        autofocus={!showSplitPanes || focusedPane === pane}
+        onFocus={() => focusPane(pane)}
+        onEditorReady={(nextEditor) => registerEditor(editorKey, nextEditor)}
+        onChange={(content, plainText) => handleEditorChange(tab.id, content, plainText)}
+        onCursorChange={(line, column, chars) => handleCursorChange(editorKey, line, column, chars)}
+      />
+    </section>
+  );
+  const editorWorkspaceChildren: ReactNode[] = [];
+  if (primaryTab && primaryEditorKey !== null) {
+    editorWorkspaceChildren.push(renderEditorPane("primary", primaryTab, primaryEditorKey));
+  }
+  if (showSplitPanes) {
+    editorWorkspaceChildren.push(
+      <div key="split-divider" className="split-divider" onPointerDown={handleSplitDividerPointerDown} />
+    );
+  }
+  if (secondaryTab && secondaryEditorKey !== null) {
+    editorWorkspaceChildren.push(renderEditorPane("secondary", secondaryTab, secondaryEditorKey));
+  }
+
+  const previousEditorLayoutRef = useRef<{
+    primary: string | null;
+    secondary: string | null;
+    focused: string | null;
+  } | null>(null);
+  useLayoutEffect(() => {
+    const previous = previousEditorLayoutRef.current;
+    previousEditorLayoutRef.current = {
+      primary: primaryEditorKey,
+      secondary: secondaryEditorKey,
+      focused: focusedEditorKey
+    };
+    // The focused key is part of the layout: when the focused pane's note goes
+    // away, the first commit has no focused editor and only the later pane
+    // normalization points focus at the editor that stayed.
+    if (
+      !previous ||
+      (previous.primary === primaryEditorKey &&
+        previous.secondary === secondaryEditorKey &&
+        previous.focused === focusedEditorKey)
+    ) {
+      return;
+    }
+
+    // A new editor autofocuses when it mounts in the focused pane. An editor
+    // that was already visible keeps its selection instead; focus it when the
+    // change left focus outside a text field (on the page, a closed or clicked
+    // tab, or the editor that moved to the other pane).
+    if (
+      settingsOpen ||
+      !focusedEditorKey ||
+      (focusedEditorKey !== previous.primary && focusedEditorKey !== previous.secondary)
+    ) {
+      return;
+    }
+    const editor = mountedEditors[focusedEditorKey];
+    if (!editor || editor.isDestroyed) {
+      return;
+    }
+    const activeElement = document.activeElement;
+    if (activeElement && editor.view.dom.contains(activeElement)) {
+      return;
+    }
+    const isInOtherEditor = Boolean(activeElement?.closest(".note-editor"));
+    if (
+      !isInOtherEditor &&
+      activeElement?.closest("input, textarea, select, [contenteditable]:not([contenteditable='false'])")
+    ) {
+      return;
+    }
+    editor.view.focus();
+  });
+
   return (
     <div className="app-shell">
       <TitleBar
@@ -3106,69 +3282,7 @@ export default function App() {
 
         {activeView === "notes" ? (
           <main ref={editorWorkspaceRef} className={`editor-workspace ${isSplit ? "split" : ""}`}>
-            {isSplit && primaryTab && secondaryTab ? (
-              <>
-                <section
-                  className={`editor-pane ${focusedPane === "primary" ? "focused" : ""}`}
-                  data-pane="primary"
-                  style={{ flexBasis: `${splitRatio * 100}%` }}
-                  onMouseDown={() => focusPane("primary")}
-                >
-                  <Editor
-                    key={`primary-${editorKeys[primaryTab.id] ?? primaryTab.id}`}
-                    content={primaryTab.content}
-                    tabSize={tabSize}
-                    spellcheck={editorSpellcheck}
-                    autofocus={focusedPane === "primary"}
-                    onFocus={() => focusPane("primary")}
-                    onEditorReady={(nextEditor) => {
-                      setPaneEditors((prev) => ({ ...prev, primary: nextEditor }));
-                    }}
-                    onChange={(content, plainText) => handleEditorChange("primary", content, plainText)}
-                    onCursorChange={(line, column, chars) => handleCursorChange("primary", line, column, chars)}
-                  />
-                </section>
-
-                <div className="split-divider" onPointerDown={handleSplitDividerPointerDown} />
-
-                <section
-                  className={`editor-pane ${focusedPane === "secondary" ? "focused" : ""}`}
-                  data-pane="secondary"
-                  style={{ flexBasis: `${(1 - splitRatio) * 100}%` }}
-                  onMouseDown={() => focusPane("secondary")}
-                >
-                  <Editor
-                    key={`secondary-${editorKeys[secondaryTab.id] ?? secondaryTab.id}`}
-                    content={secondaryTab.content}
-                    tabSize={tabSize}
-                    spellcheck={editorSpellcheck}
-                    autofocus={focusedPane === "secondary"}
-                    onFocus={() => focusPane("secondary")}
-                    onEditorReady={(nextEditor) => {
-                      setPaneEditors((prev) => ({ ...prev, secondary: nextEditor }));
-                    }}
-                    onChange={(content, plainText) => handleEditorChange("secondary", content, plainText)}
-                    onCursorChange={(line, column, chars) => handleCursorChange("secondary", line, column, chars)}
-                  />
-                </section>
-              </>
-            ) : primaryTab ? (
-              <section className="editor-pane focused" data-pane="primary" onMouseDown={() => focusPane("primary")}>
-                <Editor
-                  key={`primary-${editorKeys[primaryTab.id] ?? primaryTab.id}`}
-                  content={primaryTab.content}
-                  tabSize={tabSize}
-                  spellcheck={editorSpellcheck}
-                  autofocus
-                  onFocus={() => focusPane("primary")}
-                  onEditorReady={(nextEditor) => {
-                    setPaneEditors((prev) => ({ ...prev, primary: nextEditor }));
-                  }}
-                  onChange={(content, plainText) => handleEditorChange("primary", content, plainText)}
-                  onCursorChange={(line, column, chars) => handleCursorChange("primary", line, column, chars)}
-                />
-              </section>
-            ) : null}
+            {editorWorkspaceChildren}
             {splitDropTarget ? (
               <div className="split-drop-preview" aria-hidden="true">
                 <div className={`split-drop-zone ${splitDropTarget === "primary" ? "active" : ""}`}>

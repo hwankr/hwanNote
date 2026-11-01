@@ -13,6 +13,7 @@ interface LinkBubbleProps {
   linkFrom: number;
   linkTo: number;
   onClose: () => void;
+  onEditCancel: () => void;
 }
 
 const BUBBLE_WIDTH = 320;
@@ -46,7 +47,8 @@ export default function LinkBubble({
   href,
   linkFrom,
   linkTo,
-  onClose
+  onClose,
+  onEditCancel
 }: LinkBubbleProps) {
   const { t } = useI18n();
   const bubbleRef = useRef<HTMLDivElement>(null);
@@ -68,31 +70,56 @@ export default function LinkBubble({
   }, [editing]);
 
   useEffect(() => {
-    const handleMouseDown = (e: MouseEvent) => {
-      if (bubbleRef.current && bubbleRef.current.contains(e.target as Node)) {
-        return;
+    const isInsideBubble = (target: EventTarget | null) =>
+      target instanceof Node && Boolean(bubbleRef.current?.contains(target));
+
+    const close = () => {
+      // React may render a close started by scroll after the next animation
+      // frame, where the editor checks whether focus was lost. Drop focus held
+      // inside the bubble now so it does not count as another control's focus.
+      const activeElement = document.activeElement;
+      if (activeElement instanceof HTMLElement && isInsideBubble(activeElement)) {
+        activeElement.blur();
       }
       onClose();
     };
 
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (!isImeComposing(e) && e.key === "Escape") onClose();
+    const handleMouseDown = (e: MouseEvent) => {
+      if (isInsideBubble(e.target)) {
+        return;
+      }
+      close();
     };
 
-    const close = () => onClose();
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (!isImeComposing(e) && e.key === "Escape") close();
+    };
+
+    // A URL field fires scroll when a long value scrolls inside it.
+    const handleScroll = (e: Event) => {
+      if (isInsideBubble(e.target)) {
+        return;
+      }
+      close();
+    };
 
     window.addEventListener("mousedown", handleMouseDown);
-    window.addEventListener("scroll", close, true);
+    window.addEventListener("scroll", handleScroll, true);
     window.addEventListener("resize", close);
     window.addEventListener("keydown", handleKeyDown);
 
     return () => {
       window.removeEventListener("mousedown", handleMouseDown);
-      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("scroll", handleScroll, true);
       window.removeEventListener("resize", close);
       window.removeEventListener("keydown", handleKeyDown);
     };
   }, [onClose]);
+
+  const cancelEdit = useCallback(() => {
+    setEditing(false);
+    onEditCancel();
+  }, [onEditCancel]);
 
   const openExternal = useCallback(() => {
     hwanShell.openExternal(href);
@@ -171,7 +198,7 @@ export default function LinkBubble({
           />
         </div>
         <div className="link-popup-actions">
-          <button type="button" className="link-popup-cancel" onClick={() => setEditing(false)}>
+          <button type="button" className="link-popup-cancel" onClick={cancelEdit}>
             {t("toolbar.linkCancel")}
           </button>
           <button type="button" className="link-popup-confirm" onClick={handleEditConfirm}>

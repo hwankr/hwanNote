@@ -7,6 +7,50 @@ This project follows [Semantic Versioning](https://semver.org/) and commit messa
 
 ## [Unreleased]
 
+## [0.9.21] - 2026-11-01
+
+### Fixed
+
+- Keep the editors that stay on screen when the split view changes. Opening a
+  second note beside the current one, closing or unsplitting one side, a reload
+  that removes the other note, or a note moving to the other pane no longer
+  recreates those editors. Their cursor position, selection, and undo history
+  are kept, and the editor you were typing in stays focused unless a newly
+  opened note takes focus, as before. When the split ends because the side that
+  had focus was closed, unsplit, or removed by a reload, the remaining editor
+  takes focus at its previous cursor position instead of the end. Known
+  limitation: when the two panes swap notes, a cursor inside a table cell may
+  not stay in place.
+- With three or more notes open, closing the left note (or a reload removing
+  it) while you type in the right one no longer moves focus and the active tab
+  to the note that opens in the right pane. The note you were typing in moves to
+  the left pane and keeps focus.
+- Stop re-rendering the whole window on every storage folder status check
+  (every five seconds and when the window regains focus) when nothing changed.
+  The app now updates only when the folder or its availability changes.
+- Changing the app language no longer recreates the open editors. Their cursor
+  position, selection, undo history, and focus are kept, and the placeholder of
+  an empty note switches to the new language right away.
+- Closing a link or table popup by clicking another field, button, or the other
+  split-view editor no longer pulls focus back into the editor you left.
+  Pressing Escape in a link popup still returns focus to the editor, and
+  cancelling a link edit now does too.
+- A link popup no longer closes while you type a URL that is too long for its
+  field and scrolls inside it. Scrolling outside the popup still closes it.
+- Closing the link popup by clicking the toolbar link button again now returns
+  focus to the editor. Before, keyboard focus was lost until you clicked the
+  note.
+- While the table size popup is open, an Escape press that belongs to IME
+  composition (such as Korean input) no longer closes the popup.
+- While you edit a link from the link bubble, clicking its URL or display name
+  field no longer moves focus into the note.
+
+### Validation note
+
+- Automated tests run the real TipTap editor in jsdom and cover the split view
+  changes, language changes, and popup focus handling. The fixes have not yet
+  been verified in the Windows (WebView2) app.
+
 ## [0.9.20] - 2026-10-31
 
 ### Fixed
